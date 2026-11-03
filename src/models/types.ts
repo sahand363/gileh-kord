@@ -1,3 +1,16 @@
+export const MEASUREMENT_UNITS = [
+  'کیلوگرم',
+  'گرم',
+  'لیتر',
+  'عدد',
+  'بسته',
+  'کارتن',
+  'کیسه',
+  'دستگاه'
+] as const;
+
+export type MeasurementUnit = (typeof MEASUREMENT_UNITS)[number] | string;
+
 export interface Purchase {
   id: string;
   productId: string;
@@ -5,19 +18,20 @@ export interface Purchase {
   quantity: number;
   unit: string;
   totalAmount: number;
-  currency: 'IRT'; // Iranian Toman
-  purchaseDate: string; // ISO format: YYYY-MM-DD
+  currency: 'IRT';
+  purchaseDate: string; // YYYY-MM-DD
   supplierId?: string;
   supplierName?: string;
   invoiceNumber?: string;
   notes?: string;
-  createdAt: string; // ISO 8601 string
-  updatedAt: string; // ISO 8601 string
+  createdAt: string; // ISO 8601
+  updatedAt: string; // ISO 8601
 }
 
 export interface Product {
   id: string;
   name: string;
+  normalizedName: string;
   lastUnit: string;
   lastPrice: number;
   lastPurchaseDate: string;
@@ -34,7 +48,7 @@ export interface Supplier {
 export interface ApplicationSettings {
   serverAddress: string;
   defaultUnit: string;
-  currency: string;
+  currency: 'IRT';
   lastSyncAt: string | null;
 }
 
@@ -44,4 +58,16 @@ export interface BackupData {
   purchases: Purchase[];
   products: Product[];
   settings: ApplicationSettings;
+}
+
+export interface PurchaseFilterCriteria {
+  query?: string;
+  dateFrom?: string;
+  dateTo?: string;
+}
+
+export interface PurchaseSummaryStats {
+  count: number;
+  total: number;
+  average: number;
 }
