@@ -4,9 +4,13 @@ import type { ApplicationSettings } from '../../models/types';
 export const SETTINGS_KEY = 'global_app_settings';
 
 export const DEFAULT_SETTINGS: ApplicationSettings = {
+  restaurantName: 'رستوران گیله‌کُرد',
+  branchName: 'شعبه مرکزی',
   serverAddress: '',
   defaultUnit: 'کیلوگرم',
   currency: 'IRT',
+  showDemoBadges: true,
+  demoSeedInitialized: false,
   lastSyncAt: null
 };
 
@@ -33,7 +37,11 @@ export class SettingsRepository {
     settings: Partial<ApplicationSettings>
   ): Promise<ApplicationSettings> {
     const current = await this.getSettings();
-    const updated: ApplicationSettings = { ...current, ...settings, currency: 'IRT' };
+    const updated: ApplicationSettings = {
+      ...current,
+      ...settings,
+      currency: 'IRT'
+    };
 
     await dbClient.executeTransaction('settings', 'readwrite', async (stores) => {
       await requestToPromise(
