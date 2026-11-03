@@ -9,6 +9,7 @@ export const DEFAULT_SETTINGS: ApplicationSettings = {
   serverAddress: '',
   defaultUnit: 'کیلوگرم',
   currency: 'IRT',
+  lastSelectedEmployeeId: '',
   showDemoBadges: true,
   demoSeedInitialized: false,
   lastSyncAt: null
