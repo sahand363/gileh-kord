@@ -6,6 +6,7 @@
     addPurchase,
     todayPurchasesStats,
     recentPurchases,
+    suppliers,
     dbError
   } from '../../stores/purchaseStore';
   import { navigateTo } from '../../stores/navigationStore';
@@ -139,7 +140,7 @@
       isSuggestionsVisible = false;
       optionalOpen = false;
 
-      showToast('خرید با موفقیت ثبت شد.');
+      showToast('خرید با موفقیت ثبت شد و موجودی انبار و پیشخوان بروزرسانی گردید.');
       productInputEl?.focus();
     } catch (err) {
       console.error(err);
@@ -295,9 +296,15 @@
               <input
                 id="supplier"
                 name="supplier"
+                list="suppliersDatalist"
                 bind:value={supplier}
                 placeholder="نام فروشگاه یا تأمین‌کننده"
               />
+              <datalist id="suppliersDatalist">
+                {#each $suppliers as sup (sup.id)}
+                  <option value={sup.name}></option>
+                {/each}
+              </datalist>
             </div>
             <div class="field">
               <label for="invoice">شماره فاکتور</label>
@@ -330,7 +337,7 @@
           <span class="btn-arrow">←</span>
         </button>
         <p class="secure-note">
-          <span>✓</span> اطلاعات به‌صورت پایدار در حافظه محلی دستگاه ذخیره می‌شود.
+          <span>✓</span> اطلاعات به‌صورت پایدار در حافظه محلی دستگاه ذخیره شده و در پیشخوان، انبار و کالاها اعمال می‌شود.
         </p>
       </form>
     </section>
