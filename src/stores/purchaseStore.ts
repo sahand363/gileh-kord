@@ -1,11 +1,20 @@
-import { writable, derived } from 'svelte/store';
+import { writable, derived, get } from 'svelte/store';
 import type {
   ApplicationSettings,
+  Employee,
   Expense,
   InventoryItem,
+  PaymentMethod,
   Product,
   Purchase,
-  Supplier
+  RevenueCategory,
+  RevenueDayRecord,
+  RevenueItemEntry,
+  RevenueRecordingMode,
+  Supplier,
+  TimesheetEditLog,
+  TimesheetEntry,
+  WeeklyExpectedSchedule
 } from '../models/types';
 import { purchaseRepository } from '../services/repositories/PurchaseRepository';
 import { productRepository } from '../services/repositories/ProductRepository';
@@ -19,20 +28,59 @@ import { createInitialDemoDataset } from '../services/demoData';
 import { getTodayISODate, normalizeProductKey } from '../utils/formatters';
 import {
   calculateExpensesTotal,
+  calculateFinancialOverview,
   calculatePurchaseStats,
   getLowStockItems,
   sortPurchasesDescending
 } from '../utils/calculations';
+import {
+  calculateShiftDuration,
+  createDefaultWeeklySchedule
+} from '../utils/timesheetUtils';
 import { generateId } from '../utils/uuid';
+import { managerAuthService } from '../services/ManagerAuthService';
 
 export const purchases = writable<Purchase[]>([]);
 export const products = writable<Product[]>([]);
 export const suppliers = writable<Supplier[]>([]);
 export const inventory = writable<InventoryItem[]>([]);
 export const expenses = writable<Expense[]>([]);
+export const employees = writable<Employee[]>([]);
+export const revenues = writable<RevenueDayRecord[]>([]);
+export const timesheets = writable<TimesheetEntry[]>([]);
 export const appSettings = writable<ApplicationSettings>({ ...DEFAULT_SETTINGS });
 export const isLoading = writable<boolean>(false);
 export const dbError = writable<string | null>(null);
+
+export const activeEmployees = derived(employees, ($employees) =>
+  $employees.filter((e) => e.isActive)
+);
+
+export const employeeByIdMap = derived(employees, ($employees) => {
+  const map = new Map<string, Employee>();
+  for (const emp of $employees) {
+    map.set(emp.id, emp);
+  }
+  return map;
+});
+
+/**
+ * Resolves the current display name for a purchase's employeeId.
+ * - If employeeId matches an employee in the database, returns their latest name (even if renamed).
+ * - Otherwise falls back to `employeeNameSnapshot`.
+ * - For historical purchases with no employee, returns `'بدون ثبت مسئول خرید'`.
+ */
+export function resolvePurchaseEmployeeName(
+  purchase: Purchase,
+  empMap: Map<string, Employee>
+): string {
+  if (purchase.employeeId) {
+    const found = empMap.get(purchase.employeeId);
+    if (found) return found.name;
+    if (purchase.employeeNameSnapshot) return purchase.employeeNameSnapshot;
+  }
+  return 'بدون ثبت مسئول خرید';
+}
 
 async function readStoreAll<T>(storeName: string): Promise<T[]> {
   return dbClient.executeTransaction(storeName, 'readonly', async (stores) => {
@@ -45,23 +93,45 @@ export async function loadPurchases(autoSeedDemoIfFirstRun = false): Promise<voi
   isLoading.set(true);
   dbError.set(null);
   try {
+    await managerAuthService.checkInitialized();
     const settings = await settingsRepository.getSettings();
-    const [purchasesList, productsList, suppliersList, inventoryList, expensesList] =
-      await Promise.all([
-        purchaseRepository.getAll(),
-        productRepository.getAll(),
-        readStoreAll<Supplier>('suppliers'),
-        readStoreAll<InventoryItem>('inventory'),
-        readStoreAll<Expense>('expenses')
-      ]);
+    const [
+      purchasesList,
+      productsList,
+      suppliersList,
+      inventoryList,
+      expensesList,
+      employeesList,
+      revenuesList,
+      timesheetsList
+    ] = await Promise.all([
+      purchaseRepository.getAll(),
+      productRepository.getAll(),
+      readStoreAll<Supplier>('suppliers'),
+      readStoreAll<InventoryItem>('inventory'),
+      readStoreAll<Expense>('expenses'),
+      readStoreAll<Employee>('employees'),
+      readStoreAll<RevenueDayRecord>('revenues'),
+      readStoreAll<TimesheetEntry>('timesheets')
+    ]);
 
     if (
       autoSeedDemoIfFirstRun &&
       !settings.demoSeedInitialized &&
-      purchasesList.length === 0
+      purchasesList.length === 0 &&
+      employeesList.length === 0
     ) {
       await loadDemoDataset();
       return;
+    }
+
+    // Ensure sticky employee defaults to first active employee if unset
+    if (!settings.lastSelectedEmployeeId && employeesList.length > 0) {
+      const firstActive = employeesList.find((e) => e.isActive) || employeesList[0];
+      settings.lastSelectedEmployeeId = firstActive.id;
+      await settingsRepository.saveSettings({
+        lastSelectedEmployeeId: firstActive.id
+      });
     }
 
     purchases.set(purchasesList);
@@ -70,6 +140,16 @@ export async function loadPurchases(autoSeedDemoIfFirstRun = false): Promise<voi
     inventory.set(inventoryList);
     expenses.set(
       expensesList.sort((a, b) => b.expenseDate.localeCompare(a.expenseDate))
+    );
+    employees.set(
+      employeesList.sort((a, b) => Number(b.isActive) - Number(a.isActive))
+    );
+    revenues.set(revenuesList.sort((a, b) => b.date.localeCompare(a.date)));
+    timesheets.set(
+      timesheetsList.sort(
+        (a, b) =>
+          b.date.localeCompare(a.date) || b.clockIn.localeCompare(a.clockIn)
+      )
     );
     appSettings.set(settings);
   } catch (err) {
@@ -88,6 +168,8 @@ export async function loadDemoDataset(): Promise<void> {
   const currentSettings = await settingsRepository.getSettings();
   const updatedSettings: ApplicationSettings = {
     ...currentSettings,
+    lastSelectedEmployeeId:
+      currentSettings.lastSelectedEmployeeId || demo.employees[0].id,
     demoSeedInitialized: true
   };
 
@@ -95,6 +177,9 @@ export async function loadDemoDataset(): Promise<void> {
     [...ALL_STORES],
     'readwrite',
     async (stores) => {
+      for (const item of demo.employees) {
+        await requestToPromise(stores['employees'].put(item));
+      }
       for (const item of demo.purchases) {
         await requestToPromise(stores['purchases'].put(item));
       }
@@ -110,6 +195,12 @@ export async function loadDemoDataset(): Promise<void> {
       for (const item of demo.expenses) {
         await requestToPromise(stores['expenses'].put(item));
       }
+      for (const item of demo.revenues) {
+        await requestToPromise(stores['revenues'].put(item));
+      }
+      for (const item of demo.timesheets) {
+        await requestToPromise(stores['timesheets'].put(item));
+      }
       await requestToPromise(
         stores['settings'].put({ key: SETTINGS_KEY, value: updatedSettings })
       );
@@ -121,8 +212,10 @@ export async function loadDemoDataset(): Promise<void> {
 
 export async function clearDemoDataset(): Promise<void> {
   const currentSettings = await settingsRepository.getSettings();
+  const isStickyDemo = currentSettings.lastSelectedEmployeeId.startsWith('demo_');
   const updatedSettings: ApplicationSettings = {
     ...currentSettings,
+    lastSelectedEmployeeId: isStickyDemo ? '' : currentSettings.lastSelectedEmployeeId,
     demoSeedInitialized: true
   };
 
@@ -135,7 +228,10 @@ export async function clearDemoDataset(): Promise<void> {
         'products',
         'suppliers',
         'inventory',
-        'expenses'
+        'expenses',
+        'employees',
+        'revenues',
+        'timesheets'
       ] as const;
 
       for (const name of storeNames) {
@@ -159,26 +255,172 @@ export async function clearDemoDataset(): Promise<void> {
   await loadPurchases(false);
 }
 
+// ============================================================================
+// Employee Operations & Sticky Selection
+// ============================================================================
+
+export async function setStickyEmployeeId(employeeId: string): Promise<void> {
+  const saved = await settingsRepository.saveSettings({
+    lastSelectedEmployeeId: employeeId
+  });
+  appSettings.set(saved);
+}
+
+export async function addEmployee(input: {
+  name: string;
+  role?: string;
+  phone?: string;
+  notes?: string;
+  isActive?: boolean;
+  performanceCoefficient?: number;
+  expectedSchedule?: WeeklyExpectedSchedule;
+}): Promise<Employee> {
+  const cleanName = input.name.trim();
+  if (!cleanName) {
+    throw new Error('نام کارمند الزامی است.');
+  }
+
+  const coeff = Number(input.performanceCoefficient);
+  const validCoeff = Number.isFinite(coeff) && coeff > 0 ? Number(coeff.toFixed(2)) : 1.0;
+  const now = new Date().toISOString();
+
+  const emp: Employee = {
+    id: generateId('emp'),
+    name: cleanName,
+    role: input.role?.trim() || 'کارمند',
+    phone: input.phone?.trim() || undefined,
+    notes: input.notes?.trim() || undefined,
+    isActive: input.isActive !== false,
+    performanceCoefficient: validCoeff,
+    expectedSchedule: input.expectedSchedule || createDefaultWeeklySchedule(false),
+    isDemo: false,
+    createdAt: now,
+    updatedAt: now
+  };
+
+  await dbClient.executeTransaction('employees', 'readwrite', async (stores) => {
+    await requestToPromise(stores['employees'].put(emp));
+  });
+
+  const currentSettings = await settingsRepository.getSettings();
+  if (!currentSettings.lastSelectedEmployeeId && emp.isActive) {
+    await setStickyEmployeeId(emp.id);
+  }
+
+  await loadPurchases(false);
+  return emp;
+}
+
+export async function updateEmployee(
+  id: string,
+  updates: Partial<{
+    name: string;
+    role: string;
+    phone: string;
+    notes: string;
+    isActive: boolean;
+    performanceCoefficient: number;
+    expectedSchedule: WeeklyExpectedSchedule;
+  }>
+): Promise<Employee> {
+  let updatedEmp!: Employee;
+
+  await dbClient.executeTransaction('employees', 'readwrite', async (stores) => {
+    const existing = (await requestToPromise(
+      stores['employees'].get(id)
+    )) as Employee | undefined;
+    if (!existing) {
+      throw new Error('کارمند مورد نظر یافت نشد.');
+    }
+
+    const cleanName =
+      updates.name !== undefined ? updates.name.trim() : existing.name;
+    if (!cleanName) {
+      throw new Error('نام کارمند نمی‌تواند خالی باشد.');
+    }
+
+    const coeff =
+      updates.performanceCoefficient !== undefined
+        ? Number(updates.performanceCoefficient)
+        : existing.performanceCoefficient;
+
+    updatedEmp = {
+      ...existing,
+      name: cleanName,
+      role:
+        updates.role !== undefined
+          ? updates.role.trim() || 'کارمند'
+          : existing.role,
+      phone:
+        updates.phone !== undefined
+          ? updates.phone.trim() || undefined
+          : existing.phone,
+      notes:
+        updates.notes !== undefined
+          ? updates.notes.trim() || undefined
+          : existing.notes,
+      isActive:
+        updates.isActive !== undefined ? updates.isActive : existing.isActive,
+      performanceCoefficient:
+        Number.isFinite(coeff) && coeff > 0
+          ? Number(coeff.toFixed(2))
+          : existing.performanceCoefficient,
+      expectedSchedule: updates.expectedSchedule || existing.expectedSchedule,
+      isDemo: false,
+      updatedAt: new Date().toISOString()
+    };
+
+    await requestToPromise(stores['employees'].put(updatedEmp));
+  });
+
+  await loadPurchases(false);
+  return updatedEmp;
+}
+
+export async function toggleEmployeeActive(id: string): Promise<Employee> {
+  const all = get(employees);
+  const target = all.find((e) => e.id === id);
+  if (!target) throw new Error('کارمند یافت نشد.');
+  return updateEmployee(id, { isActive: !target.isActive });
+}
+
+// ============================================================================
+// Purchase Operations (With Sticky Employee Attribution)
+// ============================================================================
+
 export async function addPurchase(data: {
   productName: string;
   quantity: number;
   unit: string;
   price: number;
   purchaseDate: string;
+  employeeId?: string;
   supplier?: string;
   invoice?: string;
   notes?: string;
 }): Promise<Purchase> {
+  const empMap = get(employeeByIdMap);
+  const selectedEmp = data.employeeId ? empMap.get(data.employeeId) : undefined;
+
   const { purchase } = await purchaseRepository.createPurchaseWithProduct({
     productName: data.productName,
     quantity: data.quantity,
     unit: data.unit,
     totalAmount: data.price,
     purchaseDate: data.purchaseDate,
+    employeeId: data.employeeId,
+    employeeNameSnapshot: selectedEmp?.name,
     supplierName: data.supplier,
     invoiceNumber: data.invoice,
     notes: data.notes
   });
+
+  // Persist sticky employee selection
+  if (data.employeeId) {
+    await settingsRepository.saveSettings({
+      lastSelectedEmployeeId: data.employeeId
+    });
+  }
 
   await dbClient.executeTransaction(
     ['suppliers', 'inventory'],
@@ -263,6 +505,298 @@ export async function addPurchase(data: {
   await loadPurchases(false);
   return purchase;
 }
+
+// ============================================================================
+// Revenue Operations (Daily Total Mode vs. Detailed Entries Mode)
+// ============================================================================
+
+export async function saveDailyTotalRevenue(input: {
+  date: string;
+  dailyTotalAmount: number;
+  cashAmount?: number;
+  cardAmount?: number;
+  onlineAmount?: number;
+  notes?: string;
+}): Promise<RevenueDayRecord> {
+  if (!input.date) throw new Error('تاریخ درآمد الزامی است.');
+  if (!(input.dailyTotalAmount > 0)) {
+    throw new Error('مبلغ کل درآمد روزانه باید بزرگ‌تر از صفر باشد.');
+  }
+
+  const now = new Date().toISOString();
+  let savedRecord!: RevenueDayRecord;
+
+  await dbClient.executeTransaction('revenues', 'readwrite', async (stores) => {
+    const store = stores['revenues'];
+    const all = (await requestToPromise(store.getAll())) as RevenueDayRecord[];
+    const existing = all.find((r) => r.date === input.date);
+
+    savedRecord = {
+      id: existing ? existing.id : `rev_${input.date}`,
+      date: input.date,
+      mode: 'daily_total',
+      dailyTotalAmount: Math.round(input.dailyTotalAmount),
+      cashAmount: input.cashAmount ? Math.round(input.cashAmount) : undefined,
+      cardAmount: input.cardAmount ? Math.round(input.cardAmount) : undefined,
+      onlineAmount: input.onlineAmount ? Math.round(input.onlineAmount) : undefined,
+      notes: input.notes?.trim() || undefined,
+      entries: existing ? existing.entries : [],
+      isDemo: false,
+      createdAt: existing ? existing.createdAt : now,
+      updatedAt: now
+    };
+
+    await requestToPromise(store.put(savedRecord));
+  });
+
+  await loadPurchases(false);
+  return savedRecord;
+}
+
+export async function addDetailedRevenueEntry(input: {
+  date: string;
+  category: RevenueCategory;
+  description: string;
+  quantity?: number;
+  unitPrice?: number;
+  amount: number;
+  paymentMethod?: PaymentMethod;
+  notes?: string;
+}): Promise<RevenueDayRecord> {
+  if (!input.date) throw new Error('تاریخ تراکنش الزامی است.');
+  if (!(input.amount > 0)) {
+    throw new Error('مبلغ تراکنش درآمدی باید بزرگ‌تر از صفر باشد.');
+  }
+
+  const now = new Date().toISOString();
+  const newItem: RevenueItemEntry = {
+    id: generateId('rev_item'),
+    category: input.category || 'فروش غذا (سالن)',
+    description: input.description.trim() || input.category,
+    quantity: input.quantity && input.quantity > 0 ? input.quantity : undefined,
+    unitPrice: input.unitPrice && input.unitPrice > 0 ? Math.round(input.unitPrice) : undefined,
+    amount: Math.round(input.amount),
+    paymentMethod: input.paymentMethod,
+    notes: input.notes?.trim() || undefined,
+    createdAt: now
+  };
+
+  let savedRecord!: RevenueDayRecord;
+
+  await dbClient.executeTransaction('revenues', 'readwrite', async (stores) => {
+    const store = stores['revenues'];
+    const all = (await requestToPromise(store.getAll())) as RevenueDayRecord[];
+    const existing = all.find((r) => r.date === input.date);
+
+    const updatedEntries = existing ? [...existing.entries, newItem] : [newItem];
+    const entriesSum = updatedEntries.reduce((s, e) => s + e.amount, 0);
+
+    savedRecord = {
+      id: existing ? existing.id : `rev_${input.date}`,
+      date: input.date,
+      mode: 'detailed',
+      dailyTotalAmount: existing?.dailyTotalAmount || entriesSum,
+      cashAmount: existing?.cashAmount,
+      cardAmount: existing?.cardAmount,
+      onlineAmount: existing?.onlineAmount,
+      notes: existing?.notes,
+      entries: updatedEntries,
+      isDemo: false,
+      createdAt: existing ? existing.createdAt : now,
+      updatedAt: now
+    };
+
+    await requestToPromise(store.put(savedRecord));
+  });
+
+  await loadPurchases(false);
+  return savedRecord;
+}
+
+export async function switchRevenueDayMode(
+  date: string,
+  newMode: RevenueRecordingMode
+): Promise<void> {
+  await dbClient.executeTransaction('revenues', 'readwrite', async (stores) => {
+    const store = stores['revenues'];
+    const all = (await requestToPromise(store.getAll())) as RevenueDayRecord[];
+    const existing = all.find((r) => r.date === date);
+    if (!existing) return;
+
+    await requestToPromise(
+      store.put({
+        ...existing,
+        mode: newMode,
+        isDemo: false,
+        updatedAt: new Date().toISOString()
+      })
+    );
+  });
+
+  await loadPurchases(false);
+}
+
+export async function deleteDetailedRevenueEntry(
+  date: string,
+  entryId: string
+): Promise<void> {
+  await dbClient.executeTransaction('revenues', 'readwrite', async (stores) => {
+    const store = stores['revenues'];
+    const all = (await requestToPromise(store.getAll())) as RevenueDayRecord[];
+    const existing = all.find((r) => r.date === date);
+    if (!existing) return;
+
+    const updatedEntries = existing.entries.filter((e) => e.id !== entryId);
+    await requestToPromise(
+      store.put({
+        ...existing,
+        entries: updatedEntries,
+        isDemo: false,
+        updatedAt: new Date().toISOString()
+      })
+    );
+  });
+
+  await loadPurchases(false);
+}
+
+export async function deleteRevenueDayRecord(id: string): Promise<void> {
+  await dbClient.executeTransaction('revenues', 'readwrite', async (stores) => {
+    await requestToPromise(stores['revenues'].delete(id));
+  });
+  await loadPurchases(false);
+}
+
+// ============================================================================
+// Timesheet Operations
+// ============================================================================
+
+export async function addTimesheetEntry(input: {
+  employeeId: string;
+  date: string;
+  clockIn: string;
+  clockOut: string;
+  breakMinutes: number;
+  allowOvernight?: boolean;
+  notes?: string;
+}): Promise<TimesheetEntry> {
+  if (!input.employeeId) {
+    throw new Error('لطفاً کارمند را انتخاب کنید.');
+  }
+  if (!input.date) {
+    throw new Error('لطفاً تاریخ کاری را مشخص کنید.');
+  }
+
+  const calc = calculateShiftDuration({
+    clockIn: input.clockIn,
+    clockOut: input.clockOut,
+    breakMinutes: input.breakMinutes,
+    allowOvernight: input.allowOvernight
+  });
+
+  if (!calc.isValid) {
+    throw new Error(calc.error || 'بازه زمانی ورود و خروج نامعتبر است.');
+  }
+
+  const now = new Date().toISOString();
+  const entry: TimesheetEntry = {
+    id: generateId('ts'),
+    employeeId: input.employeeId,
+    date: input.date,
+    clockIn: calc.normalizedClockIn,
+    clockOut: calc.normalizedClockOut,
+    overnight: calc.overnight,
+    breakMinutes: Math.max(0, Math.round(Number(input.breakMinutes) || 0)),
+    netMinutes: calc.netMinutes,
+    notes: input.notes?.trim() || undefined,
+    editHistory: [],
+    isDemo: false,
+    createdAt: now,
+    updatedAt: now
+  };
+
+  await dbClient.executeTransaction('timesheets', 'readwrite', async (stores) => {
+    await requestToPromise(stores['timesheets'].put(entry));
+  });
+
+  await loadPurchases(false);
+  return entry;
+}
+
+export async function updateTimesheetEntry(
+  id: string,
+  updates: {
+    clockIn: string;
+    clockOut: string;
+    breakMinutes: number;
+    allowOvernight?: boolean;
+    notes?: string;
+    editReason?: string;
+  }
+): Promise<TimesheetEntry> {
+  const calc = calculateShiftDuration({
+    clockIn: updates.clockIn,
+    clockOut: updates.clockOut,
+    breakMinutes: updates.breakMinutes,
+    allowOvernight: updates.allowOvernight
+  });
+
+  if (!calc.isValid) {
+    throw new Error(calc.error || 'بازه زمانی ورود و خروج نامعتبر است.');
+  }
+
+  let updatedEntry!: TimesheetEntry;
+
+  await dbClient.executeTransaction('timesheets', 'readwrite', async (stores) => {
+    const existing = (await requestToPromise(
+      stores['timesheets'].get(id)
+    )) as TimesheetEntry | undefined;
+    if (!existing) {
+      throw new Error('ردیف حضور و غیاب یافت نشد.');
+    }
+
+    const now = new Date().toISOString();
+    const editLog: TimesheetEditLog = {
+      editedAt: now,
+      previousClockIn: existing.clockIn,
+      previousClockOut: existing.clockOut,
+      previousBreakMinutes: existing.breakMinutes,
+      reason: updates.editReason?.trim() || undefined
+    };
+
+    updatedEntry = {
+      ...existing,
+      clockIn: calc.normalizedClockIn,
+      clockOut: calc.normalizedClockOut,
+      overnight: calc.overnight,
+      breakMinutes: Math.max(0, Math.round(Number(updates.breakMinutes) || 0)),
+      netMinutes: calc.netMinutes,
+      notes:
+        updates.notes !== undefined
+          ? updates.notes.trim() || undefined
+          : existing.notes,
+      editHistory: [...(existing.editHistory || []), editLog],
+      isDemo: false,
+      updatedAt: now
+    };
+
+    await requestToPromise(stores['timesheets'].put(updatedEntry));
+  });
+
+  await loadPurchases(false);
+  return updatedEntry;
+}
+
+export async function deleteTimesheetEntry(id: string): Promise<void> {
+  await dbClient.executeTransaction('timesheets', 'readwrite', async (stores) => {
+    await requestToPromise(stores['timesheets'].delete(id));
+  });
+  await loadPurchases(false);
+}
+
+// ============================================================================
+// Suppliers, Inventory & Expenses Operations
+// ============================================================================
 
 export async function addSupplier(input: {
   name: string;
@@ -372,13 +906,26 @@ export const recentPurchases = derived(purchases, ($purchases) => {
 });
 
 export const dashboardSummary = derived(
-  [purchases, products, suppliers, inventory, expenses],
-  ([$purchases, $products, $suppliers, $inventory, $expenses]) => {
+  [purchases, products, suppliers, inventory, expenses, employees, revenues],
+  ([
+    $purchases,
+    $products,
+    $suppliers,
+    $inventory,
+    $expenses,
+    $employees,
+    $revenues
+  ]) => {
     const allPurchaseStats = calculatePurchaseStats($purchases);
     const demoCount = $purchases.filter((p) => p.isDemo).length;
     const realCount = $purchases.length - demoCount;
     const lowStock = getLowStockItems($inventory);
     const totalExpenses = calculateExpensesTotal($expenses);
+    const financial = calculateFinancialOverview({
+      revenues: $revenues,
+      purchases: $purchases,
+      expenses: $expenses
+    });
 
     return {
       totalPurchasesAmount: allPurchaseStats.total,
@@ -388,9 +935,13 @@ export const dashboardSummary = derived(
       realCount,
       productsCount: $products.length,
       suppliersCount: $suppliers.length,
+      employeesCount: $employees.length,
+      activeEmployeesCount: $employees.filter((e) => e.isActive).length,
       lowStockItems: lowStock,
       totalExpenses,
-      combinedOutflow: allPurchaseStats.total + totalExpenses
+      combinedOutflow: allPurchaseStats.total + totalExpenses,
+      totalRevenue: financial.totalRevenue,
+      estimatedNetOperatingBalance: financial.estimatedNetOperatingBalance
     };
   }
 );
