@@ -1,12 +1,13 @@
 <script lang="ts">
   import { purchases } from '../../stores/purchaseStore';
-  import { formatMoney, formatNumber, toJalaliDate } from '../../utils/formatters';
+  import { formatMoney, formatNumber } from '../../utils/formatters';
   import {
     calculatePurchaseStats,
     filterPurchases
   } from '../../utils/calculations';
   import PurchaseCard from '../../components/purchases/PurchaseCard.svelte';
   import EmptyState from '../../components/common/EmptyState.svelte';
+  import JalaliDatePicker from '../../components/common/JalaliDatePicker.svelte';
 
   let searchQuery = '';
   let dateFrom = '';
@@ -34,9 +35,9 @@
 <section class="page active" aria-labelledby="historyTitle">
   <div class="page-heading">
     <div>
-      <p class="eyebrow">گزارش و پیگیری</p>
+      <p class="eyebrow">گزارش و پیگیری با تقویم شمسی</p>
       <h1 id="historyTitle">تاریخچه خریدها</h1>
-      <p class="subheading">خریدهای ثبت‌شده را بر اساس نام کالا، فروشنده یا بازه زمانی جست‌وجو و بررسی کنید.</p>
+      <p class="subheading">خریدهای ثبت‌شده را بر اساس نام کالا، فروشنده یا بازه تاریخ شمسی جست‌وجو و بررسی کنید.</p>
     </div>
   </div>
 
@@ -51,14 +52,30 @@
           aria-label="جست‌وجوی نام محصول"
         />
       </div>
-      <label class="date-filter" title={dateFrom ? `معادل: ${toJalaliDate(dateFrom)}` : ''}>
-        <span>از تاریخ</span>
-        <input id="dateFrom" type="date" bind:value={dateFrom} aria-label="از تاریخ" />
-      </label>
-      <label class="date-filter" title={dateTo ? `معادل: ${toJalaliDate(dateTo)}` : ''}>
-        <span>تا تاریخ</span>
-        <input id="dateTo" type="date" bind:value={dateTo} aria-label="تا تاریخ" />
-      </label>
+      <div class="date-filter">
+        <span>از تاریخ (شمسی)</span>
+        <div class="date-picker-filter-wrap">
+          <JalaliDatePicker
+            id="dateFrom"
+            bind:value={dateFrom}
+            placeholder="همه تاریخ‌ها"
+            allowEmpty={true}
+            ariaLabel="از تاریخ شمسی"
+          />
+        </div>
+      </div>
+      <div class="date-filter">
+        <span>تا تاریخ (شمسی)</span>
+        <div class="date-picker-filter-wrap">
+          <JalaliDatePicker
+            id="dateTo"
+            bind:value={dateTo}
+            placeholder="همه تاریخ‌ها"
+            allowEmpty={true}
+            ariaLabel="تا تاریخ شمسی"
+          />
+        </div>
+      </div>
       <button
         type="button"
         class={onlyReal ? 'secondary-btn' : 'quiet-btn'}
@@ -91,7 +108,7 @@
       {:else}
         <EmptyState
           title="موردی پیدا نشد"
-          message="عبارت جست‌وجو یا بازه تاریخ را تغییر دهید."
+          message="عبارت جست‌وجو یا بازه تاریخ شمسی را تغییر دهید."
         />
       {/if}
     </div>
