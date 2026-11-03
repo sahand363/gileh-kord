@@ -7,11 +7,17 @@
     dashboardSummary
   } from '../../stores/purchaseStore';
   import { showToast } from '../../stores/toastStore';
-  import { formatNumber } from '../../utils/formatters';
+  import {
+    formatNumber,
+    getTodayISODate,
+    toJalaliDateTime,
+    toJalaliNumeric
+  } from '../../utils/formatters';
   import { validateBackupPayload } from '../../utils/validators';
 
   let fileInput: HTMLInputElement;
   let backupError = '';
+  let lastExportedJalali = '';
   let isProcessing = false;
 
   async function handleExportJSON() {
@@ -21,13 +27,15 @@
 
     try {
       const backup = await backupService.exportBackup();
+      lastExportedJalali = toJalaliDateTime(backup.exportedAt);
+      const jalaliSlug = toJalaliNumeric(getTodayISODate()).replace(/\//g, '-');
       const blob = new Blob([JSON.stringify(backup, null, 2)], {
         type: 'application/json'
       });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `gileh-kord-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      a.download = `gileh-kord-backup-${jalaliSlug}.json`;
       a.click();
       URL.revokeObjectURL(url);
 
@@ -70,8 +78,9 @@
       }
 
       const count = validation.normalizedBackup.purchases.length;
+      const exportDateLabel = toJalaliDateTime(validation.normalizedBackup.exportedAt);
       const confirmed = window.confirm(
-        `آیا از بازیابی فایل پشتیبان اطمینان دارید؟\nاین فایل حاوی ${formatNumber(count)} ردیف خرید معتبر است و جایگزین داده‌های فعلی مرورگر خواهد شد.`
+        `آیا از بازیابی فایل پشتیبان اطمینان دارید؟\nتاریخ فایل: ${exportDateLabel}\nتعداد خریدها: ${formatNumber(count)} مورد\nاین اطلاعات جایگزین داده‌های فعلی مرورگر خواهد شد.`
       );
       if (!confirmed) return;
 
@@ -104,7 +113,7 @@
 <section class="page active" aria-labelledby="backupTitle">
   <div class="page-heading">
     <div>
-      <p class="eyebrow">امنیت و انتقال داده‌های محلی</p>
+      <p class="eyebrow">امنیت و انتقال داده‌های محلی (سازگار با نسخه‌های قبلی)</p>
       <h1 id="backupTitle">پشتیبان‌گیری و بازیابی</h1>
       <p class="subheading">
         دریافت خروجی استاندارد JSON از تمام اطلاعات ثبت‌شده، بازگردانی نسخه‌های پشتیبان و مدیریت داده‌های نمونه آزمایشی.
@@ -135,9 +144,9 @@
             <span class="btn-arrow">←</span>
           </button>
         </div>
-        <small>
-          توصیه می‌شود پیش از پاک‌سازی مرورگر یا انتقال به دستگاه دیگر، یک نسخه پشتیبان دریافت کنید.
-        </small>
+        {#if lastExportedJalali}
+          <small>آخرین خروجی تهیه‌شده در این نشست: {lastExportedJalali}</small>
+        {/if}
       </div>
     </section>
 
@@ -146,7 +155,7 @@
       <div class="setting-content">
         <h3>بازیابی از فایل پشتیبان (Import & Validate JSON)</h3>
         <p>
-          انتخاب فایل پشتیبان قبلی برای بازگردانی اطلاعات. فایل پیش از اعمال به‌طور کامل بررسی و اعتبارسنجی می‌شود.
+          انتخاب فایل پشتیبان قبلی (نسخه ۱ یا ۲) برای بازگردانی اطلاعات. فایل پیش از اعمال به‌طور کامل بررسی و اعتبارسنجی می‌شود.
         </p>
         <div class="setting-actions">
           <button
@@ -173,7 +182,7 @@
           </div>
         {/if}
         <small>
-          عملیات بازیابی به‌صورت تراکنش اتمیک (Atomic Transaction) انجام می‌شود؛ در صورت نامعتبر بودن فایل، داده‌های فعلی شما دست‌نخورده باقی می‌ماند.
+          عملیات بازیابی به‌صورت تراکنش اتمیک انجام می‌شود؛ در صورت نامعتبر بودن فایل، داده‌های فعلی شما دست‌نخورده باقی می‌ماند.
         </small>
       </div>
     </section>
