@@ -5,12 +5,14 @@
     formatMoney,
     formatNumber,
     toJalaliDate,
+    toJalaliNumeric,
     getTodayISODate,
     parseNumericInput
   } from '../../utils/formatters';
   import { calculateExpensesTotal } from '../../utils/calculations';
   import type { ExpenseCategory } from '../../models/types';
   import EmptyState from '../../components/common/EmptyState.svelte';
+  import JalaliDatePicker from '../../components/common/JalaliDatePicker.svelte';
 
   const EXPENSE_CATEGORIES: ExpenseCategory[] = [
     'اجاره و قبوض',
@@ -75,7 +77,7 @@
 <section class="page active" aria-labelledby="expensesTitle">
   <div class="page-heading">
     <div>
-      <p class="eyebrow">مدیریت هزینه‌های جاری و عملیاتی</p>
+      <p class="eyebrow">مدیریت هزینه‌های جاری و عملیاتی (شمسی)</p>
       <h1 id="expensesTitle">هزینه‌های رستوران</h1>
       <p class="subheading">ثبت و پیگیری هزینه‌های غیرکالایی مانند کرایه حمل، تعمیرات تجهیزات، قبوض و خدمات.</p>
     </div>
@@ -144,7 +146,9 @@
               </div>
               <div class="purchase-side">
                 <div class="purchase-amount">{formatMoney(exp.amount)} تومان</div>
-                <div class="purchase-date">{toJalaliDate(exp.expenseDate)}</div>
+                <div class="purchase-date">
+                  {toJalaliDate(exp.expenseDate)} ({toJalaliNumeric(exp.expenseDate)})
+                </div>
               </div>
             </article>
           {/each}
@@ -195,8 +199,12 @@
         </div>
 
         <div class="field">
-          <label for="expDate">تاریخ پرداخت</label>
-          <input id="expDate" type="date" bind:value={expenseDate} />
+          <label for="expDate">تاریخ پرداخت (شمسی)</label>
+          <JalaliDatePicker
+            id="expDate"
+            bind:value={expenseDate}
+            ariaLabel="تاریخ پرداخت هزینه"
+          />
         </div>
 
         <div class="field">
