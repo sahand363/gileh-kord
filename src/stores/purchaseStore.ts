@@ -1,17 +1,26 @@
 import { writable, derived } from 'svelte/store';
 import type { Purchase } from '../models/types';
 import { purchaseRepository } from '../services/repositories/PurchaseRepository';
-import { productRepository } from '../services/repositories/ProductRepository';
 import { getTodayISODate } from '../utils/formatters';
+import {
+  calculatePurchaseStats,
+  sortPurchasesDescending
+} from '../utils/calculations';
 
 export const purchases = writable<Purchase[]>([]);
 export const isLoading = writable<boolean>(false);
+export const dbError = writable<string | null>(null);
 
-export async function loadPurchases() {
+export async function loadPurchases(): Promise<void> {
   isLoading.set(true);
+  dbError.set(null);
   try {
     const list = await purchaseRepository.getAll();
     purchases.set(list);
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : 'خطا در بارگذاری اطلاعات از پایگاه داده محلی.';
+    dbError.set(message);
   } finally {
     isLoading.set(false);
   }
@@ -26,38 +35,27 @@ export async function addPurchase(data: {
   supplier?: string;
   invoice?: string;
   notes?: string;
-}) {
-  const product = await productRepository.recordPurchase(
-    data.productName,
-    data.unit,
-    data.price,
-    data.purchaseDate
-  );
-
-  const created = await purchaseRepository.create({
-    productId: product.id,
-    productName: data.productName.trim(),
+}): Promise<Purchase> {
+  const { purchase } = await purchaseRepository.createPurchaseWithProduct({
+    productName: data.productName,
     quantity: data.quantity,
     unit: data.unit,
     totalAmount: data.price,
-    currency: 'IRT',
     purchaseDate: data.purchaseDate,
-    supplierName: data.supplier?.trim() || undefined,
-    invoiceNumber: data.invoice?.trim() || undefined,
-    notes: data.notes?.trim() || undefined
+    supplierName: data.supplier,
+    invoiceNumber: data.invoice,
+    notes: data.notes
   });
 
-  purchases.update((prev) => [created, ...prev]);
-  return created;
+  purchases.update((prev) => sortPurchasesDescending([purchase, ...prev]));
+  return purchase;
 }
 
 export const todayPurchasesStats = derived(purchases, ($purchases) => {
   const today = getTodayISODate();
   const todayItems = $purchases.filter((p) => p.purchaseDate === today);
-  const count = todayItems.length;
-  const total = todayItems.reduce((sum, p) => sum + p.totalAmount, 0);
-  const average = count > 0 ? Math.round(total / count) : 0;
-  return { count, total, average, items: todayItems };
+  const stats = calculatePurchaseStats(todayItems);
+  return { ...stats, items: todayItems };
 });
 
 export const recentPurchases = derived(purchases, ($purchases) => {
