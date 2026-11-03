@@ -15,6 +15,7 @@
     formatMoney,
     formatNumber,
     toJalaliDate,
+    toJalaliNumeric,
     getTodayISODate,
     parseNumericInput
   } from '../../utils/formatters';
@@ -22,6 +23,7 @@
   import { MEASUREMENT_UNITS, type Product } from '../../models/types';
   import PurchaseCard from '../../components/purchases/PurchaseCard.svelte';
   import EmptyState from '../../components/common/EmptyState.svelte';
+  import JalaliDatePicker from '../../components/common/JalaliDatePicker.svelte';
 
   let productName = '';
   let quantity = '';
@@ -43,9 +45,9 @@
   let lastPriceHint = '';
   let optionalOpen = false;
 
-  const todayFullJalali = toJalaliDate(getTodayISODate());
+  const todayISO = getTodayISODate();
+  const todayFullJalali = `${toJalaliDate(todayISO)} (${toJalaliNumeric(todayISO)})`;
 
-  $: selectedDateJalali = toJalaliDate(purchaseDate);
   $: parsedLivePrice = parseNumericInput(price);
   $: liveFormattedPrice =
     !isNaN(parsedLivePrice) && parsedLivePrice > 0
@@ -81,7 +83,7 @@
     productName = prod.name;
     unit = prod.lastUnit;
     isSuggestionsVisible = false;
-    lastPriceHint = `آخرین مبلغ ثبت‌شده: ${formatMoney(prod.lastPrice)} تومان (صرفاً جهت اطلاع)`;
+    lastPriceHint = `آخرین مبلغ ثبت‌شده: ${formatMoney(prod.lastPrice)} تومان در تاریخ ${toJalaliDate(prod.lastPurchaseDate)}`;
     quantityInputEl?.focus();
   }
 
@@ -140,7 +142,7 @@
       isSuggestionsVisible = false;
       optionalOpen = false;
 
-      showToast('خرید با موفقیت ثبت شد و موجودی انبار و پیشخوان بروزرسانی گردید.');
+      showToast('خرید با موفقیت در پایگاه داده محلی ثبت شد.');
       productInputEl?.focus();
     } catch (err) {
       console.error(err);
@@ -157,9 +159,9 @@
 <section class="page active" aria-labelledby="entryTitle">
   <div class="page-heading">
     <div>
-      <p class="eyebrow">ثبت سریع و آسان</p>
+      <p class="eyebrow">ثبت سریع و آسان (تقویم شمسی)</p>
       <h1 id="entryTitle">ثبت خرید جدید</h1>
-      <p class="subheading">خریدهای روزانه را در چند ثانیه ثبت کنید.</p>
+      <p class="subheading">خریدهای روزانه را در چند ثانیه ثبت کنید؛ کارکرد کامل در حالت آنلاین، آفلاین، HTTP و HTTPS.</p>
     </div>
     <div class="heading-date">
       <span class="calendar-icon">▦</span>
@@ -181,6 +183,7 @@
               id="productName"
               name="productName"
               type="text"
+              role="combobox"
               bind:this={productInputEl}
               bind:value={productName}
               on:input={handleProductInput}
@@ -210,6 +213,7 @@
                       <span class="suggestion-name">{prod.name}</span>
                       <span class="suggestion-meta">
                         <span>واحد: {prod.lastUnit}</span>
+                        <span>آخرین تاریخ: {toJalaliDate(prod.lastPurchaseDate)}</span>
                       </span>
                     </span>
                     <span class="suggestion-price">
@@ -272,16 +276,12 @@
         </div>
 
         <div class="field">
-          <label for="purchaseDate">تاریخ خرید</label>
-          <input
+          <label for="purchaseDate">تاریخ خرید (شمسی)</label>
+          <JalaliDatePicker
             id="purchaseDate"
-            name="purchaseDate"
-            type="date"
             bind:value={purchaseDate}
+            ariaLabel="تاریخ خرید شمسی"
           />
-          {#if selectedDateJalali}
-            <small class="field-hint">معادل تاریخ شمسی: {selectedDateJalali}</small>
-          {/if}
         </div>
 
         <details class="optional-fields" bind:open={optionalOpen}>
@@ -337,7 +337,7 @@
           <span class="btn-arrow">←</span>
         </button>
         <p class="secure-note">
-          <span>✓</span> اطلاعات به‌صورت پایدار در حافظه محلی دستگاه ذخیره شده و در پیشخوان، انبار و کالاها اعمال می‌شود.
+          <span>✓</span> ذخیره‌سازی آنی در حافظه محلی دستگاه (IndexedDB) — بدون وابستگی به اینترنت یا HTTPS.
         </p>
       </form>
     </section>
@@ -346,7 +346,7 @@
       <section class="panel insight-card">
         <div class="card-topline">
           <span class="mini-icon">↗</span>
-          <span>خلاصه امروز</span>
+          <span>خلاصه امروز ({toJalaliDate(todayISO)})</span>
         </div>
         <div class="stat-number" id="todayTotal">
           {formatMoney($todayPurchasesStats.total)} <small>تومان</small>
@@ -366,7 +366,7 @@
         <div>
           <strong>ثبت سریع‌تر خریدها</strong>
           <p>
-            با انتخاب محصولاتی که قبلاً ثبت کرده‌اید، واحد اندازه‌گیری به‌صورت خودکار تکمیل می‌شود.
+            با انتخاب محصولاتی که قبلاً ثبت کرده‌اید، واحد اندازه‌گیری و آخرین قیمت خرید به تاریخ شمسی نمایش داده می‌شود.
           </p>
         </div>
       </section>
