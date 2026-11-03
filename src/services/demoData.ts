@@ -1,11 +1,15 @@
 import type {
+  Employee,
   Expense,
   InventoryItem,
   Product,
   Purchase,
-  Supplier
+  RevenueDayRecord,
+  Supplier,
+  TimesheetEntry
 } from '../models/types';
 import { getTodayISODate, normalizeProductKey } from '../utils/formatters';
+import { createDefaultWeeklySchedule } from '../utils/timesheetUtils';
 
 function daysAgoISO(days: number): string {
   const d = new Date();
@@ -14,18 +18,79 @@ function daysAgoISO(days: number): string {
 }
 
 export function createInitialDemoDataset(): {
+  employees: Employee[];
   purchases: Purchase[];
   products: Product[];
   suppliers: Supplier[];
   inventory: InventoryItem[];
   expenses: Expense[];
+  revenues: RevenueDayRecord[];
+  timesheets: TimesheetEntry[];
 } {
   const today = getTodayISODate();
   const yesterday = daysAgoISO(1);
+  const twoDaysAgo = daysAgoISO(2);
   const threeDaysAgo = daysAgoISO(3);
   const fourDaysAgo = daysAgoISO(4);
   const sixDaysAgo = daysAgoISO(6);
   const nowIso = new Date().toISOString();
+
+  const standardSchedule = createDefaultWeeklySchedule(true);
+
+  const employees: Employee[] = [
+    {
+      id: 'demo_emp_1',
+      name: 'علی رضوانی',
+      role: 'مسئول خرید',
+      phone: '۰۹۱۱-۲۳۴۵۶۷۸',
+      notes: 'مسئول خرید روزانه تره‌بار، برنج و اقلام پروتئینی',
+      isActive: true,
+      performanceCoefficient: 1.0,
+      expectedSchedule: standardSchedule,
+      isDemo: true,
+      createdAt: nowIso,
+      updatedAt: nowIso
+    },
+    {
+      id: 'demo_emp_2',
+      name: 'رضا کردستانی',
+      role: 'سرآشپز',
+      phone: '۰۹۱۸-۳۴۵۶۷۸۹',
+      notes: 'مسئول کنترل کیفیت زعفران، ادویه و گوشت',
+      isActive: true,
+      performanceCoefficient: 1.2,
+      expectedSchedule: standardSchedule,
+      isDemo: true,
+      createdAt: nowIso,
+      updatedAt: nowIso
+    },
+    {
+      id: 'demo_emp_3',
+      name: 'محمد گیلانی',
+      role: 'کمک‌آشپز',
+      phone: '۰۹۱۲-۴۵۶۷۸۹۰',
+      notes: 'شیفت آماده‌سازی صبح و عصر',
+      isActive: true,
+      performanceCoefficient: 0.9,
+      expectedSchedule: standardSchedule,
+      isDemo: true,
+      createdAt: nowIso,
+      updatedAt: nowIso
+    },
+    {
+      id: 'demo_emp_4',
+      name: 'مهدی صادقی',
+      role: 'انباردار',
+      phone: '۰۹۳۵-۵۶۷۸۹۰۱',
+      notes: 'مسئول تحویل بار و ظروف بسته‌بندی',
+      isActive: true,
+      performanceCoefficient: 1.0,
+      expectedSchedule: createDefaultWeeklySchedule(false),
+      isDemo: true,
+      createdAt: nowIso,
+      updatedAt: nowIso
+    }
+  ];
 
   const purchases: Purchase[] = [
     {
@@ -37,6 +102,8 @@ export function createInitialDemoDataset(): {
       totalAmount: 4250000,
       currency: 'IRT',
       purchaseDate: today,
+      employeeId: 'demo_emp_1',
+      employeeNameSnapshot: 'علی رضوانی',
       supplierName: 'برنج‌فروشی شمال',
       invoiceNumber: '۱۰۲۴',
       notes: 'کیسه ۲۵ کیلویی درجه یک گیلان',
@@ -53,6 +120,8 @@ export function createInitialDemoDataset(): {
       totalAmount: 1980000,
       currency: 'IRT',
       purchaseDate: today,
+      employeeId: 'demo_emp_1',
+      employeeNameSnapshot: 'علی رضوانی',
       supplierName: 'پخش مواد غذایی بهار',
       invoiceNumber: '۸۸۱',
       notes: '',
@@ -69,6 +138,8 @@ export function createInitialDemoDataset(): {
       totalAmount: 3240000,
       currency: 'IRT',
       purchaseDate: yesterday,
+      employeeId: 'demo_emp_1',
+      employeeNameSnapshot: 'علی رضوانی',
       supplierName: 'پروتئینی مرکزی',
       invoiceNumber: '۷۳۱',
       notes: 'تحویل صبح',
@@ -85,9 +156,11 @@ export function createInitialDemoDataset(): {
       totalAmount: 680000,
       currency: 'IRT',
       purchaseDate: yesterday,
+      employeeId: 'demo_emp_3',
+      employeeNameSnapshot: 'محمد گیلانی',
       supplierName: 'تره‌بار روز',
       invoiceNumber: '',
-      notes: '',
+      notes: 'خرید فوری آشپزخانه',
       isDemo: true,
       createdAt: nowIso,
       updatedAt: nowIso
@@ -101,6 +174,8 @@ export function createInitialDemoDataset(): {
       totalAmount: 8500000,
       currency: 'IRT',
       purchaseDate: threeDaysAgo,
+      employeeId: 'demo_emp_2',
+      employeeNameSnapshot: 'رضا کردستانی',
       supplierName: 'عطاری رضایی',
       invoiceNumber: '۵۲',
       notes: 'سرگل ممتاز',
@@ -117,6 +192,8 @@ export function createInitialDemoDataset(): {
       totalAmount: 1600000,
       currency: 'IRT',
       purchaseDate: fourDaysAgo,
+      employeeId: 'demo_emp_4',
+      employeeNameSnapshot: 'مهدی صادقی',
       supplierName: 'لوازم یکبارمصرف آریا',
       invoiceNumber: '۴۱۱',
       notes: 'ظرف سه خانه مایکروفر',
@@ -135,7 +212,7 @@ export function createInitialDemoDataset(): {
       purchaseDate: sixDaysAgo,
       supplierName: 'برنج‌فروشی شمال',
       invoiceNumber: '۹۹۱',
-      notes: '',
+      notes: 'ثبت‌شده پیش از فعال‌سازی ماژول کارکنان',
       isDemo: true,
       createdAt: nowIso,
       updatedAt: nowIso
@@ -392,5 +469,141 @@ export function createInitialDemoDataset(): {
     }
   ];
 
-  return { purchases, products, suppliers, inventory, expenses };
+  const revenues: RevenueDayRecord[] = [
+    {
+      id: `rev_${today}`,
+      date: today,
+      mode: 'daily_total',
+      dailyTotalAmount: 18500000,
+      cardAmount: 14200000,
+      onlineAmount: 3500000,
+      cashAmount: 800000,
+      notes: 'فروش ناهار و شام روز جاری',
+      entries: [],
+      isDemo: true,
+      createdAt: nowIso,
+      updatedAt: nowIso
+    },
+    {
+      id: `rev_${yesterday}`,
+      date: yesterday,
+      mode: 'detailed',
+      dailyTotalAmount: 21400000,
+      notes: 'ثبت به صورت ریز تراکنش‌های فروش',
+      entries: [
+        {
+          id: 'demo_rev_item_1',
+          category: 'فروش غذا (سالن)',
+          description: 'فروش چلوکباب و خورشت‌های محلی سالن',
+          quantity: 48,
+          unitPrice: 300000,
+          amount: 14400000,
+          paymentMethod: 'کارت‌خوان / بانکی',
+          createdAt: nowIso
+        },
+        {
+          id: 'demo_rev_item_2',
+          category: 'سفارش آنلاین',
+          description: 'سفارش‌های پلتفرم آنلاین',
+          quantity: 18,
+          unitPrice: 280000,
+          amount: 5040000,
+          paymentMethod: 'آنلاین',
+          createdAt: nowIso
+        },
+        {
+          id: 'demo_rev_item_3',
+          category: 'فروش نوشیدنی و پیش‌غذا',
+          description: 'دوغ محلی، زیتون‌پرورده و ماست بورانی',
+          amount: 1960000,
+          paymentMethod: 'ترکیبی',
+          createdAt: nowIso
+        }
+      ],
+      isDemo: true,
+      createdAt: nowIso,
+      updatedAt: nowIso
+    },
+    {
+      id: `rev_${twoDaysAgo}`,
+      date: twoDaysAgo,
+      mode: 'daily_total',
+      dailyTotalAmount: 16900000,
+      notes: 'بستن صندوق شبانه',
+      entries: [],
+      isDemo: true,
+      createdAt: nowIso,
+      updatedAt: nowIso
+    }
+  ];
+
+  const timesheets: TimesheetEntry[] = [
+    {
+      id: 'demo_ts_1',
+      employeeId: 'demo_emp_1',
+      date: today,
+      clockIn: '08:00',
+      clockOut: '17:30',
+      overnight: false,
+      breakMinutes: 60,
+      netMinutes: 510,
+      notes: 'خرید صبحگاهی تره‌بار و تحویل به انبار',
+      isDemo: true,
+      createdAt: nowIso,
+      updatedAt: nowIso
+    },
+    {
+      id: 'demo_ts_2',
+      employeeId: 'demo_emp_2',
+      date: today,
+      clockIn: '08:15',
+      clockOut: '18:00',
+      overnight: false,
+      breakMinutes: 45,
+      netMinutes: 540,
+      notes: 'آماده‌سازی منوی ظهر و شب',
+      isDemo: true,
+      createdAt: nowIso,
+      updatedAt: nowIso
+    },
+    {
+      id: 'demo_ts_3',
+      employeeId: 'demo_emp_3',
+      date: yesterday,
+      clockIn: '16:00',
+      clockOut: '00:30',
+      overnight: true,
+      breakMinutes: 30,
+      netMinutes: 480,
+      notes: 'شیفت عصر و بستن آشپزخانه پس از نیمه‌شب',
+      isDemo: true,
+      createdAt: nowIso,
+      updatedAt: nowIso
+    },
+    {
+      id: 'demo_ts_4',
+      employeeId: 'demo_emp_1',
+      date: yesterday,
+      clockIn: '08:00',
+      clockOut: '17:00',
+      overnight: false,
+      breakMinutes: 60,
+      netMinutes: 480,
+      notes: '',
+      isDemo: true,
+      createdAt: nowIso,
+      updatedAt: nowIso
+    }
+  ];
+
+  return {
+    employees,
+    purchases,
+    products,
+    suppliers,
+    inventory,
+    expenses,
+    revenues,
+    timesheets
+  };
 }
