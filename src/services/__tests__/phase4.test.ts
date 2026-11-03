@@ -19,11 +19,12 @@ import {
   updateTimesheetEntry,
   loadDemoDataset,
   clearDemoDataset,
+  loadPurchases,
   resolvePurchaseEmployeeName,
   employeeByIdMap
 } from '../../stores/purchaseStore';
+import { ALL_STORES, dbClient, requestToPromise } from '../db';
 import { purchaseRepository } from '../repositories/PurchaseRepository';
-import { productRepository } from '../repositories/ProductRepository';
 import { backupService } from '../BackupService';
 import {
   calculateEmployeePurchaseAnalytics,
@@ -40,9 +41,12 @@ import { getPersianWeekdayName, parseJalaliInputToISO } from '../../utils/jalali
 
 describe('Phase 4: Employees, Purchase Attribution, Revenue, Financials & Timesheets', () => {
   beforeEach(async () => {
-    await purchaseRepository.clear();
-    await productRepository.replaceAll([]);
-    await clearDemoDataset();
+    await dbClient.executeTransaction([...ALL_STORES], 'readwrite', async (stores) => {
+      for (const name of ALL_STORES) {
+        await requestToPromise(stores[name].clear());
+      }
+    });
+    await loadPurchases(false);
   });
 
   it('registers, renames, and deactivates employees while keeping historical purchase attribution intact', async () => {
@@ -289,6 +293,7 @@ describe('Phase 4: Employees, Purchase Attribution, Revenue, Financials & Timesh
 
   it('exports and atomically restores all 9 stores and removes demo data without deleting real records', async () => {
     await loadDemoDataset();
+    expect(get(employees)).toHaveLength(4);
 
     // Add real employee, purchase, revenue, and timesheet
     const realEmp = await addEmployee({
@@ -296,6 +301,8 @@ describe('Phase 4: Employees, Purchase Attribution, Revenue, Financials & Timesh
       role: 'مدیر خرید',
       performanceCoefficient: 1.25
     });
+    expect(get(employees)).toHaveLength(5);
+
     const realDate = parseJalaliInputToISO('۱۴۰۵/۰۸/۱۲')!;
     await addPurchase({
       productName: 'ماهی سفید تازه',
