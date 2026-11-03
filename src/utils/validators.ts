@@ -1,4 +1,12 @@
-import type { BackupData, Product, Purchase, ApplicationSettings } from '../models/types';
+import type {
+  ApplicationSettings,
+  BackupData,
+  Expense,
+  InventoryItem,
+  Product,
+  Purchase,
+  Supplier
+} from '../models/types';
 import {
   isValidISODate,
   MAX_SAFE_AMOUNT,
@@ -6,6 +14,7 @@ import {
   normalizeProductKey,
   parseNumericInput
 } from './formatters';
+import { DEFAULT_SETTINGS } from '../services/repositories/SettingsRepository';
 
 export interface PurchaseValidationResult {
   isValid: boolean;
@@ -67,12 +76,8 @@ export interface BackupValidationResult {
   normalizedBackup?: BackupData;
 }
 
-const SUPPORTED_BACKUP_VERSIONS = [1];
+const SUPPORTED_BACKUP_VERSIONS = [1, 2];
 
-/**
- * Rebuilds the deduplicated products catalog from a list of purchases
- * so backups remain consistent and self-healing.
- */
 export function deriveProductsFromPurchases(
   purchases: Purchase[],
   existingProducts: Product[] = []
@@ -86,16 +91,22 @@ export function deriveProductsFromPurchases(
           id: String(prod.id || `prod_${crypto.randomUUID()}`),
           name: prod.name.trim(),
           normalizedName: key,
+          category: prod.category || 'عمومی',
           lastUnit: String(prod.lastUnit || 'کیلوگرم'),
           lastPrice: Number(prod.lastPrice) > 0 ? Math.round(Number(prod.lastPrice)) : 0,
-          lastPurchaseDate: isValidISODate(prod.lastPurchaseDate) ? prod.lastPurchaseDate : '1970-01-01',
-          totalPurchasesCount: Math.max(0, Math.trunc(Number(prod.totalPurchasesCount) || 0))
+          lastPurchaseDate: isValidISODate(prod.lastPurchaseDate)
+            ? prod.lastPurchaseDate
+            : '1970-01-01',
+          totalPurchasesCount: Math.max(
+            0,
+            Math.trunc(Number(prod.totalPurchasesCount) || 0)
+          ),
+          isDemo: Boolean(prod.isDemo)
         });
       }
     }
   }
 
-  // Sort purchases chronologically ascending so latest purchases determine lastUnit/lastPrice
   const sorted = [...purchases].sort(
     (a, b) =>
       a.purchaseDate.localeCompare(b.purchaseDate) ||
@@ -115,10 +126,12 @@ export function deriveProductsFromPurchases(
         id: p.productId || `prod_${crypto.randomUUID()}`,
         name: p.productName.trim(),
         normalizedName: key,
+        category: 'عمومی',
         lastUnit: p.unit,
         lastPrice: p.totalAmount,
         lastPurchaseDate: p.purchaseDate,
-        totalPurchasesCount: prevCount + 1
+        totalPurchasesCount: prevCount + 1,
+        isDemo: Boolean(p.isDemo)
       });
     } else {
       const isNewerOrEqual = p.purchaseDate >= existing.lastPurchaseDate;
@@ -127,7 +140,8 @@ export function deriveProductsFromPurchases(
         lastUnit: isNewerOrEqual ? p.unit : existing.lastUnit,
         lastPrice: isNewerOrEqual ? p.totalAmount : existing.lastPrice,
         lastPurchaseDate: isNewerOrEqual ? p.purchaseDate : existing.lastPurchaseDate,
-        totalPurchasesCount: prevCount + 1
+        totalPurchasesCount: prevCount + 1,
+        isDemo: existing.isDemo && Boolean(p.isDemo)
       });
     }
   }
@@ -188,14 +202,12 @@ export function validateBackupPayload(raw: unknown): BackupValidationResult {
       return { isValid: false, error: `مقدار خرید در ردیف ${i + 1} نامعتبر است.` };
     }
 
-    // Support both canonical `totalAmount` and prototype legacy `price`
     const rawAmount =
       item.totalAmount !== undefined ? Number(item.totalAmount) : Number(item.price);
     if (!Number.isFinite(rawAmount) || rawAmount <= 0 || rawAmount > MAX_SAFE_AMOUNT) {
       return { isValid: false, error: `مبلغ خرید در ردیف ${i + 1} نامعتبر است.` };
     }
 
-    // Support both canonical `purchaseDate` and prototype legacy `date`
     const purchaseDate =
       typeof item.purchaseDate === 'string'
         ? item.purchaseDate
@@ -245,6 +257,7 @@ export function validateBackupPayload(raw: unknown): BackupValidationResult {
         typeof item.notes === 'string' && item.notes.trim()
           ? item.notes.trim()
           : undefined,
+      isDemo: Boolean(item.isDemo),
       createdAt,
       updatedAt
     });
@@ -253,7 +266,6 @@ export function validateBackupPayload(raw: unknown): BackupValidationResult {
   const rawProducts = Array.isArray(data.products) ? (data.products as Product[]) : [];
   const reconciledProducts = deriveProductsFromPurchases(validatedPurchases, rawProducts);
 
-  // Ensure every purchase has a matching productId from the reconciled product list
   const productByKey = new Map<string, Product>(
     reconciledProducts.map((p) => [p.normalizedName, p])
   );
@@ -264,21 +276,43 @@ export function validateBackupPayload(raw: unknown): BackupValidationResult {
     }
   }
 
+  const validatedSuppliers: Supplier[] = Array.isArray(data.suppliers)
+    ? (data.suppliers as Supplier[]).filter(
+        (s) => s && typeof s.id === 'string' && typeof s.name === 'string'
+      )
+    : [];
+
+  const validatedInventory: InventoryItem[] = Array.isArray(data.inventory)
+    ? (data.inventory as InventoryItem[]).filter(
+        (inv) =>
+          inv && typeof inv.id === 'string' && typeof inv.productName === 'string'
+      )
+    : [];
+
+  const validatedExpenses: Expense[] = Array.isArray(data.expenses)
+    ? (data.expenses as Expense[]).filter(
+        (exp) =>
+          exp &&
+          typeof exp.id === 'string' &&
+          typeof exp.title === 'string' &&
+          Number(exp.amount) > 0
+      )
+    : [];
+
   const rawSettings =
     data.settings && typeof data.settings === 'object'
       ? (data.settings as Partial<ApplicationSettings>)
       : {};
 
   const validatedSettings: ApplicationSettings = {
-    serverAddress:
-      typeof rawSettings.serverAddress === 'string' ? rawSettings.serverAddress.trim() : '',
+    ...DEFAULT_SETTINGS,
+    ...rawSettings,
     defaultUnit:
       typeof rawSettings.defaultUnit === 'string' && rawSettings.defaultUnit.trim()
         ? rawSettings.defaultUnit.trim()
         : 'کیلوگرم',
     currency: 'IRT',
-    lastSyncAt:
-      typeof rawSettings.lastSyncAt === 'string' ? rawSettings.lastSyncAt : null
+    demoSeedInitialized: true
   };
 
   return {
@@ -291,6 +325,9 @@ export function validateBackupPayload(raw: unknown): BackupValidationResult {
           : new Date().toISOString(),
       purchases: validatedPurchases,
       products: reconciledProducts,
+      suppliers: validatedSuppliers,
+      inventory: validatedInventory,
+      expenses: validatedExpenses,
       settings: validatedSettings
     }
   };
