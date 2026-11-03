@@ -1,12 +1,12 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { settingsRepository } from '../../services/repositories/SettingsRepository';
-  import { purchaseRepository } from '../../services/repositories/PurchaseRepository';
-  import { productRepository } from '../../services/repositories/ProductRepository';
-  import { loadPurchases } from '../../stores/purchaseStore';
+  import { backupService } from '../../services/BackupService';
+  import { loadPurchases, purchases } from '../../stores/purchaseStore';
   import { showToast } from '../../stores/toastStore';
-  import { validateBackupData } from '../../utils/validators';
-  import type { ApplicationSettings, BackupData } from '../../models/types';
+  import { formatNumber } from '../../utils/formatters';
+  import { validateBackupPayload } from '../../utils/validators';
+  import { MEASUREMENT_UNITS, type ApplicationSettings } from '../../models/types';
 
   let currentSettings: ApplicationSettings = {
     serverAddress: '',
@@ -16,7 +16,8 @@
   };
 
   let fileInput: HTMLInputElement;
-  let isDevSettingsRevealed = true; // No fake security barrier; structured cleanly for future Go backend
+  let backupError = '';
+  let isProcessingBackup = false;
 
   onMount(async () => {
     currentSettings = await settingsRepository.getSettings();
@@ -30,20 +31,15 @@
   }
 
   async function handleBackupExport() {
+    if (isProcessingBackup) return;
+    backupError = '';
+    isProcessingBackup = true;
+
     try {
-      const purchasesList = await purchaseRepository.getAll();
-      const productsList = await productRepository.getAll();
-      const settings = await settingsRepository.getSettings();
-
-      const backup: BackupData = {
-        version: 1,
-        exportedAt: new Date().toISOString(),
-        purchases: purchasesList,
-        products: productsList,
-        settings
-      };
-
-      const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
+      const backup = await backupService.exportBackup();
+      const blob = new Blob([JSON.stringify(backup, null, 2)], {
+        type: 'application/json'
+      });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -51,15 +47,18 @@
       a.click();
       URL.revokeObjectURL(url);
 
-      showToast('فایل پشتیبان JSON با موفقیت دریافت شد.');
+      showToast('فایل پشتیبان JSON با موفقیت آماده شد.');
     } catch (err) {
       console.error(err);
-      showToast('خطا در دریافت خروجی پشتیبان.');
+      backupError = 'خطا در تهیه نسخه پشتیبان از پایگاه داده محلی.';
+    } finally {
+      isProcessingBackup = false;
     }
   }
 
   function triggerRestoreFile() {
-    fileInput.click();
+    backupError = '';
+    fileInput?.click();
   }
 
   async function handleRestoreFile(event: Event) {
@@ -67,90 +66,86 @@
     const file = target.files?.[0];
     if (!file) return;
 
+    backupError = '';
+    isProcessingBackup = true;
+
     try {
       const text = await file.text();
-      const parsed = JSON.parse(text);
-
-      if (!validateBackupData(parsed)) {
-        alert('فایل انتخاب‌شده معتبر نیست و ساختار پشتیبان گیله‌کُرد را ندارد.');
-        target.value = '';
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        backupError = 'فایل انتخاب‌شده یک فایل JSON معتبر نیست.';
         return;
       }
 
+      const validation = validateBackupPayload(parsed);
+      if (!validation.isValid || !validation.normalizedBackup) {
+        backupError =
+          validation.error ||
+          'فایل انتخاب‌شده معتبر نیست و ساختار پشتیبان گیله‌کُرد را ندارد.';
+        return;
+      }
+
+      const count = validation.normalizedBackup.purchases.length;
       const confirmed = window.confirm(
-        `آیا مطمئن هستید که می‌خواهید اطلاعات را بازیابی کنید؟\nاین فایل شامل ${parsed.purchases.length} خرید است. داده‌های کنونی با اطلاعات فایل جایگزین خواهند شد.`
+        `آیا از بازیابی اطلاعات مطمئن هستید؟\nاین فایل شامل ${formatNumber(count)} خرید معتبر است و جایگزین اطلاعات فعلی دستگاه خواهد شد.`
       );
 
       if (!confirmed) {
-        target.value = '';
         return;
       }
 
-      await purchaseRepository.replaceAll(parsed.purchases);
-      if (parsed.products && Array.isArray(parsed.products)) {
-        await productRepository.replaceAll(parsed.products);
-      }
-      if (parsed.settings) {
-        await settingsRepository.saveSettings(parsed.settings);
-        currentSettings = parsed.settings;
-      }
-
+      const restored = await backupService.restoreBackup(parsed);
+      currentSettings = restored.settings;
       await loadPurchases();
-      showToast('اطلاعات با موفقیت بازیابی شد.');
+      showToast('اطلاعات پشتیبان با موفقیت بازیابی شد.');
     } catch (err) {
       console.error(err);
-      alert('خطا در خواندن یا پردازش فایل پشتیبان JSON.');
+      backupError =
+        err instanceof Error
+          ? err.message
+          : 'خطا در بازیابی اطلاعات. داده‌های قبلی بدون تغییر حفظ شدند.';
     } finally {
+      isProcessingBackup = false;
       target.value = '';
     }
   }
 </script>
 
-<section class="page" aria-labelledby="settingsTitle">
+<section class="page active" aria-labelledby="settingsTitle">
   <div class="page-heading">
     <div>
       <p class="eyebrow">مدیریت برنامه</p>
       <h1 id="settingsTitle">تنظیمات</h1>
-      <p class="subheading">پیکربندی پایگاه داده محلی و ماژول‌های سیستم.</p>
+      <p class="subheading">پیکربندی برنامه، پشتیبان‌گیری محلی و وضعیت ارتباط با سرور.</p>
     </div>
   </div>
 
   <div class="settings-grid">
     <div class="settings-welcome">
       <div>
-        <span class="eyebrow">فضای ابری و سرور</span>
-        <h2>تنظیمات اتصال</h2>
-        <p>اتصال به سرور Go و احراز هویت متمرکز در فاز توسعه بک‌اند فعال خواهد شد.</p>
+        <span class="eyebrow">پنل مدیریت</span>
+        <h2>تنظیمات برنامه</h2>
+        <p>تنظیمات محلی روی این دستگاه فعال است. بخش‌های سروری پس از استقرار بک‌اند Go فعال می‌شوند.</p>
       </div>
     </div>
 
     <section class="panel setting-card">
-      <div class="setting-icon">⌘</div>
-      <div class="setting-content">
-        <h3>آدرس سرور</h3>
-        <p>نشانی سرور مرکزی Go برای همگام‌سازی بین چند دستگاه.</p>
-        <input 
-          placeholder="https://api.example.com" 
-          value={currentSettings.serverAddress} 
-          disabled 
-        />
-        <small>اتصال سرور در فاز بعد با پیاده‌سازی بک‌اند Go فعال می‌شود.</small>
-      </div>
-      <span class="coming-soon">به‌زودی</span>
-    </section>
-
-    <section class="panel setting-card">
       <div class="setting-icon">⚙</div>
       <div class="setting-content">
-        <h3>پیکربندی برنامه</h3>
-        <p>تنظیم واحدهای پیش‌فرض و پارامترهای پایه‌ای ثبت خرید.</p>
+        <h3>پیکربندی برنامه (محلی)</h3>
+        <p>تنظیم واحد پیش‌فرض هنگام ثبت خرید جدید در این دستگاه.</p>
         <div class="setting-inline">
           <label for="defaultUnit">واحد پیش‌فرض</label>
-          <select id="defaultUnit" value={currentSettings.defaultUnit} on:change={handleDefaultUnitChange}>
-            <option value="کیلوگرم">کیلوگرم</option>
-            <option value="عدد">عدد</option>
-            <option value="لیتر">لیتر</option>
-            <option value="بسته">بسته</option>
+          <select
+            id="defaultUnit"
+            value={currentSettings.defaultUnit}
+            on:change={handleDefaultUnitChange}
+          >
+            {#each MEASUREMENT_UNITS as itemUnit}
+              <option value={itemUnit}>{itemUnit}</option>
+            {/each}
           </select>
         </div>
       </div>
@@ -159,41 +154,94 @@
     <section class="panel setting-card">
       <div class="setting-icon">⇧</div>
       <div class="setting-content">
-        <h3>پشتیبان‌گیری و بازیابی محلی</h3>
-        <p>خروجی گرفتن از تمام خریدهای محلی و بازگردانی نسخه‌های قبلی.</p>
+        <h3>پشتیبان‌گیری و بازیابی (محلی)</h3>
+        <p>
+          دریافت فایل پشتیبان JSON از تمام خریدهای ذخیره‌شده ({formatNumber($purchases.length)} خرید) یا بازگردانی نسخه پشتیبان معتبر.
+        </p>
         <div class="setting-actions">
-          <button class="secondary-btn" type="button" on:click={handleBackupExport}>
-            خروجی کامل JSON
+          <button
+            class="secondary-btn"
+            type="button"
+            id="backupBtn"
+            disabled={isProcessingBackup}
+            on:click={handleBackupExport}
+          >
+            خروجی پشتیبان JSON
           </button>
-          <button class="quiet-btn" type="button" on:click={triggerRestoreFile}>
-            بازیابی از فایل JSON
+          <button
+            class="quiet-btn"
+            type="button"
+            id="restoreBtn"
+            disabled={isProcessingBackup}
+            on:click={triggerRestoreFile}
+          >
+            انتخاب فایل بازیابی
           </button>
-          <input 
-            type="file" 
-            bind:this={fileInput} 
-            accept="application/json" 
-            on:change={handleRestoreFile} 
-            hidden 
+          <input
+            type="file"
+            id="restoreFile"
+            bind:this={fileInput}
+            accept="application/json,.json"
+            on:change={handleRestoreFile}
+            hidden
           />
         </div>
-        <small>فایل‌های پشتیبان اعتبارسنجی شده و قبل از جایگزینی داده‌ها تأییدیه کاربر دریافت می‌شود.</small>
+        {#if backupError}
+          <div class="form-error" role="alert" style="margin-top: 10px; margin-bottom: 0;">
+            {backupError}
+          </div>
+        {/if}
+        <small>
+          فایل ورودی پیش از جایگزینی به‌صورت کامل اعتبارسنجی می‌شود و در صورت بروز خطا، اطلاعات قبلی حفظ خواهد شد.
+        </small>
       </div>
     </section>
 
     <section class="panel setting-card">
       <div class="setting-icon">⟳</div>
       <div class="setting-content">
-        <h3>وضعیت همگام‌سازی</h3>
-        <p>وضعیت ارتباط با سرور مرکزی.</p>
+        <h3>وضعیت ذخیره‌سازی و همگام‌سازی</h3>
+        <p>وضعیت پایگاه داده محلی و ارتباط با سرور مرکزی.</p>
         <div class="sync-status">
-          <span class="status-dot muted"></span> متصل نیست 
-          <small>پایگاه داده IndexedDB محلی فعال است</small>
+          <span class="status-dot"></span> پایگاه داده محلی (IndexedDB) فعال است
+          <small>— همگام‌سازی ابری متصل نیست</small>
         </div>
+        <small>
+          اطلاعات ثبت‌شده در این مرورگر باقی می‌ماند اما تا زمان راه‌اندازی سرور Go بین دستگاه‌های مختلف همگام‌سازی نمی‌شود.
+        </small>
       </div>
     </section>
 
+    <section class="panel setting-card">
+      <div class="setting-icon">⌘</div>
+      <div class="setting-content">
+        <h3>آدرس سرور مرکزی</h3>
+        <p>نشانی سرویس بک‌اند Go برای همگام‌سازی دستگاه‌ها.</p>
+        <input
+          id="serverAddress"
+          placeholder="https://api.example.com"
+          value={currentSettings.serverAddress}
+          disabled
+        />
+        <small>اتصال به سرور در نسخه فعلی پیاده‌سازی نشده است.</small>
+      </div>
+      <span class="coming-soon">به‌زودی</span>
+    </section>
+
+    <section class="panel setting-card">
+      <div class="setting-icon">⌑</div>
+      <div class="setting-content">
+        <h3>احراز هویت و دسترسی مدیر</h3>
+        <p>ورود امن مدیر و مدیریت سطح دسترسی کاربران.</p>
+        <small>
+          احراز هویت در این فاز فرانت‌اند پیاده‌سازی نشده است و پس از اتصال به بک‌اند Go فعال خواهد شد.
+        </small>
+      </div>
+      <span class="coming-soon">پیاده‌سازی نشده</span>
+    </section>
+
     <div class="settings-disclaimer">
-      توجه: احراز هویت و ذخیره‌سازی ابری چندکاربره نیازمند استقرار سرویس بک‌اند Go است. اطلاعات فعلی در مرورگر جاری نگهداری می‌شود.
+      پیکربندی واحد پیش‌فرض و پشتیبان‌گیری JSON به‌صورت کامل روی پایگاه داده محلی کار می‌کنند. احراز هویت و همگام‌سازی چنددستگاهی نیازمند بک‌اند Go در فاز بعدی است.
     </div>
   </div>
 </section>
