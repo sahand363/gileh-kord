@@ -4,25 +4,31 @@
     dashboardSummary,
     recentPurchases
   } from '../../stores/purchaseStore';
+  import { isManagerUnlocked } from '../../services/ManagerAuthService';
   import { navigateTo, NAV_SECTIONS } from '../../stores/navigationStore';
   import {
     formatMoney,
     formatNumber,
     toJalaliDate,
+    toJalaliNumeric,
     getTodayISODate
   } from '../../utils/formatters';
+  import { getPersianWeekdayName } from '../../utils/jalali';
   import PurchaseCard from '../../components/purchases/PurchaseCard.svelte';
   import EmptyState from '../../components/common/EmptyState.svelte';
 
-  const todayJalali = toJalaliDate(getTodayISODate());
+  const todayISO = getTodayISODate();
+  const todayJalali = `${getPersianWeekdayName(todayISO)} ${toJalaliDate(todayISO)} (${toJalaliNumeric(todayISO)})`;
 </script>
 
 <section class="page active" aria-labelledby="dashboardTitle">
   <div class="page-heading">
     <div>
-      <p class="eyebrow">نمای کلی عملیات رستوران</p>
-      <h1 id="dashboardTitle">پیشخوان مدیریت گیله‌کُرد</h1>
-      <p class="subheading">خلاصه وضعیت خریدهای روزانه، موجودی انبار، هزینه‌ها و دسترسی سریع به ماژول‌ها.</p>
+      <p class="eyebrow">نمای کلی عملیات روزانه رستوران</p>
+      <h1 id="dashboardTitle">پیشخوان عملیاتی گیله‌کُرد</h1>
+      <p class="subheading">
+        خلاصه وضعیت خریدهای روزانه، پرسنل فعال و هشدارهای موجودی انبار (اطلاعات حساس مالی و درآمد در «پنل مدیریت» محافظت می‌شود).
+      </p>
     </div>
     <div class="heading-date">
       <span class="calendar-icon">▦</span>
@@ -43,28 +49,43 @@
     <section class="panel kpi-card">
       <div class="card-topline">
         <span class="mini-icon">▤</span>
-        <span>کل خریدهای دوره</span>
+        <span>کل فاکتورهای خرید</span>
       </div>
-      <div class="kpi-value">{formatMoney($dashboardSummary.totalPurchasesAmount)} <small>تومان</small></div>
-      <div class="kpi-sub">از مجموع {formatNumber($dashboardSummary.totalPurchasesCount)} خرید ثبت‌شده</div>
+      <div class="kpi-value">{formatNumber($dashboardSummary.totalPurchasesCount)} <small>فاکتور</small></div>
+      <div class="kpi-sub">در کل دوره ({formatNumber($dashboardSummary.productsCount)} قلم کالا)</div>
     </section>
 
     <section class="panel kpi-card">
       <div class="card-topline">
-        <span class="mini-icon">◫</span>
-        <span>هشدار کسری انبار</span>
+        <span class="mini-icon">◈</span>
+        <span>کارکنان فعال</span>
       </div>
-      <div class="kpi-value">{formatNumber($dashboardSummary.lowStockItems.length)} <small>قلم کالا</small></div>
-      <div class="kpi-sub">نیازمند تأمین و سفارش مجدد</div>
+      <div class="kpi-value">
+        {formatNumber($dashboardSummary.activeEmployeesCount)} <small>نفر</small>
+      </div>
+      <div class="kpi-sub">
+        از مجموع {formatNumber($dashboardSummary.employeesCount)} کارمند ثبت‌شده
+      </div>
     </section>
 
     <section class="panel kpi-card">
       <div class="card-topline">
-        <span class="mini-icon">¤</span>
-        <span>هزینه‌های جانبی</span>
+        <span class="mini-icon">⌑</span>
+        <span>پنل مدیریت مالی</span>
       </div>
-      <div class="kpi-value">{formatMoney($dashboardSummary.totalExpenses)} <small>تومان</small></div>
-      <div class="kpi-sub">قبوض، حمل‌ونقل و تعمیرات</div>
+      <div class="kpi-value" style="font-size: 16px;">
+        {$isManagerUnlocked ? 'باز (دسترسی فعال)' : 'محافظت‌شده با رمز'}
+      </div>
+      <div class="kpi-sub">
+        <button
+          type="button"
+          class="text-btn"
+          style="padding: 0; font-size: 10px;"
+          on:click={() => navigateTo('manager')}
+        >
+          مشاهده تراز مالی و درآمد ←
+        </button>
+      </div>
     </section>
   </div>
 
@@ -73,7 +94,7 @@
       <div class="section-heading">
         <div>
           <h2>آخرین خریدهای ثبت‌شده</h2>
-          <p>بروزرسانی زنده پس از هر ثبت خرید</p>
+          <p>بروزرسانی زنده به همراه نام کارمند مسئول خرید</p>
         </div>
         <button type="button" class="secondary-btn" on:click={() => navigateTo('entry')}>
           ＋ ثبت خرید جدید
@@ -97,7 +118,7 @@
     <section class="panel card-pad">
       <div class="section-heading">
         <div>
-          <h2>هشدارهای موجودی انبار</h2>
+          <h2>هشدارهای موجودی انبار ({formatNumber($dashboardSummary.lowStockItems.length)})</h2>
           <p>اقلامی که موجودی آن‌ها کمتر از حد مجاز است</p>
         </div>
         <button type="button" class="text-btn" on:click={() => navigateTo('inventory')}>
@@ -143,7 +164,7 @@
     <div class="section-heading">
       <div>
         <h2>دسترسی سریع به ماژول‌های سامانه</h2>
-        <p>تمامی بخش‌های عملیاتی و مدیریتی گیله‌کُرد</p>
+        <p>تمامی بخش‌های عملیاتی، پرسنلی و مدیریتی گیله‌کُرد</p>
       </div>
     </div>
     <div class="quick-nav-grid">
