@@ -11,20 +11,23 @@
   let searchQuery = '';
   let dateFrom = '';
   let dateTo = '';
+  let onlyReal = false;
 
   $: filteredPurchases = filterPurchases($purchases, {
     query: searchQuery,
     dateFrom,
-    dateTo
+    dateTo,
+    onlyReal
   });
 
   $: filteredStats = calculatePurchaseStats(filteredPurchases);
-  $: hasActiveFilters = Boolean(searchQuery.trim() || dateFrom || dateTo);
+  $: hasActiveFilters = Boolean(searchQuery.trim() || dateFrom || dateTo || onlyReal);
 
   function clearFilters() {
     searchQuery = '';
     dateFrom = '';
     dateTo = '';
+    onlyReal = false;
   }
 </script>
 
@@ -33,7 +36,7 @@
     <div>
       <p class="eyebrow">گزارش و پیگیری</p>
       <h1 id="historyTitle">تاریخچه خریدها</h1>
-      <p class="subheading">خریدهای ثبت‌شده را جست‌وجو و بررسی کنید.</p>
+      <p class="subheading">خریدهای ثبت‌شده را بر اساس نام کالا، فروشنده یا بازه زمانی جست‌وجو و بررسی کنید.</p>
     </div>
   </div>
 
@@ -44,7 +47,7 @@
         <input
           id="historySearch"
           bind:value={searchQuery}
-          placeholder="جست‌وجوی نام محصول..."
+          placeholder="جست‌وجوی نام محصول، فروشنده یا شماره فاکتور..."
           aria-label="جست‌وجوی نام محصول"
         />
       </div>
@@ -56,13 +59,20 @@
         <span>تا تاریخ</span>
         <input id="dateTo" type="date" bind:value={dateTo} aria-label="تا تاریخ" />
       </label>
+      <button
+        type="button"
+        class={onlyReal ? 'secondary-btn' : 'quiet-btn'}
+        on:click={() => (onlyReal = !onlyReal)}
+      >
+        {onlyReal ? '✓ فقط ثبت واقعی' : 'همه (شامل نمونه)'}
+      </button>
       <button id="clearFilters" class="quiet-btn" type="button" on:click={clearFilters}>
-        پاک کردن
+        پاک کردن فیلترها
       </button>
     </div>
 
     <div class="history-summary">
-      <span id="historyCount">{formatNumber(filteredStats.count)} خرید</span>
+      <span id="historyCount">{formatNumber(filteredStats.count)} خرید منطبق</span>
       <span>
         مجموع مبلغ: <strong id="historyTotal">{formatMoney(filteredStats.total)} تومان</strong>
       </span>
