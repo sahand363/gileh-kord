@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { purchases } from '../../stores/purchaseStore';
+  import { purchases, employees, suppliers } from '../../stores/purchaseStore';
   import { formatMoney, formatNumber } from '../../utils/formatters';
   import {
     calculatePurchaseStats,
@@ -12,22 +12,35 @@
   let searchQuery = '';
   let dateFrom = '';
   let dateTo = '';
+  let selectedEmployeeId = '';
+  let selectedSupplier = '';
   let onlyReal = false;
 
   $: filteredPurchases = filterPurchases($purchases, {
     query: searchQuery,
     dateFrom,
     dateTo,
+    employeeId: selectedEmployeeId,
+    supplierName: selectedSupplier,
     onlyReal
   });
 
   $: filteredStats = calculatePurchaseStats(filteredPurchases);
-  $: hasActiveFilters = Boolean(searchQuery.trim() || dateFrom || dateTo || onlyReal);
+  $: hasActiveFilters = Boolean(
+    searchQuery.trim() ||
+      dateFrom ||
+      dateTo ||
+      selectedEmployeeId ||
+      selectedSupplier ||
+      onlyReal
+  );
 
   function clearFilters() {
     searchQuery = '';
     dateFrom = '';
     dateTo = '';
+    selectedEmployeeId = '';
+    selectedSupplier = '';
     onlyReal = false;
   }
 </script>
@@ -35,9 +48,11 @@
 <section class="page active" aria-labelledby="historyTitle">
   <div class="page-heading">
     <div>
-      <p class="eyebrow">گزارش و پیگیری با تقویم شمسی</p>
+      <p class="eyebrow">گزارش و پیگیری با تقویم شمسی و تفکیک مسئول خرید</p>
       <h1 id="historyTitle">تاریخچه خریدها</h1>
-      <p class="subheading">خریدهای ثبت‌شده را بر اساس نام کالا، فروشنده یا بازه تاریخ شمسی جست‌وجو و بررسی کنید.</p>
+      <p class="subheading">
+        خریدهای ثبت‌شده را بر اساس کارمند مسئول خرید، نام کالا، فروشنده یا بازه تاریخ شمسی فیلتر کنید.
+      </p>
     </div>
   </div>
 
@@ -48,10 +63,38 @@
         <input
           id="historySearch"
           bind:value={searchQuery}
-          placeholder="جست‌وجوی نام محصول، فروشنده یا شماره فاکتور..."
+          placeholder="جست‌وجوی نام محصول یا شماره فاکتور..."
           aria-label="جست‌وجوی نام محصول"
         />
       </div>
+
+      <select
+        id="historyEmployeeFilter"
+        bind:value={selectedEmployeeId}
+        style="width: auto; min-width: 165px; height: 42px; font-size: 11px;"
+        aria-label="فیلتر بر اساس کارمند مسئول خرید"
+      >
+        <option value="">همه کارکنان (مسئول خرید)</option>
+        <option value="__unassigned__">بدون ثبت مسئول خرید</option>
+        {#each $employees as emp (emp.id)}
+          <option value={emp.id}>
+            {emp.name} ({emp.role})
+          </option>
+        {/each}
+      </select>
+
+      <select
+        id="historySupplierFilter"
+        bind:value={selectedSupplier}
+        style="width: auto; min-width: 150px; height: 42px; font-size: 11px;"
+        aria-label="فیلتر بر اساس فروشنده"
+      >
+        <option value="">همه فروشندگان</option>
+        {#each $suppliers as sup (sup.id)}
+          <option value={sup.name}>{sup.name}</option>
+        {/each}
+      </select>
+
       <div class="date-filter">
         <span>از تاریخ (شمسی)</span>
         <div class="date-picker-filter-wrap">
@@ -64,6 +107,7 @@
           />
         </div>
       </div>
+
       <div class="date-filter">
         <span>تا تاریخ (شمسی)</span>
         <div class="date-picker-filter-wrap">
@@ -76,6 +120,7 @@
           />
         </div>
       </div>
+
       <button
         type="button"
         class={onlyReal ? 'secondary-btn' : 'quiet-btn'}
@@ -83,6 +128,7 @@
       >
         {onlyReal ? '✓ فقط ثبت واقعی' : 'همه (شامل نمونه)'}
       </button>
+
       <button id="clearFilters" class="quiet-btn" type="button" on:click={clearFilters}>
         پاک کردن فیلترها
       </button>
@@ -108,7 +154,7 @@
       {:else}
         <EmptyState
           title="موردی پیدا نشد"
-          message="عبارت جست‌وجو یا بازه تاریخ شمسی را تغییر دهید."
+          message="فیلتر کارمند، عبارت جست‌وجو یا بازه تاریخ شمسی را تغییر دهید."
         />
       {/if}
     </div>
