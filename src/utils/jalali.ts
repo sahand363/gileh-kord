@@ -1,5 +1,6 @@
 import jalaali from 'jalaali-js';
 import type { JalaaliDateObject } from 'jalaali-js';
+import { PERSIAN_WEEKDAYS, type PersianWeekdayIndex } from '../models/types';
 
 export const JALALI_MONTH_NAMES = [
   'فروردین',
@@ -50,20 +51,12 @@ export function isValidGregorianISODate(isoDate: string): boolean {
   return dt.getFullYear() === y && dt.getMonth() === m - 1 && dt.getDate() === d;
 }
 
-/**
- * Converts a YYYY-MM-DD Gregorian ISO string into Jalali { jy, jm, jd } parts
- * without timezone drift.
- */
 export function isoToJalaliParts(isoDate: string): JalaaliDateObject | null {
   if (!isValidGregorianISODate(isoDate)) return null;
   const [gy, gm, gd] = isoDate.split('-').map(Number);
   return jalaali.toJalaali(gy, gm, gd);
 }
 
-/**
- * Converts Jalali { jy, jm, jd } parts into a YYYY-MM-DD Gregorian ISO string.
- * Validates month boundaries (31/30/29) and leap years first.
- */
 export function jalaliPartsToISO(jy: number, jm: number, jd: number): string | null {
   if (!jalaali.isValidJalaaliDate(jy, jm, jd)) {
     return null;
@@ -82,8 +75,25 @@ export function getJalaliMonthLength(jy: number, jm: number): number {
 }
 
 /**
- * Formats YYYY-MM-DD as '۱۲ آبان ۱۴۰۵'
+ * Returns the Persian weekday index (0 = شنبه / Saturday ... 6 = جمعه / Friday)
+ * from a YYYY-MM-DD Gregorian ISO date at local noon (immune to DST/midnight drift).
  */
+export function getPersianWeekdayIndex(isoDate: string): PersianWeekdayIndex | null {
+  if (!isValidGregorianISODate(isoDate)) return null;
+  const [gy, gm, gd] = isoDate.split('-').map(Number);
+  const dt = new Date(gy, gm - 1, gd, 12, 0, 0);
+  return ((dt.getDay() + 1) % 7) as PersianWeekdayIndex;
+}
+
+/**
+ * Returns the full Persian weekday name (e.g. 'سه‌شنبه') for a YYYY-MM-DD ISO date.
+ */
+export function getPersianWeekdayName(isoDate: string): string {
+  const idx = getPersianWeekdayIndex(isoDate);
+  if (idx === null) return '';
+  return PERSIAN_WEEKDAYS[idx];
+}
+
 export function formatJalaliLong(isoDate: string): string {
   const parts = isoToJalaliParts(isoDate);
   if (!parts) return '';
@@ -91,18 +101,33 @@ export function formatJalaliLong(isoDate: string): string {
   return `${faDigitFormatter.format(parts.jd)} ${monthName} ${faDigitFormatter.format(parts.jy)}`;
 }
 
-/**
- * Formats YYYY-MM-DD as '۱۴۰۵/۰۸/۱۲'
- */
 export function formatJalaliNumeric(isoDate: string): string {
   const parts = isoToJalaliParts(isoDate);
   if (!parts) return '';
   return `${toPersianDigits(parts.jy)}/${padPersianTwo(parts.jm)}/${padPersianTwo(parts.jd)}`;
 }
 
-/**
- * Formats a full ISO-8601 timestamp (e.g. backup export time) into Persian Jalali date + time.
- */
+export function formatJalaliWithWeekday(isoDate: string): string {
+  const num = formatJalaliNumeric(isoDate);
+  const wd = getPersianWeekdayName(isoDate);
+  if (!num) return '';
+  return wd ? `${wd} ${num}` : num;
+}
+
+export function getJalaliYearMonthKey(isoDate: string): string {
+  const parts = isoToJalaliParts(isoDate);
+  if (!parts) return '';
+  return `${parts.jy}/${String(parts.jm).padStart(2, '0')}`;
+}
+
+export function formatJalaliYearMonthLabel(ymKey: string): string {
+  const [jyStr, jmStr] = ymKey.split('/');
+  const jy = Number(jyStr);
+  const jm = Number(jmStr);
+  if (!jy || jm < 1 || jm > 12) return ymKey;
+  return `${JALALI_MONTH_NAMES[jm - 1]} ${toPersianDigits(jy)}`;
+}
+
 export function formatJalaliDateTime(isoTimestamp: string): string {
   if (!isoTimestamp) return '';
   const d = new Date(isoTimestamp);
@@ -116,9 +141,6 @@ export function formatJalaliDateTime(isoTimestamp: string): string {
   return `${toPersianDigits(jd)} ${JALALI_MONTH_NAMES[jm - 1]} ${toPersianDigits(jy)} — ساعت ${hh}:${mm}`;
 }
 
-/**
- * Parses a user-entered Jalali string (e.g. '۱۴۰۵/۰۸/۱۲' or '1405-8-12') into YYYY-MM-DD ISO format.
- */
 export function parseJalaliInputToISO(input: string): string | null {
   if (!input) return null;
   const ascii = String(input)
@@ -142,14 +164,9 @@ export interface JalaliCalendarCell {
   isCurrentMonth: boolean;
 }
 
-/**
- * Returns the weekday index (0 = Saturday / شنبه ... 6 = Friday / جمعه)
- * for the 1st day of the given Jalali month.
- */
 export function getJalaliMonthStartWeekday(jy: number, jm: number): number {
   const { gy, gm, gd } = jalaali.toGregorian(jy, jm, 1);
   const dt = new Date(gy, gm - 1, gd, 12, 0, 0);
-  // JS getDay(): 0 = Sunday .. 6 = Saturday. Convert so 0 = Saturday, 1 = Sunday ... 6 = Friday
   return (dt.getDay() + 1) % 7;
 }
 
