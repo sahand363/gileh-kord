@@ -1,5 +1,7 @@
-const DB_NAME = 'gileh_kord_db';
-const DB_VERSION = 1;
+import { normalizeProductKey } from '../utils/formatters';
+
+export const DB_NAME = 'gileh_kord_db';
+export const DB_VERSION = 2;
 
 export class IndexedDBClient {
   private db: IDBDatabase | null = null;
@@ -9,69 +11,197 @@ export class IndexedDBClient {
     if (this.db) return this.db;
     if (this.initPromise) return this.initPromise;
 
-    this.initPromise = new Promise((resolve, reject) => {
+    this.initPromise = new Promise<IDBDatabase>((resolve, reject) => {
+      if (typeof indexedDB === 'undefined') {
+        this.initPromise = null;
+        reject(new Error('IndexedDB در این مرورگر یا محیط فعال نیست.'));
+        return;
+      }
+
       const request = indexedDB.open(DB_NAME, DB_VERSION);
 
       request.onerror = () => {
-        reject(new Error(`Failed to open IndexedDB: ${request.error?.message}`));
+        this.initPromise = null;
+        reject(
+          new Error(
+            `خطا در باز کردن پایگاه داده محلی: ${request.error?.message || 'Unknown error'}`
+          )
+        );
+      };
+
+      request.onblocked = () => {
+        this.initPromise = null;
+        reject(
+          new Error(
+            'پایگاه داده در تب دیگری باز است. لطفاً سایر تب‌های برنامه را ببندید.'
+          )
+        );
       };
 
       request.onsuccess = () => {
-        this.db = request.result;
-        resolve(this.db);
+        const db = request.result;
+        db.onversionchange = () => {
+          db.close();
+          this.db = null;
+          this.initPromise = null;
+        };
+        db.onclose = () => {
+          this.db = null;
+          this.initPromise = null;
+        };
+        this.db = db;
+        resolve(db);
       };
 
       request.onupgradeneeded = (event) => {
         const db = (event.target as IDBOpenDBRequest).result;
-
-        if (!db.objectStoreNames.contains('purchases')) {
-          const purchaseStore = db.createObjectStore('purchases', { keyPath: 'id' });
-          purchaseStore.createIndex('purchaseDate', 'purchaseDate', { unique: false });
-          purchaseStore.createIndex('productName', 'productName', { unique: false });
-          purchaseStore.createIndex('createdAt', 'createdAt', { unique: false });
-        }
-
-        if (!db.objectStoreNames.contains('products')) {
-          const productStore = db.createObjectStore('products', { keyPath: 'id' });
-          productStore.createIndex('name', 'name', { unique: true });
-        }
-
-        if (!db.objectStoreNames.contains('settings')) {
-          db.createObjectStore('settings', { keyPath: 'key' });
-        }
+        const tx = (event.target as IDBOpenDBRequest).transaction!;
+        this.runMigrations(db, event.oldVersion, tx);
       };
     });
 
     return this.initPromise;
   }
 
+  private runMigrations(
+    db: IDBDatabase,
+    oldVersion: number,
+    tx: IDBTransaction
+  ): void {
+    // Version 1: Initial object stores
+    if (oldVersion < 1) {
+      if (!db.objectStoreNames.contains('purchases')) {
+        const purchaseStore = db.createObjectStore('purchases', { keyPath: 'id' });
+        purchaseStore.createIndex('purchaseDate', 'purchaseDate', { unique: false });
+        purchaseStore.createIndex('productName', 'productName', { unique: false });
+        purchaseStore.createIndex('createdAt', 'createdAt', { unique: false });
+      }
+
+      if (!db.objectStoreNames.contains('products')) {
+        const productStore = db.createObjectStore('products', { keyPath: 'id' });
+        productStore.createIndex('name', 'name', { unique: false });
+        productStore.createIndex('normalizedName', 'normalizedName', { unique: false });
+      }
+
+      if (!db.objectStoreNames.contains('settings')) {
+        db.createObjectStore('settings', { keyPath: 'key' });
+      }
+    }
+
+    // Version 2: Safe non-unique normalizedName index on products while preserving existing records
+    if (oldVersion >= 1 && oldVersion < 2) {
+      if (db.objectStoreNames.contains('products')) {
+        const productStore = tx.objectStore('products');
+        if (productStore.indexNames.contains('name')) {
+          productStore.deleteIndex('name');
+        }
+        productStore.createIndex('name', 'name', { unique: false });
+
+        if (!productStore.indexNames.contains('normalizedName')) {
+          productStore.createIndex('normalizedName', 'normalizedName', {
+            unique: false
+          });
+        }
+
+        const cursorReq = productStore.openCursor();
+        cursorReq.onsuccess = (e) => {
+          const cursor = (e.target as IDBRequest<IDBCursorWithValue | null>).result;
+          if (cursor) {
+            const value = cursor.value;
+            if (value && typeof value.name === 'string' && !value.normalizedName) {
+              value.normalizedName = normalizeProductKey(value.name);
+              cursor.update(value);
+            }
+            cursor.continue();
+          }
+        };
+      }
+    }
+  }
+
+  /**
+   * Executes an operation inside an IndexedDB transaction and resolves ONLY
+   * after `tx.oncomplete` fires. If the operation throws or rejects, the transaction
+   * is explicitly aborted so partial writes are never committed.
+   */
   public async executeTransaction<T>(
     storeNames: string | string[],
     mode: IDBTransactionMode,
-    callback: (stores: { [name: string]: IDBObjectStore }) => Promise<T>
+    operation: (
+      stores: Record<string, IDBObjectStore>,
+      tx: IDBTransaction
+    ) => Promise<T> | T
   ): Promise<T> {
     const db = await this.getDB();
     const names = Array.isArray(storeNames) ? storeNames : [storeNames];
     const tx = db.transaction(names, mode);
 
-    const storeMap: { [name: string]: IDBObjectStore } = {};
+    const storeMap: Record<string, IDBObjectStore> = {};
     for (const name of names) {
       storeMap[name] = tx.objectStore(name);
     }
 
     return new Promise<T>((resolve, reject) => {
-      let result: T;
-      callback(storeMap)
-        .then((res) => {
-          result = res;
-        })
-        .catch(reject);
+      let operationResult: T;
+      let operationCompleted = false;
+      let settled = false;
 
-      tx.oncomplete = () => resolve(result);
-      tx.onerror = () => reject(tx.error);
-      tx.onabort = () => reject(new Error('IndexedDB transaction aborted'));
+      const fail = (err: unknown) => {
+        if (settled) return;
+        settled = true;
+        try {
+          tx.abort();
+        } catch {
+          // Ignore if transaction already finished/aborted
+        }
+        reject(err instanceof Error ? err : new Error(String(err)));
+      };
+
+      tx.oncomplete = () => {
+        if (settled) return;
+        if (!operationCompleted) {
+          settled = true;
+          reject(new Error('تراکنش پایگاه داده پیش از تکمیل عملیات بسته شد.'));
+          return;
+        }
+        settled = true;
+        resolve(operationResult);
+      };
+
+      tx.onerror = () => {
+        fail(tx.error || new Error('خطا در تراکنش پایگاه داده محلی.'));
+      };
+
+      tx.onabort = () => {
+        fail(tx.error || new Error('تراکنش پایگاه داده لغو شد.'));
+      };
+
+      Promise.resolve()
+        .then(() => operation(storeMap, tx))
+        .then((res) => {
+          operationResult = res;
+          operationCompleted = true;
+        })
+        .catch((err) => {
+          fail(err);
+        });
     });
+  }
+
+  public close(): void {
+    if (this.db) {
+      this.db.close();
+      this.db = null;
+      this.initPromise = null;
+    }
   }
 }
 
 export const dbClient = new IndexedDBClient();
+
+export function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('IDBRequest failed'));
+  });
+}
