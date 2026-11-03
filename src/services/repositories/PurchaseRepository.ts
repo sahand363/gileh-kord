@@ -10,6 +10,8 @@ export interface CreatePurchaseInput {
   unit: string;
   totalAmount: number;
   purchaseDate: string;
+  employeeId?: string;
+  employeeNameSnapshot?: string;
   supplierName?: string;
   invoiceNumber?: string;
   notes?: string;
@@ -31,22 +33,19 @@ export class PurchaseRepository {
   public async getByDateRange(
     startDate?: string,
     endDate?: string,
-    query?: string
+    query?: string,
+    employeeId?: string
   ): Promise<Purchase[]> {
     const all = await this.getAll();
     const criteria: PurchaseFilterCriteria = {
       dateFrom: startDate,
       dateTo: endDate,
-      query
+      query,
+      employeeId
     };
     return filterPurchases(all, criteria);
   }
 
-  /**
-   * Atomically creates a purchase record and updates/creates the associated product record
-   * within a single readwrite IndexedDB transaction across ['purchases', 'products'].
-   * Works reliably over both HTTP IP and HTTPS domain.
-   */
   public async createPurchaseWithProduct(
     input: CreatePurchaseInput
   ): Promise<{ purchase: Purchase; product: Product }> {
@@ -110,6 +109,8 @@ export class PurchaseRepository {
           totalAmount: Math.round(input.totalAmount),
           currency: 'IRT',
           purchaseDate: input.purchaseDate,
+          employeeId: input.employeeId?.trim() || undefined,
+          employeeNameSnapshot: input.employeeNameSnapshot?.trim() || undefined,
           supplierName: input.supplierName?.trim() || undefined,
           invoiceNumber: input.invoiceNumber?.trim() || undefined,
           notes: input.notes?.trim() || undefined,
