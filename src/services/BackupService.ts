@@ -8,9 +8,12 @@ import {
 import { validateBackupPayload } from '../utils/validators';
 import type {
   BackupData,
+  Employee,
   Expense,
   InventoryItem,
-  Supplier
+  RevenueDayRecord,
+  Supplier,
+  TimesheetEntry
 } from '../models/types';
 
 export class BackupService {
@@ -22,24 +25,39 @@ export class BackupService {
   }
 
   public async exportBackup(): Promise<BackupData> {
-    const [purchases, products, suppliers, inventory, expenses, settings] =
-      await Promise.all([
-        purchaseRepository.getAll(),
-        productRepository.getAll(),
-        this.getStoreItems<Supplier>('suppliers'),
-        this.getStoreItems<InventoryItem>('inventory'),
-        this.getStoreItems<Expense>('expenses'),
-        settingsRepository.getSettings()
-      ]);
+    const [
+      purchases,
+      products,
+      suppliers,
+      inventory,
+      expenses,
+      employees,
+      revenues,
+      timesheets,
+      settings
+    ] = await Promise.all([
+      purchaseRepository.getAll(),
+      productRepository.getAll(),
+      this.getStoreItems<Supplier>('suppliers'),
+      this.getStoreItems<InventoryItem>('inventory'),
+      this.getStoreItems<Expense>('expenses'),
+      this.getStoreItems<Employee>('employees'),
+      this.getStoreItems<RevenueDayRecord>('revenues'),
+      this.getStoreItems<TimesheetEntry>('timesheets'),
+      settingsRepository.getSettings()
+    ]);
 
     return {
-      version: 2,
+      version: 3,
       exportedAt: new Date().toISOString(),
       purchases,
       products,
       suppliers,
       inventory,
       expenses,
+      employees,
+      revenues,
+      timesheets,
       settings
     };
   }
@@ -65,6 +83,13 @@ export class BackupService {
         await requestToPromise(stores['suppliers'].clear());
         await requestToPromise(stores['inventory'].clear());
         await requestToPromise(stores['expenses'].clear());
+        await requestToPromise(stores['employees'].clear());
+        await requestToPromise(stores['revenues'].clear());
+        await requestToPromise(stores['timesheets'].clear());
+
+        for (const emp of backup.employees || []) {
+          await requestToPromise(stores['employees'].put(emp));
+        }
 
         for (const product of backup.products) {
           await requestToPromise(stores['products'].put(product));
@@ -84,6 +109,14 @@ export class BackupService {
 
         for (const expense of backup.expenses || []) {
           await requestToPromise(stores['expenses'].put(expense));
+        }
+
+        for (const rev of backup.revenues || []) {
+          await requestToPromise(stores['revenues'].put(rev));
+        }
+
+        for (const ts of backup.timesheets || []) {
+          await requestToPromise(stores['timesheets'].put(ts));
         }
 
         await requestToPromise(
