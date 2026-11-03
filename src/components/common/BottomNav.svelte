@@ -1,34 +1,100 @@
 <script lang="ts">
-  import { currentPage, navigateTo, type AppPage } from '../../stores/navigationStore';
+  import {
+    currentPage,
+    navigateTo,
+    NAV_SECTIONS,
+    type AppPage
+  } from '../../stores/navigationStore';
 
-  function handleNav(page: AppPage) {
+  let isMoreOpen = false;
+
+  const primaryIds: AppPage[] = ['dashboard', 'entry', 'history', 'products'];
+  $: isSecondaryActive = !primaryIds.includes($currentPage);
+
+  function selectPage(page: AppPage) {
+    isMoreOpen = false;
     navigateTo(page);
   }
 </script>
 
-<nav class="bottom-nav" aria-label="ناوبری اصلی">
-  <button 
-    class="nav-item" 
-    class:active={$currentPage === 'entry'} 
-    on:click={() => handleNav('entry')}
+{#if isMoreOpen}
+  <div
+    class="more-sheet-backdrop"
+    role="presentation"
+    on:click={() => (isMoreOpen = false)}
+  ></div>
+  <div class="more-sheet" role="dialog" aria-label="سایر بخش‌های گیله‌کُرد">
+    <div class="section-heading" style="margin-bottom: 10px;">
+      <h2>همه بخش‌های سامانه</h2>
+      <button type="button" class="quiet-btn" on:click={() => (isMoreOpen = false)}>
+        بستن
+      </button>
+    </div>
+    <div class="more-sheet-grid">
+      {#each NAV_SECTIONS as sec (sec.id)}
+        <button
+          type="button"
+          class="quick-nav-btn"
+          on:click={() => selectPage(sec.id)}
+        >
+          <span class="quick-nav-icon">{sec.icon}</span>
+          <div>
+            <strong style="font-size: 11px; display: block;">{sec.label}</strong>
+          </div>
+        </button>
+      {/each}
+    </div>
+  </div>
+{/if}
+
+<nav class="bottom-nav" aria-label="ناوبری موبایل">
+  <button
+    type="button"
+    class="nav-item"
+    class:active={$currentPage === 'dashboard'}
+    on:click={() => selectPage('dashboard')}
+  >
+    <span class="nav-icon">⊞</span>
+    <span>پیشخوان</span>
+  </button>
+
+  <button
+    type="button"
+    class="nav-item"
+    class:active={$currentPage === 'entry'}
+    on:click={() => selectPage('entry')}
   >
     <span class="nav-icon">＋</span>
     <span>ثبت خرید</span>
   </button>
-  <button 
-    class="nav-item" 
-    class:active={$currentPage === 'history'} 
-    on:click={() => handleNav('history')}
+
+  <button
+    type="button"
+    class="nav-item"
+    class:active={$currentPage === 'history'}
+    on:click={() => selectPage('history')}
   >
     <span class="nav-icon">▤</span>
     <span>خریدها</span>
   </button>
-  <button 
-    class="nav-item" 
-    class:active={$currentPage === 'settings'} 
-    on:click={() => handleNav('settings')}
+
+  <button
+    type="button"
+    class="nav-item"
+    class:active={$currentPage === 'products'}
+    on:click={() => selectPage('products')}
   >
-    <span class="nav-icon">⚙</span>
-    <span>تنظیمات</span>
+    <span class="nav-icon">❖</span>
+    <span>کالاها</span>
+  </button>
+
+  <button
+    type="button"
+    class="nav-item"
+    class:active={isSecondaryActive || isMoreOpen}
+    on:click={() => (isMoreOpen = !isMoreOpen)}
+  >
+    <span class="nav-icon">☰</span>
+    <span>سایر بخش‌ها</span>
   </button>
 </nav>
