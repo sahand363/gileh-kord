@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { toJalaliDate, getTodayISODate, formatNumber } from '../../utils/formatters';
+  import { toJalaliDate, toJalaliNumeric, getTodayISODate, formatNumber } from '../../utils/formatters';
   import {
     currentPage,
     navigateTo,
@@ -11,9 +11,11 @@
     clearDemoDataset,
     loadDemoDataset
   } from '../../stores/purchaseStore';
+  import { runtimeState } from '../../services/pwaService';
   import { showToast } from '../../stores/toastStore';
 
-  $: todayJalali = toJalaliDate(getTodayISODate());
+  $: todayISO = getTodayISODate();
+  $: todayJalali = `${toJalaliDate(todayISO)} (${toJalaliNumeric(todayISO)})`;
 
   function handleNav(page: AppPage, event?: MouseEvent) {
     event?.preventDefault();
@@ -46,8 +48,32 @@
   </a>
 
   <div class="topbar-meta">
-    <span class="status-dot"></span>
-    <span>حافظه محلی فعال</span>
+    <span
+      class="conn-pill"
+      class:offline={!$runtimeState.isOnline}
+      title={$runtimeState.swMessage}
+    >
+      <span class="status-dot" class:muted={!$runtimeState.isOnline}></span>
+      {#if $runtimeState.isOnline}
+        <span>آنلاین | حافظه محلی فعال</span>
+      {:else}
+        <span>آفلاین | ذخیره در دستگاه فعال</span>
+      {/if}
+    </span>
+
+    <span
+      class="conn-pill"
+      title={$runtimeState.swMessage}
+    >
+      {#if $runtimeState.swStatus === 'active'}
+        <span>کش آفلاین فعال (HTTPS)</span>
+      {:else if $runtimeState.accessMode === 'http-ip'}
+        <span>حالت HTTP IP</span>
+      {:else}
+        <span>IndexedDB فعال</span>
+      {/if}
+    </span>
+
     <span class="today-label">{todayJalali}</span>
   </div>
 </header>
@@ -69,6 +95,15 @@
 </nav>
 
 <div class="demo-banner">
+  {#if !$runtimeState.isOnline}
+    <div class="demo-banner-box" style="margin-bottom: 8px; background: #eef5f0; border-color: #cfe0d4; color: #173d32;">
+      <span>
+        <strong>وضعیت آفلاین (قطع اینترنت):</strong>
+        شما به اینترنت متصل نیستید، اما ثبت خرید و مشاهده اطلاعات از طریق پایگاه داده محلی دستگاه (IndexedDB) بدون محدودیت کار می‌کند.
+      </span>
+    </div>
+  {/if}
+
   {#if $dashboardSummary.demoCount > 0}
     <div class="demo-banner-box">
       <span>
