@@ -7,6 +7,10 @@
     todayPurchasesStats,
     recentPurchases,
     suppliers,
+    employees,
+    activeEmployees,
+    appSettings,
+    setStickyEmployeeId,
     dbError
   } from '../../stores/purchaseStore';
   import { navigateTo } from '../../stores/navigationStore';
@@ -19,6 +23,7 @@
     getTodayISODate,
     parseNumericInput
   } from '../../utils/formatters';
+  import { getPersianWeekdayName } from '../../utils/jalali';
   import { validatePurchaseInput } from '../../utils/validators';
   import { MEASUREMENT_UNITS, type Product } from '../../models/types';
   import PurchaseCard from '../../components/purchases/PurchaseCard.svelte';
@@ -31,6 +36,7 @@
   let unit = 'کیلوگرم';
   let price = '';
   let purchaseDate = getTodayISODate();
+  let selectedEmployeeId = '';
   let supplier = '';
   let invoice = '';
   let notes = '';
@@ -46,7 +52,7 @@
   let optionalOpen = false;
 
   const todayISO = getTodayISODate();
-  const todayFullJalali = `${toJalaliDate(todayISO)} (${toJalaliNumeric(todayISO)})`;
+  const todayFullJalali = `${getPersianWeekdayName(todayISO)} ${toJalaliDate(todayISO)} (${toJalaliNumeric(todayISO)})`;
 
   $: parsedLivePrice = parseNumericInput(price);
   $: liveFormattedPrice =
@@ -54,13 +60,31 @@
       ? `${formatMoney(parsedLivePrice)} تومان`
       : '';
 
+  // Keep selectedEmployeeId synced with sticky setting if not yet set locally
+  $: if (!selectedEmployeeId && $appSettings.lastSelectedEmployeeId) {
+    selectedEmployeeId = $appSettings.lastSelectedEmployeeId;
+  } else if (!selectedEmployeeId && $activeEmployees.length > 0) {
+    selectedEmployeeId = $activeEmployees[0].id;
+  }
+
   onMount(async () => {
     const settings = await settingsRepository.getSettings();
     if (settings.defaultUnit) {
       defaultUnit = settings.defaultUnit;
       unit = settings.defaultUnit;
     }
+    if (settings.lastSelectedEmployeeId) {
+      selectedEmployeeId = settings.lastSelectedEmployeeId;
+    } else if ($activeEmployees.length > 0) {
+      selectedEmployeeId = $activeEmployees[0].id;
+    }
   });
+
+  async function handleEmployeeChange() {
+    if (selectedEmployeeId) {
+      await setStickyEmployeeId(selectedEmployeeId);
+    }
+  }
 
   async function handleProductInput() {
     const query = productName.trim();
@@ -104,6 +128,11 @@
     if (isSubmitting) return;
     errorMessage = '';
 
+    if (!selectedEmployeeId) {
+      errorMessage = 'لطفاً مسئول خرید (خرید توسط) را انتخاب کنید.';
+      return;
+    }
+
     const validation = validatePurchaseInput({
       productName,
       quantity,
@@ -124,11 +153,13 @@
         unit,
         price: validation.cleanData.price,
         purchaseDate: validation.cleanData.purchaseDate,
+        employeeId: selectedEmployeeId,
         supplier,
         invoice,
         notes
       });
 
+      // Reset product fields while keeping `selectedEmployeeId` sticky
       productName = '';
       quantity = '';
       unit = defaultUnit;
@@ -142,7 +173,7 @@
       isSuggestionsVisible = false;
       optionalOpen = false;
 
-      showToast('خرید با موفقیت در پایگاه داده محلی ثبت شد.');
+      showToast('خرید با موفقیت ثبت شد.');
       productInputEl?.focus();
     } catch (err) {
       console.error(err);
@@ -161,7 +192,7 @@
     <div>
       <p class="eyebrow">ثبت سریع و آسان (تقویم شمسی)</p>
       <h1 id="entryTitle">ثبت خرید جدید</h1>
-      <p class="subheading">خریدهای روزانه را در چند ثانیه ثبت کنید؛ کارکرد کامل در حالت آنلاین، آفلاین، HTTP و HTTPS.</p>
+      <p class="subheading">خریدهای روزانه را به نام کارمند مسئول ثبت کنید؛ انتخاب مسئول خرید برای ثبت‌های بعدی حفظ می‌شود.</p>
     </div>
     <div class="heading-date">
       <span class="calendar-icon">▦</span>
@@ -176,6 +207,59 @@
   <div class="entry-layout">
     <section class="panel form-panel">
       <form on:submit|preventDefault={handleSubmit} autocomplete="off" novalidate>
+        <div class="field">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <label for="purchasedBy" style="margin-bottom: 0;">
+              خرید توسط (مسئول خرید) <b class="required">*</b>
+            </label>
+            <button
+              type="button"
+              class="text-btn"
+              style="padding: 0; font-size: 10px;"
+              on:click={() => navigateTo('employees')}
+            >
+              مدیریت کارکنان ←
+            </button>
+          </div>
+
+          {#if $employees.length > 0}
+            <select
+              id="purchasedBy"
+              name="purchasedBy"
+              bind:value={selectedEmployeeId}
+              on:change={handleEmployeeChange}
+              required
+            >
+              {#each $activeEmployees as emp (emp.id)}
+                <option value={emp.id}>
+                  {emp.name} — {emp.role}
+                </option>
+              {/each}
+              {#each $employees.filter((e) => !e.isActive) as inactiveEmp (inactiveEmp.id)}
+                {#if inactiveEmp.id === selectedEmployeeId}
+                  <option value={inactiveEmp.id}>
+                    {inactiveEmp.name} — {inactiveEmp.role} (غیرفعال)
+                  </option>
+                {/if}
+              {/each}
+            </select>
+            <small class="field-hint">
+              کارمند انتخاب‌شده برای خریدهای بعدی نیز ثابت می‌ماند تا زمانی که آن را تغییر دهید.
+            </small>
+          {:else}
+            <div class="form-error" style="margin-bottom: 6px;">
+              هنوز کارمندی ثبت نشده است. لطفاً ابتدا از بخش «کارکنان» حداقل یک کارمند تعریف کنید.
+            </div>
+            <button
+              type="button"
+              class="secondary-btn"
+              on:click={() => navigateTo('employees')}
+            >
+              ＋ افزودن اولین کارمند
+            </button>
+          {/if}
+        </div>
+
         <div class="field product-field">
           <label for="productName">نام محصول <b class="required">*</b></label>
           <div class="input-wrap">
@@ -346,7 +430,7 @@
       <section class="panel insight-card">
         <div class="card-topline">
           <span class="mini-icon">↗</span>
-          <span>خلاصه امروز ({toJalaliDate(todayISO)})</span>
+          <span>خلاصه خرید امروز ({toJalaliDate(todayISO)})</span>
         </div>
         <div class="stat-number" id="todayTotal">
           {formatMoney($todayPurchasesStats.total)} <small>تومان</small>
@@ -366,7 +450,7 @@
         <div>
           <strong>ثبت سریع‌تر خریدها</strong>
           <p>
-            با انتخاب محصولاتی که قبلاً ثبت کرده‌اید، واحد اندازه‌گیری و آخرین قیمت خرید به تاریخ شمسی نمایش داده می‌شود.
+            مسئول خرید انتخابی شما برای فاکتورهای بعدی ثابت می‌ماند و با انتخاب کالاهای تکراری، واحد اندازه‌گیری خودکار پر می‌شود.
           </p>
         </div>
       </section>
@@ -377,7 +461,7 @@
     <div class="section-heading">
       <div>
         <h2>آخرین خریدها</h2>
-        <p>نگاهی سریع به خریدهای اخیر</p>
+        <p>نگاهی سریع به خریدهای اخیر به همراه نام مسئول خرید</p>
       </div>
       <button class="text-btn" type="button" on:click={() => navigateTo('history')}>
         مشاهده همه <span>←</span>
