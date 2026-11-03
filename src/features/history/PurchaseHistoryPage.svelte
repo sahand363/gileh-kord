@@ -1,6 +1,10 @@
 <script lang="ts">
   import { purchases } from '../../stores/purchaseStore';
-  import { formatMoney, formatNumber } from '../../utils/formatters';
+  import { formatMoney, formatNumber, toJalaliDate } from '../../utils/formatters';
+  import {
+    calculatePurchaseStats,
+    filterPurchases
+  } from '../../utils/calculations';
   import PurchaseCard from '../../components/purchases/PurchaseCard.svelte';
   import EmptyState from '../../components/common/EmptyState.svelte';
 
@@ -8,15 +12,14 @@
   let dateFrom = '';
   let dateTo = '';
 
-  $: filteredPurchases = $purchases.filter((p) => {
-    const q = searchQuery.trim().toLowerCase();
-    const matchesName = !q || p.productName.toLowerCase().includes(q);
-    const matchesFrom = !dateFrom || p.purchaseDate >= dateFrom;
-    const matchesTo = !dateTo || p.purchaseDate <= dateTo;
-    return matchesName && matchesFrom && matchesTo;
+  $: filteredPurchases = filterPurchases($purchases, {
+    query: searchQuery,
+    dateFrom,
+    dateTo
   });
 
-  $: totalAmount = filteredPurchases.reduce((sum, p) => sum + p.totalAmount, 0);
+  $: filteredStats = calculatePurchaseStats(filteredPurchases);
+  $: hasActiveFilters = Boolean(searchQuery.trim() || dateFrom || dateTo);
 
   function clearFilters() {
     searchQuery = '';
@@ -25,7 +28,7 @@
   }
 </script>
 
-<section class="page" aria-labelledby="historyTitle">
+<section class="page active" aria-labelledby="historyTitle">
   <div class="page-heading">
     <div>
       <p class="eyebrow">گزارش و پیگیری</p>
@@ -38,37 +41,47 @@
     <div class="filters">
       <div class="search-box">
         <span>⌕</span>
-        <input 
-          bind:value={searchQuery} 
-          placeholder="جست‌وجوی نام محصول..." 
-          aria-label="جست‌وجوی نام محصول" 
+        <input
+          id="historySearch"
+          bind:value={searchQuery}
+          placeholder="جست‌وجوی نام محصول..."
+          aria-label="جست‌وجوی نام محصول"
         />
       </div>
-      <label class="date-filter">
+      <label class="date-filter" title={dateFrom ? `معادل: ${toJalaliDate(dateFrom)}` : ''}>
         <span>از تاریخ</span>
-        <input type="date" bind:value={dateFrom} aria-label="از تاریخ" />
+        <input id="dateFrom" type="date" bind:value={dateFrom} aria-label="از تاریخ" />
       </label>
-      <label class="date-filter">
+      <label class="date-filter" title={dateTo ? `معادل: ${toJalaliDate(dateTo)}` : ''}>
         <span>تا تاریخ</span>
-        <input type="date" bind:value={dateTo} aria-label="تا تاریخ" />
+        <input id="dateTo" type="date" bind:value={dateTo} aria-label="تا تاریخ" />
       </label>
-      <button class="quiet-btn" type="button" on:click={clearFilters}>پاک کردن</button>
+      <button id="clearFilters" class="quiet-btn" type="button" on:click={clearFilters}>
+        پاک کردن
+      </button>
     </div>
 
     <div class="history-summary">
-      <span>{formatNumber(filteredPurchases.length)} خرید</span>
-      <span>مجموع مبلغ: <strong>{formatMoney(totalAmount)} تومان</strong></span>
+      <span id="historyCount">{formatNumber(filteredStats.count)} خرید</span>
+      <span>
+        مجموع مبلغ: <strong id="historyTotal">{formatMoney(filteredStats.total)} تومان</strong>
+      </span>
     </div>
 
-    <div class="purchase-list">
+    <div id="historyList" class="purchase-list">
       {#if filteredPurchases.length > 0}
         {#each filteredPurchases as purchase (purchase.id)}
           <PurchaseCard {purchase} />
         {/each}
+      {:else if $purchases.length === 0 && !hasActiveFilters}
+        <EmptyState
+          title="هنوز خریدی ثبت نشده است"
+          message="پس از ثبت اولین خرید، فهرست کامل خریدها در این بخش نمایش داده می‌شود."
+        />
       {:else}
-        <EmptyState 
-          title="موردی پیدا نشد" 
-          message="عبارت جست‌وجو یا بازه تاریخ را تغییر دهید." 
+        <EmptyState
+          title="موردی پیدا نشد"
+          message="عبارت جست‌وجو یا بازه تاریخ را تغییر دهید."
         />
       {/if}
     </div>
