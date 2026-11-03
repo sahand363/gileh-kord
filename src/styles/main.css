@@ -1544,3 +1544,132 @@ select {
   padding-bottom: 5px;
   border-bottom: 1px dashed #e2ebe4;
 }
+
+
+
+/* Phase 4: Employees, Timesheets, Revenue, Manager Login Panel & Data Tables */
+.badge-employee {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 9.5px;
+  font-weight: 700;
+  background: #edf4ef;
+  color: var(--green-2);
+  border: 1px solid #d4e3d8;
+}
+
+.badge-unassigned {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 9.5px;
+  font-weight: 600;
+  background: #f3f4f3;
+  color: var(--muted);
+  border: 1px solid var(--line);
+}
+
+.emp-link-btn {
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--green);
+  font-weight: 800;
+  font-size: 12.5px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.emp-link-btn:hover {
+  color: var(--green-2);
+}
+
+.mode-switch-box {
+  padding: 13px 15px;
+  border-radius: 13px;
+  background: #f6f9f6;
+  border: 1px solid #dde7df;
+}
+
+.table-scroll {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  text-align: right;
+}
+
+.data-table th {
+  background: #f4f7f4;
+  color: #46564c;
+  font-weight: 800;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.data-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid #f0f3f0;
+  color: var(--ink);
+  vertical-align: middle;
+}
+
+.data-table tr:hover td {
+  background: #fafcfa;
+}
+
+.login-panel {
+  width: min(100%, 420px);
+  margin: 14px auto;
+  padding: 29px;
+  text-align: center;
+}
+
+.lock-mark {
+  width: 48px;
+  height: 48px;
+  margin: 0 auto 13px;
+  display: grid;
+  place-items: center;
+  background: var(--green-soft);
+  color: var(--green);
+  border-radius: 15px;
+  font-size: 25px;
+}
+
+.login-panel h2 {
+  font-size: 18px;
+  margin: 0;
+}
+
+.login-panel > p {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.9;
+  margin: 7px 0 21px;
+}
+
+.login-panel form {
+  text-align: right;
+}
+
+.login-panel .primary-btn {
+  margin-top: 17px;
+}
+
+.demo-hint {
+  color: #8b734b;
+  background: #faf6ed;
+  border: 1px solid #ede2cc;
+  border-radius: 9px;
+  padding: 9px 11px;
+  font-size: 9.5px;
+  line-height: 1.8;
+  margin-top: 10px;
+}
