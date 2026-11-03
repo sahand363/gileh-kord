@@ -12,14 +12,18 @@ export interface NavSectionMeta {
 }
 
 export const NAV_SECTIONS: NavSectionMeta[] = [
-  { id: 'dashboard', label: 'پیشخوان', shortLabel: 'پیشخوان', icon: '⊞', primary: true },
   { id: 'entry', label: 'ثبت خرید', shortLabel: 'ثبت خرید', icon: '＋', primary: true },
   { id: 'history', label: 'تاریخچه خریدها', shortLabel: 'خریدها', icon: '▤', primary: true },
-  { id: 'products', label: 'کالاها', shortLabel: 'کالاها', icon: '❖', primary: true },
+  { id: 'employees', label: 'کارکنان', shortLabel: 'کارکنان', icon: '♟', primary: true },
+  { id: 'timesheets', label: 'تایم‌شیت کارکنان', shortLabel: 'تایم‌شیت', icon: '◷', primary: true },
+  { id: 'revenue', label: 'درآمد', shortLabel: 'درآمد', icon: '₿', primary: false },
+  { id: 'manager', label: 'پنل مدیریت', shortLabel: 'مدیریت', icon: '⌑', primary: false },
+  { id: 'dashboard', label: 'پیشخوان', shortLabel: 'پیشخوان', icon: '⊞', primary: false },
+  { id: 'products', label: 'کالاها', shortLabel: 'کالاها', icon: '❖', primary: false },
   { id: 'suppliers', label: 'تأمین‌کنندگان', shortLabel: 'فروشندگان', icon: '◈', primary: false },
   { id: 'inventory', label: 'انبار و موجودی', shortLabel: 'انبار', icon: '◫', primary: false },
   { id: 'expenses', label: 'هزینه‌ها', shortLabel: 'هزینه‌ها', icon: '¤', primary: false },
-  { id: 'reports', label: 'گزارش‌ها', shortLabel: 'گزارش‌ها', icon: '↗', primary: false },
+  { id: 'reports', label: 'گزارش‌های خرید', shortLabel: 'گزارش‌ها', icon: '↗', primary: false },
   { id: 'backup', label: 'پشتیبان‌گیری', shortLabel: 'پشتیبان', icon: '⇧', primary: false },
   { id: 'settings', label: 'تنظیمات', shortLabel: 'تنظیمات', icon: '⚙', primary: false }
 ];
