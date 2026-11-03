@@ -1,8 +1,13 @@
 import { defineConfig } from 'vitest/config';
-import { svelte } from '@sveltejs/vite-plugin-svelte';
+import { svelte, vitePreprocess } from '@sveltejs/vite-plugin-svelte';
 
 export default defineConfig({
-  plugins: [svelte({ hot: !process.env.VITEST })],
+  plugins: [
+    svelte({
+      preprocess: vitePreprocess(),
+      ...(process.env.VITEST ? { hot: false } : {})
+    })
+  ],
   server: {
     port: 3000,
     host: true
