@@ -1,9 +1,9 @@
-import { dbClient } from '../db';
+import { dbClient, requestToPromise } from '../db';
 import type { ApplicationSettings } from '../../models/types';
 
-const SETTINGS_KEY = 'global_app_settings';
+export const SETTINGS_KEY = 'global_app_settings';
 
-const DEFAULT_SETTINGS: ApplicationSettings = {
+export const DEFAULT_SETTINGS: ApplicationSettings = {
   serverAddress: '',
   defaultUnit: 'کیلوگرم',
   currency: 'IRT',
@@ -12,33 +12,33 @@ const DEFAULT_SETTINGS: ApplicationSettings = {
 
 export class SettingsRepository {
   public async getSettings(): Promise<ApplicationSettings> {
-    return dbClient.executeTransaction('settings', 'readonly', async (stores) => {
-      const store = stores['settings'];
-      return new Promise<ApplicationSettings>((resolve) => {
-        const req = store.get(SETTINGS_KEY);
-        req.onsuccess = () => {
-          if (req.result && req.result.value) {
-            resolve({ ...DEFAULT_SETTINGS, ...req.result.value });
-          } else {
-            resolve(DEFAULT_SETTINGS);
+    try {
+      return await dbClient.executeTransaction(
+        'settings',
+        'readonly',
+        async (stores) => {
+          const record = await requestToPromise(stores['settings'].get(SETTINGS_KEY));
+          if (record && record.value) {
+            return { ...DEFAULT_SETTINGS, ...record.value };
           }
-        };
-        req.onerror = () => resolve(DEFAULT_SETTINGS);
-      });
-    });
+          return { ...DEFAULT_SETTINGS };
+        }
+      );
+    } catch {
+      return { ...DEFAULT_SETTINGS };
+    }
   }
 
-  public async saveSettings(settings: Partial<ApplicationSettings>): Promise<ApplicationSettings> {
+  public async saveSettings(
+    settings: Partial<ApplicationSettings>
+  ): Promise<ApplicationSettings> {
     const current = await this.getSettings();
-    const updated: ApplicationSettings = { ...current, ...settings };
+    const updated: ApplicationSettings = { ...current, ...settings, currency: 'IRT' };
 
     await dbClient.executeTransaction('settings', 'readwrite', async (stores) => {
-      const store = stores['settings'];
-      return new Promise<void>((resolve, reject) => {
-        const req = store.put({ key: SETTINGS_KEY, value: updated });
-        req.onsuccess = () => resolve();
-        req.onerror = () => reject(req.error);
-      });
+      await requestToPromise(
+        stores['settings'].put({ key: SETTINGS_KEY, value: updated })
+      );
     });
 
     return updated;
