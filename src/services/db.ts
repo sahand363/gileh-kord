@@ -1,7 +1,16 @@
 import { normalizeProductKey } from '../utils/formatters';
 
 export const DB_NAME = 'gileh_kord_db';
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
+
+export const ALL_STORES = [
+  'purchases',
+  'products',
+  'suppliers',
+  'inventory',
+  'expenses',
+  'settings'
+] as const;
 
 export class IndexedDBClient {
   private db: IDBDatabase | null = null;
@@ -68,7 +77,6 @@ export class IndexedDBClient {
     oldVersion: number,
     tx: IDBTransaction
   ): void {
-    // Version 1: Initial object stores
     if (oldVersion < 1) {
       if (!db.objectStoreNames.contains('purchases')) {
         const purchaseStore = db.createObjectStore('purchases', { keyPath: 'id' });
@@ -88,7 +96,6 @@ export class IndexedDBClient {
       }
     }
 
-    // Version 2: Safe non-unique normalizedName index on products while preserving existing records
     if (oldVersion >= 1 && oldVersion < 2) {
       if (db.objectStoreNames.contains('products')) {
         const productStore = tx.objectStore('products');
@@ -117,13 +124,25 @@ export class IndexedDBClient {
         };
       }
     }
+
+    if (oldVersion < 3) {
+      if (!db.objectStoreNames.contains('suppliers')) {
+        const supplierStore = db.createObjectStore('suppliers', { keyPath: 'id' });
+        supplierStore.createIndex('name', 'name', { unique: false });
+      }
+
+      if (!db.objectStoreNames.contains('inventory')) {
+        const inventoryStore = db.createObjectStore('inventory', { keyPath: 'id' });
+        inventoryStore.createIndex('productName', 'productName', { unique: false });
+      }
+
+      if (!db.objectStoreNames.contains('expenses')) {
+        const expenseStore = db.createObjectStore('expenses', { keyPath: 'id' });
+        expenseStore.createIndex('expenseDate', 'expenseDate', { unique: false });
+      }
+    }
   }
 
-  /**
-   * Executes an operation inside an IndexedDB transaction and resolves ONLY
-   * after `tx.oncomplete` fires. If the operation throws or rejects, the transaction
-   * is explicitly aborted so partial writes are never committed.
-   */
   public async executeTransaction<T>(
     storeNames: string | string[],
     mode: IDBTransactionMode,
@@ -152,7 +171,7 @@ export class IndexedDBClient {
         try {
           tx.abort();
         } catch {
-          // Ignore if transaction already finished/aborted
+          // Ignore if transaction already finished
         }
         reject(err instanceof Error ? err : new Error(String(err)));
       };
