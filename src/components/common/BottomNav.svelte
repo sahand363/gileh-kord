@@ -8,7 +8,7 @@
 
   let isMoreOpen = false;
 
-  const primaryIds: AppPage[] = ['dashboard', 'entry', 'history', 'products'];
+  const primaryIds: AppPage[] = ['entry', 'history', 'employees', 'timesheets'];
   $: isSecondaryActive = !primaryIds.includes($currentPage);
 
   function selectPage(page: AppPage) {
@@ -51,16 +51,6 @@
   <button
     type="button"
     class="nav-item"
-    class:active={$currentPage === 'dashboard'}
-    on:click={() => selectPage('dashboard')}
-  >
-    <span class="nav-icon">⊞</span>
-    <span>پیشخوان</span>
-  </button>
-
-  <button
-    type="button"
-    class="nav-item"
     class:active={$currentPage === 'entry'}
     on:click={() => selectPage('entry')}
   >
@@ -81,11 +71,21 @@
   <button
     type="button"
     class="nav-item"
-    class:active={$currentPage === 'products'}
-    on:click={() => selectPage('products')}
+    class:active={$currentPage === 'employees'}
+    on:click={() => selectPage('employees')}
   >
-    <span class="nav-icon">❖</span>
-    <span>کالاها</span>
+    <span class="nav-icon">♟</span>
+    <span>کارکنان</span>
+  </button>
+
+  <button
+    type="button"
+    class="nav-item"
+    class:active={$currentPage === 'timesheets'}
+    on:click={() => selectPage('timesheets')}
+  >
+    <span class="nav-icon">◷</span>
+    <span>تایم‌شیت</span>
   </button>
 
   <button
