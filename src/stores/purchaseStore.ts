@@ -23,6 +23,7 @@ import {
   getLowStockItems,
   sortPurchasesDescending
 } from '../utils/calculations';
+import { generateId } from '../utils/uuid';
 
 export const purchases = writable<Purchase[]>([]);
 export const products = writable<Product[]>([]);
@@ -40,18 +41,12 @@ async function readStoreAll<T>(storeName: string): Promise<T[]> {
   });
 }
 
-/**
- * Loads all application stores from IndexedDB.
- * On the very first visit (when `demoSeedInitialized` is false and DB is empty),
- * automatically populates the clearly-labeled demo dataset (`isDemo: true`)
- * so all 10 pages are visually rich and interactive out of the box.
- */
 export async function loadPurchases(autoSeedDemoIfFirstRun = false): Promise<void> {
   isLoading.set(true);
   dbError.set(null);
   try {
-    let settings = await settingsRepository.getSettings();
-    let [purchasesList, productsList, suppliersList, inventoryList, expensesList] =
+    const settings = await settingsRepository.getSettings();
+    const [purchasesList, productsList, suppliersList, inventoryList, expensesList] =
       await Promise.all([
         purchaseRepository.getAll(),
         productRepository.getAll(),
@@ -88,10 +83,6 @@ export async function loadPurchases(autoSeedDemoIfFirstRun = false): Promise<voi
   }
 }
 
-/**
- * Populates or resets the clearly-badged demonstration records (`isDemo: true`)
- * without deleting any real user-created records (`isDemo !== true`).
- */
 export async function loadDemoDataset(): Promise<void> {
   const demo = createInitialDemoDataset();
   const currentSettings = await settingsRepository.getSettings();
@@ -128,10 +119,6 @@ export async function loadDemoDataset(): Promise<void> {
   await loadPurchases(false);
 }
 
-/**
- * Removes only demonstration records (`isDemo: true`) across all stores,
- * preserving all real user-entered records.
- */
 export async function clearDemoDataset(): Promise<void> {
   const currentSettings = await settingsRepository.getSettings();
   const updatedSettings: ApplicationSettings = {
@@ -172,13 +159,6 @@ export async function clearDemoDataset(): Promise<void> {
   await loadPurchases(false);
 }
 
-/**
- * Creates a real user purchase (`isDemo: false`) and atomically updates:
- * 1. `purchases` store
- * 2. `products` store (autocomplete & price history)
- * 3. `suppliers` store (if supplier name is provided)
- * 4. `inventory` store (increments stock for matching product)
- */
 export async function addPurchase(data: {
   productName: string;
   quantity: number;
@@ -200,7 +180,6 @@ export async function addPurchase(data: {
     notes: data.notes
   });
 
-  // Also sync Suppliers and Inventory stores so all 10 sections reflect the new purchase
   await dbClient.executeTransaction(
     ['suppliers', 'inventory'],
     'readwrite',
@@ -230,7 +209,7 @@ export async function addPurchase(data: {
         } else {
           await requestToPromise(
             stores['suppliers'].put({
-              id: `sup_${crypto.randomUUID()}`,
+              id: generateId('sup'),
               name: supplierName,
               category: 'تأمین‌کننده عمومی',
               phone: 'ثبت‌نشده',
@@ -267,7 +246,7 @@ export async function addPurchase(data: {
       } else {
         await requestToPromise(
           stores['inventory'].put({
-            id: `inv_${crypto.randomUUID()}`,
+            id: generateId('inv'),
             productName: data.productName.trim(),
             category: 'مواد اولیه',
             currentStock: data.quantity,
@@ -293,7 +272,7 @@ export async function addSupplier(input: {
   notes?: string;
 }): Promise<Supplier> {
   const newSupplier: Supplier = {
-    id: `sup_${crypto.randomUUID()}`,
+    id: generateId('sup'),
     name: input.name.trim(),
     category: input.category.trim() || 'عمومی',
     phone: input.phone.trim() || 'ثبت‌نشده',
@@ -340,7 +319,7 @@ export async function addInventoryItem(input: {
   unit: string;
 }): Promise<void> {
   const item: InventoryItem = {
-    id: `inv_${crypto.randomUUID()}`,
+    id: generateId('inv'),
     productName: input.productName.trim(),
     category: input.category.trim() || 'مواد اولیه',
     currentStock: input.currentStock,
@@ -363,7 +342,7 @@ export async function addExpense(input: {
   notes?: string;
 }): Promise<Expense> {
   const expense: Expense = {
-    id: `exp_${crypto.randomUUID()}`,
+    id: generateId('exp'),
     title: input.title.trim(),
     category: input.category,
     amount: Math.round(input.amount),
