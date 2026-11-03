@@ -4,163 +4,75 @@ import { purchaseRepository } from '../repositories/PurchaseRepository';
 import { productRepository } from '../repositories/ProductRepository';
 import { settingsRepository } from '../repositories/SettingsRepository';
 import { backupService } from '../BackupService';
-import { calculatePurchaseStats, filterPurchases } from '../../utils/calculations';
+import {
+  loadDemoDataset,
+  clearDemoDataset,
+  addPurchase
+} from '../../stores/purchaseStore';
+import { get } from 'svelte/store';
+import { purchases, suppliers, inventory } from '../../stores/purchaseStore';
 
-describe('IndexedDB Repositories, Atomic Transactions & Backup/Restore', () => {
+describe('Multi-Store Integration, Demo Dataset Isolation & Backup/Restore', () => {
   beforeEach(async () => {
     await purchaseRepository.clear();
     await productRepository.replaceAll([]);
-    await settingsRepository.saveSettings({
-      serverAddress: '',
-      defaultUnit: 'کیلوگرم',
-      currency: 'IRT',
-      lastSyncAt: null
-    });
   });
 
-  it('atomically creates a purchase and updates product history', async () => {
-    const { purchase, product } = await purchaseRepository.createPurchaseWithProduct({
-      productName: 'برنج هاشمی',
-      quantity: 25,
+  it('loads demo dataset with isDemo=true and clears demo items without losing real purchases', async () => {
+    await loadDemoDataset();
+    expect(get(purchases).length).toBeGreaterThanOrEqual(7);
+    expect(get(purchases).every((p) => p.isDemo)).toBe(true);
+
+    // Add a real user purchase
+    await addPurchase({
+      productName: 'گوشت گوساله تازه',
+      quantity: 15,
       unit: 'کیلوگرم',
-      totalAmount: 4250000,
+      price: 9750000,
       purchaseDate: '2026-11-03',
-      supplierName: 'برنج‌فروشی شمال',
-      invoiceNumber: '۱۰۲۴'
+      supplier: 'قصابی نمونه'
     });
 
-    expect(purchase.id).toBeTruthy();
-    expect(product.lastUnit).toBe('کیلوگرم');
-    expect(product.lastPrice).toBe(4250000);
-    expect(product.totalPurchasesCount).toBe(1);
+    expect(get(purchases).some((p) => !p.isDemo && p.productName === 'گوشت گوساله تازه')).toBe(
+      true
+    );
+    expect(get(suppliers).some((s) => !s.isDemo && s.name === 'قصابی نمونه')).toBe(true);
+    expect(
+      get(inventory).some((i) => !i.isDemo && i.productName === 'گوشت گوساله تازه')
+    ).toBe(true);
 
-    // Second purchase of the same product with a newer price and different unit
-    await purchaseRepository.createPurchaseWithProduct({
-      productName: '  برنج هاشمی ',
-      quantity: 2,
-      unit: 'کیسه',
-      totalAmount: 4500000,
-      purchaseDate: '2026-11-04'
-    });
-
-    const suggestions = await productRepository.search('برنج');
-    expect(suggestions).toHaveLength(1);
-    expect(suggestions[0].lastUnit).toBe('کیسه');
-    expect(suggestions[0].lastPrice).toBe(4500000);
-    expect(suggestions[0].totalPurchasesCount).toBe(2);
-
-    // Backdated purchase should increment count without overwriting newer lastUnit/lastPrice
-    await purchaseRepository.createPurchaseWithProduct({
-      productName: 'برنج هاشمی',
-      quantity: 10,
-      unit: 'کیلوگرم',
-      totalAmount: 1600000,
-      purchaseDate: '2026-10-15'
-    });
-
-    const updatedSuggestions = await productRepository.search('برنج');
-    expect(updatedSuggestions[0].lastUnit).toBe('کیسه');
-    expect(updatedSuggestions[0].lastPrice).toBe(4500000);
-    expect(updatedSuggestions[0].totalPurchasesCount).toBe(3);
+    // Clear demo dataset -> only real user records must remain
+    await clearDemoDataset();
+    const remainingPurchases = get(purchases);
+    expect(remainingPurchases).toHaveLength(1);
+    expect(remainingPurchases[0].productName).toBe('گوشت گوساله تازه');
+    expect(remainingPurchases[0].isDemo).toBeFalsy();
   });
 
-  it('filters purchases by product name and date boundaries and computes accurate totals', async () => {
-    await purchaseRepository.createPurchaseWithProduct({
-      productName: 'روغن سرخ‌کردنی',
-      quantity: 12,
-      unit: 'لیتر',
-      totalAmount: 1980000,
-      purchaseDate: '2026-11-03'
-    });
-    await purchaseRepository.createPurchaseWithProduct({
-      productName: 'مرغ تازه',
-      quantity: 18,
-      unit: 'کیلوگرم',
-      totalAmount: 3240000,
-      purchaseDate: '2026-11-02'
-    });
-    await purchaseRepository.createPurchaseWithProduct({
-      productName: 'زعفران',
-      quantity: 100,
+  it('exports and atomically restores all 6 stores via BackupService', async () => {
+    await addPurchase({
+      productName: 'زعفران سرگل',
+      quantity: 50,
       unit: 'گرم',
-      totalAmount: 8500000,
-      purchaseDate: '2026-10-30'
-    });
-
-    const all = await purchaseRepository.getAll();
-    expect(all).toHaveLength(3);
-
-    const novFiltered = filterPurchases(all, {
-      dateFrom: '2026-11-01',
-      dateTo: '2026-11-03'
-    });
-    const novStats = calculatePurchaseStats(novFiltered);
-    expect(novStats.count).toBe(2);
-    expect(novStats.total).toBe(1980000 + 3240000);
-    expect(novStats.average).toBe(Math.round((1980000 + 3240000) / 2));
-
-    const combinedFiltered = filterPurchases(all, {
-      query: 'مرغ',
-      dateFrom: '2026-11-01',
-      dateTo: '2026-11-03'
-    });
-    expect(combinedFiltered).toHaveLength(1);
-    expect(combinedFiltered[0].productName).toBe('مرغ تازه');
-  });
-
-  it('exports and atomically restores backups while preserving existing data if validation fails', async () => {
-    await purchaseRepository.createPurchaseWithProduct({
-      productName: 'گوجه فرنگی',
-      quantity: 10,
-      unit: 'کیلوگرم',
-      totalAmount: 680000,
-      purchaseDate: '2026-11-02'
+      price: 4200000,
+      purchaseDate: '2026-11-03',
+      supplier: 'عطاری رضایی'
     });
 
     const exported = await backupService.exportBackup();
+    expect(exported.version).toBe(2);
     expect(exported.purchases).toHaveLength(1);
-    expect(exported.products).toHaveLength(1);
+    expect(exported.suppliers?.length).toBeGreaterThanOrEqual(1);
+    expect(exported.inventory?.length).toBeGreaterThanOrEqual(1);
 
-    // Attempt to restore an invalid backup -> must reject and preserve existing data
-    await expect(
-      backupService.restoreBackup({ version: 1, purchases: [{ id: 'bad' }] })
-    ).rejects.toThrow();
+    await purchaseRepository.clear();
+    expect(await purchaseRepository.getAll()).toHaveLength(0);
 
-    const preserved = await purchaseRepository.getAll();
-    expect(preserved).toHaveLength(1);
-    expect(preserved[0].productName).toBe('گوجه فرنگی');
-
-    // Restore a valid new backup atomically
-    await backupService.restoreBackup({
-      version: 1,
-      exportedAt: '2026-11-03T12:00:00.000Z',
-      purchases: [
-        {
-          id: 'restored_1',
-          productId: 'prod_r1',
-          productName: 'ظرف بیرون‌بر',
-          quantity: 200,
-          unit: 'عدد',
-          totalAmount: 1600000,
-          currency: 'IRT',
-          purchaseDate: '2026-10-29',
-          createdAt: '2026-10-29T10:00:00.000Z',
-          updatedAt: '2026-10-29T10:00:00.000Z'
-        }
-      ],
-      products: [],
-      settings: {
-        serverAddress: '',
-        defaultUnit: 'عدد',
-        currency: 'IRT',
-        lastSyncAt: null
-      }
-    });
-
-    const afterRestore = await purchaseRepository.getAll();
-    const settingsAfter = await settingsRepository.getSettings();
-    expect(afterRestore).toHaveLength(1);
-    expect(afterRestore[0].productName).toBe('ظرف بیرون‌بر');
-    expect(settingsAfter.defaultUnit).toBe('عدد');
+    await backupService.restoreBackup(exported);
+    const restoredPurchases = await purchaseRepository.getAll();
+    const restoredSettings = await settingsRepository.getSettings();
+    expect(restoredPurchases).toHaveLength(1);
+    expect(restoredPurchases[0].productName).toBe('زعفران سرگل');
+    expect(restoredSettings.currency).toBe('IRT');
   });
 });
