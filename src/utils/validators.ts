@@ -1,11 +1,14 @@
 import type {
   ApplicationSettings,
   BackupData,
+  Employee,
   Expense,
   InventoryItem,
   Product,
   Purchase,
-  Supplier
+  RevenueDayRecord,
+  Supplier,
+  TimesheetEntry
 } from '../models/types';
 import {
   isValidISODate,
@@ -77,7 +80,7 @@ export interface BackupValidationResult {
   normalizedBackup?: BackupData;
 }
 
-const SUPPORTED_BACKUP_VERSIONS = [1, 2];
+const SUPPORTED_BACKUP_VERSIONS = [1, 2, 3];
 
 export function deriveProductsFromPurchases(
   purchases: Purchase[],
@@ -242,6 +245,14 @@ export function validateBackupPayload(raw: unknown): BackupValidationResult {
       totalAmount: Math.round(rawAmount),
       currency: 'IRT',
       purchaseDate,
+      employeeId:
+        typeof item.employeeId === 'string' && item.employeeId.trim()
+          ? item.employeeId.trim()
+          : undefined,
+      employeeNameSnapshot:
+        typeof item.employeeNameSnapshot === 'string' && item.employeeNameSnapshot.trim()
+          ? item.employeeNameSnapshot.trim()
+          : undefined,
       supplierName:
         typeof item.supplierName === 'string' && item.supplierName.trim()
           ? item.supplierName.trim()
@@ -300,6 +311,49 @@ export function validateBackupPayload(raw: unknown): BackupValidationResult {
       )
     : [];
 
+  const validatedEmployees: Employee[] = Array.isArray(data.employees)
+    ? (data.employees as Employee[])
+        .filter((e) => e && typeof e.id === 'string' && typeof e.name === 'string' && e.name.trim())
+        .map((e) => ({
+          ...e,
+          name: e.name.trim(),
+          role: typeof e.role === 'string' && e.role.trim() ? e.role.trim() : 'کارمند',
+          isActive: e.isActive !== false,
+          performanceCoefficient:
+            Number.isFinite(Number(e.performanceCoefficient)) &&
+            Number(e.performanceCoefficient) > 0
+              ? Number(e.performanceCoefficient)
+              : 1.0,
+          createdAt: e.createdAt || new Date().toISOString(),
+          updatedAt: e.updatedAt || new Date().toISOString()
+        }))
+    : [];
+
+  const validatedRevenues: RevenueDayRecord[] = Array.isArray(data.revenues)
+    ? (data.revenues as RevenueDayRecord[]).filter(
+        (r) =>
+          r &&
+          typeof r.id === 'string' &&
+          typeof r.date === 'string' &&
+          isValidISODate(r.date) &&
+          (r.mode === 'daily_total' || r.mode === 'detailed')
+      )
+    : [];
+
+  const validatedTimesheets: TimesheetEntry[] = Array.isArray(data.timesheets)
+    ? (data.timesheets as TimesheetEntry[]).filter(
+        (t) =>
+          t &&
+          typeof t.id === 'string' &&
+          typeof t.employeeId === 'string' &&
+          typeof t.date === 'string' &&
+          isValidISODate(t.date) &&
+          typeof t.clockIn === 'string' &&
+          typeof t.clockOut === 'string' &&
+          Number(t.netMinutes) > 0
+      )
+    : [];
+
   const rawSettings =
     data.settings && typeof data.settings === 'object'
       ? (data.settings as Partial<ApplicationSettings>)
@@ -312,6 +366,10 @@ export function validateBackupPayload(raw: unknown): BackupValidationResult {
       typeof rawSettings.defaultUnit === 'string' && rawSettings.defaultUnit.trim()
         ? rawSettings.defaultUnit.trim()
         : 'کیلوگرم',
+    lastSelectedEmployeeId:
+      typeof rawSettings.lastSelectedEmployeeId === 'string'
+        ? rawSettings.lastSelectedEmployeeId
+        : '',
     currency: 'IRT',
     demoSeedInitialized: true
   };
@@ -319,7 +377,7 @@ export function validateBackupPayload(raw: unknown): BackupValidationResult {
   return {
     isValid: true,
     normalizedBackup: {
-      version: data.version,
+      version: 3,
       exportedAt:
         typeof data.exportedAt === 'string'
           ? data.exportedAt
@@ -329,6 +387,9 @@ export function validateBackupPayload(raw: unknown): BackupValidationResult {
       suppliers: validatedSuppliers,
       inventory: validatedInventory,
       expenses: validatedExpenses,
+      employees: validatedEmployees,
+      revenues: validatedRevenues,
+      timesheets: validatedTimesheets,
       settings: validatedSettings
     }
   };
