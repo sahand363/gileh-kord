@@ -15,6 +15,7 @@ import {
   parseNumericInput
 } from './formatters';
 import { DEFAULT_SETTINGS } from '../services/repositories/SettingsRepository';
+import { generateId } from './uuid';
 
 export interface PurchaseValidationResult {
   isValid: boolean;
@@ -88,7 +89,7 @@ export function deriveProductsFromPurchases(
       const key = normalizeProductKey(prod.name);
       if (!existingMap.has(key)) {
         existingMap.set(key, {
-          id: String(prod.id || `prod_${crypto.randomUUID()}`),
+          id: String(prod.id || generateId('prod')),
           name: prod.name.trim(),
           normalizedName: key,
           category: prod.category || 'عمومی',
@@ -123,7 +124,7 @@ export function deriveProductsFromPurchases(
     const existing = existingMap.get(key);
     if (!existing) {
       existingMap.set(key, {
-        id: p.productId || `prod_${crypto.randomUUID()}`,
+        id: p.productId || generateId('prod'),
         name: p.productName.trim(),
         normalizedName: key,
         category: 'عمومی',
