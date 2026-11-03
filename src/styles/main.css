@@ -10,7 +10,7 @@
   --gold: #b28b50;
   --danger: #b64c45;
   --radius: 18px;
-  font-family: Vazirmatn, Tahoma, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+  font-family: Vazirmatn, Tahoma, Arial, sans-serif;
   color: var(--ink);
   background: var(--canvas);
   font-synthesis: none;
@@ -20,11 +20,13 @@
   box-sizing: border-box;
 }
 
-body {
+html, body {
   margin: 0;
+  padding: 0;
   background: var(--canvas);
   font-family: inherit;
   font-size: 14px;
+  overflow-x: hidden;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -34,6 +36,11 @@ button, input, select, textarea {
 
 button {
   cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
 }
 
 .app-shell {
@@ -69,6 +76,7 @@ button {
   background: var(--green);
   font-size: 22px;
   font-weight: 800;
+  flex: 0 0 auto;
 }
 
 .brand strong {
@@ -98,6 +106,7 @@ button {
   height: 7px;
   border-radius: 50%;
   background: #6da584;
+  flex: 0 0 auto;
 }
 
 .status-dot.muted {
@@ -117,12 +126,23 @@ button {
 }
 
 .page {
+  display: none;
   animation: appear 0.2s ease-out;
 }
 
+.page.active {
+  display: block;
+}
+
 @keyframes appear {
-  from { opacity: 0.5; transform: translateY(4px); }
-  to { opacity: 1; transform: none; }
+  from {
+    opacity: 0.5;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .page-heading {
@@ -234,7 +254,7 @@ input, select, textarea {
 
 input:focus, select:focus, textarea:focus {
   border-color: #6e9a83;
-  box-shadow: 0 0 0 3px rgba(64, 119, 89, 0.10);
+  box-shadow: 0 0 0 3px rgba(64, 119, 89, 0.1);
   background: #fff;
 }
 
@@ -286,8 +306,8 @@ select {
 
 .suggestions {
   position: absolute;
-  z-index: 10;
-  top: calc(100% + 4px);
+  z-index: 8;
+  top: 76px;
   right: 0;
   left: 0;
   background: #fff;
@@ -304,9 +324,15 @@ select {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 10px;
   text-align: right;
   padding: 11px 14px;
   color: var(--ink);
+}
+
+.suggestion-item > span:first-child {
+  min-width: 0;
+  flex: 1;
 }
 
 .suggestion-item + .suggestion-item {
@@ -319,8 +345,12 @@ select {
 }
 
 .suggestion-name {
+  display: block;
   font-weight: 700;
   font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .suggestion-meta {
@@ -335,6 +365,7 @@ select {
   color: var(--green-2);
   font-size: 10px;
   white-space: nowrap;
+  flex: 0 0 auto;
 }
 
 .suggestion-empty {
@@ -459,6 +490,7 @@ select {
 
 .insight-card {
   padding: 20px 21px 17px;
+  min-width: 0;
 }
 
 .card-topline {
@@ -488,6 +520,7 @@ select {
   color: var(--green);
   margin-top: 19px;
   direction: rtl;
+  overflow-wrap: anywhere;
 }
 
 .stat-number small {
@@ -515,6 +548,7 @@ select {
 .stat-foot {
   display: flex;
   justify-content: space-between;
+  gap: 8px;
   margin-top: 13px;
   color: var(--muted);
   font-size: 10px;
@@ -532,6 +566,7 @@ select {
   border: 1px solid #e4ece5;
   background: #f0f5f0;
   border-radius: 15px;
+  min-width: 0;
 }
 
 .tip-icon {
@@ -601,6 +636,7 @@ select {
   border: 1px solid var(--line);
   border-radius: 13px;
   padding: 13px 15px;
+  min-width: 0;
 }
 
 .product-avatar {
@@ -649,6 +685,7 @@ select {
   font-weight: 800;
   color: #33483b;
   direction: rtl;
+  white-space: nowrap;
 }
 
 .purchase-date {
@@ -768,54 +805,6 @@ select {
   gap: 7px;
 }
 
-.login-panel {
-  width: min(100%, 410px);
-  margin: 10px auto;
-  padding: 29px;
-  text-align: center;
-}
-
-.lock-mark {
-  width: 48px;
-  height: 48px;
-  margin: 0 auto 13px;
-  display: grid;
-  place-items: center;
-  background: var(--green-soft);
-  color: var(--green);
-  border-radius: 15px;
-  font-size: 25px;
-}
-
-.login-panel h2 {
-  font-size: 18px;
-  margin: 0;
-}
-
-.login-panel > p {
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.9;
-  margin: 7px 0 21px;
-}
-
-.login-panel form {
-  text-align: right;
-}
-
-.login-panel .primary-btn {
-  margin-top: 17px;
-}
-
-.demo-hint {
-  color: #a08b68;
-  background: #faf6ed;
-  border-radius: 8px;
-  padding: 8px 10px;
-  font-size: 9px;
-  line-height: 1.8;
-}
-
 .settings-grid {
   display: grid;
   gap: 12px;
@@ -889,6 +878,7 @@ select {
   color: #9ca69f;
   font-size: 9px;
   margin-top: 7px;
+  line-height: 1.6;
 }
 
 .coming-soon {
@@ -898,6 +888,7 @@ select {
   border-radius: 7px;
   font-size: 9px;
   white-space: nowrap;
+  flex: 0 0 auto;
 }
 
 .setting-inline {
@@ -931,12 +922,14 @@ select {
 .sync-status {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 7px;
   font-size: 11px;
   color: #69786d;
 }
 
 .sync-status small {
+  display: inline;
   margin: 0 0 0 5px;
 }
 
@@ -1011,6 +1004,9 @@ select {
   box-shadow: 0 8px 25px rgba(0, 0, 0, 0.15);
   transition: all 0.2s;
   white-space: nowrap;
+  max-width: calc(100vw - 24px);
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .toast.show {
@@ -1179,13 +1175,10 @@ select {
     font-size: 9px;
   }
 
-  .login-panel {
-    padding: 23px 18px;
-  }
-
   .setting-card {
     padding: 14px 12px;
     gap: 10px;
+    flex-wrap: wrap;
   }
 
   .setting-icon {
@@ -1227,12 +1220,16 @@ select {
     padding: 17px 13px;
   }
 
+  . optional-grid {
+    grid-template-columns: 1fr;
+  }
+
   .purchase-side {
-    max-width: 105px;
+    max-width: 120px;
   }
 
   .purchase-amount {
-    font-size: 9px;
+    font-size: 9.5px;
   }
 }
 
