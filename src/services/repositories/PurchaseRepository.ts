@@ -2,6 +2,7 @@ import { dbClient, requestToPromise } from '../db';
 import type { Product, Purchase, PurchaseFilterCriteria } from '../../models/types';
 import { normalizeProductKey } from '../../utils/formatters';
 import { filterPurchases, sortPurchasesDescending } from '../../utils/calculations';
+import { generateId } from '../../utils/uuid';
 
 export interface CreatePurchaseInput {
   productName: string;
@@ -44,6 +45,7 @@ export class PurchaseRepository {
   /**
    * Atomically creates a purchase record and updates/creates the associated product record
    * within a single readwrite IndexedDB transaction across ['purchases', 'products'].
+   * Works reliably over both HTTP IP and HTTPS domain.
    */
   public async createPurchaseWithProduct(
     input: CreatePurchaseInput
@@ -69,7 +71,6 @@ export class PurchaseRepository {
 
         let updatedProduct: Product;
         if (existingProduct) {
-          // Only overwrite lastUnit/lastPrice if this purchase is on or after the latest recorded date
           const isNewerOrSameDate =
             input.purchaseDate >= existingProduct.lastPurchaseDate;
 
@@ -84,22 +85,24 @@ export class PurchaseRepository {
             lastPurchaseDate: isNewerOrSameDate
               ? input.purchaseDate
               : existingProduct.lastPurchaseDate,
-            totalPurchasesCount: (existingProduct.totalPurchasesCount || 0) + 1
+            totalPurchasesCount: (existingProduct.totalPurchasesCount || 0) + 1,
+            isDemo: false
           };
         } else {
           updatedProduct = {
-            id: `prod_${crypto.randomUUID()}`,
+            id: generateId('prod'),
             name: cleanName,
             normalizedName: normalizedKey,
             lastUnit: input.unit,
             lastPrice: Math.round(input.totalAmount),
             lastPurchaseDate: input.purchaseDate,
-            totalPurchasesCount: 1
+            totalPurchasesCount: 1,
+            isDemo: false
           };
         }
 
         const newPurchase: Purchase = {
-          id: `purch_${crypto.randomUUID()}`,
+          id: generateId('purch'),
           productId: updatedProduct.id,
           productName: updatedProduct.name,
           quantity: input.quantity,
@@ -110,6 +113,7 @@ export class PurchaseRepository {
           supplierName: input.supplierName?.trim() || undefined,
           invoiceNumber: input.invoiceNumber?.trim() || undefined,
           notes: input.notes?.trim() || undefined,
+          isDemo: false,
           createdAt: now,
           updatedAt: now
         };
