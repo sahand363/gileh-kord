@@ -1,13 +1,31 @@
-import type { BackupData, Purchase } from '../models/types';
-import { parseNumericInput } from './formatters';
+import type { BackupData, Product, Purchase, ApplicationSettings } from '../models/types';
+import {
+  isValidISODate,
+  MAX_SAFE_AMOUNT,
+  MAX_SAFE_QUANTITY,
+  normalizeProductKey,
+  parseNumericInput
+} from './formatters';
+
+export interface PurchaseValidationResult {
+  isValid: boolean;
+  error?: string;
+  cleanData?: {
+    productName: string;
+    quantity: number;
+    price: number;
+    purchaseDate: string;
+  };
+}
 
 export function validatePurchaseInput(data: {
   productName: string;
   quantity: string | number;
   price: string | number;
   purchaseDate: string;
-}): { isValid: boolean; error?: string; cleanData?: { quantity: number; price: number } } {
-  if (!data.productName.trim()) {
+}): PurchaseValidationResult {
+  const cleanName = String(data.productName ?? '').trim().replace(/\s+/g, ' ');
+  if (!cleanName) {
     return { isValid: false, error: 'لطفاً نام محصول را وارد کنید.' };
   }
 
@@ -15,29 +33,269 @@ export function validatePurchaseInput(data: {
   if (isNaN(quantity) || quantity <= 0) {
     return { isValid: false, error: 'مقدار باید عددی بزرگ‌تر از صفر باشد.' };
   }
+  if (quantity > MAX_SAFE_QUANTITY) {
+    return { isValid: false, error: 'مقدار واردشده خارج از محدوده مجاز است.' };
+  }
 
-  const price = parseNumericInput(data.price);
-  if (isNaN(price) || price <= 0) {
+  const rawPrice = parseNumericInput(data.price);
+  if (isNaN(rawPrice) || rawPrice <= 0) {
     return { isValid: false, error: 'مبلغ خرید باید عددی بزرگ‌تر از صفر باشد.' };
   }
+  if (rawPrice > MAX_SAFE_AMOUNT) {
+    return { isValid: false, error: 'مبلغ واردشده بیش از حد مجاز است.' };
+  }
+  const price = Math.round(rawPrice);
 
-  if (!data.purchaseDate) {
-    return { isValid: false, error: 'لطفاً تاریخ خرید را مشخص کنید.' };
+  if (!data.purchaseDate || !isValidISODate(data.purchaseDate)) {
+    return { isValid: false, error: 'لطفاً تاریخ خرید معتبری را مشخص کنید.' };
   }
 
-  return { isValid: true, cleanData: { quantity, price } };
+  return {
+    isValid: true,
+    cleanData: {
+      productName: cleanName,
+      quantity,
+      price,
+      purchaseDate: data.purchaseDate
+    }
+  };
 }
 
-export function validateBackupData(data: any): data is BackupData {
-  if (!data || typeof data !== 'object') return false;
-  if (typeof data.version !== 'number') return false;
-  if (!Array.isArray(data.purchases)) return false;
+export interface BackupValidationResult {
+  isValid: boolean;
+  error?: string;
+  normalizedBackup?: BackupData;
+}
 
-  for (const item of data.purchases) {
-    if (!item.id || !item.productName || typeof item.quantity !== 'number' || typeof item.totalAmount !== 'number') {
-      return false;
+const SUPPORTED_BACKUP_VERSIONS = [1];
+
+/**
+ * Rebuilds the deduplicated products catalog from a list of purchases
+ * so backups remain consistent and self-healing.
+ */
+export function deriveProductsFromPurchases(
+  purchases: Purchase[],
+  existingProducts: Product[] = []
+): Product[] {
+  const existingMap = new Map<string, Product>();
+  for (const prod of existingProducts) {
+    if (prod && typeof prod.name === 'string' && prod.name.trim()) {
+      const key = normalizeProductKey(prod.name);
+      if (!existingMap.has(key)) {
+        existingMap.set(key, {
+          id: String(prod.id || `prod_${crypto.randomUUID()}`),
+          name: prod.name.trim(),
+          normalizedName: key,
+          lastUnit: String(prod.lastUnit || 'کیلوگرم'),
+          lastPrice: Number(prod.lastPrice) > 0 ? Math.round(Number(prod.lastPrice)) : 0,
+          lastPurchaseDate: isValidISODate(prod.lastPurchaseDate) ? prod.lastPurchaseDate : '1970-01-01',
+          totalPurchasesCount: Math.max(0, Math.trunc(Number(prod.totalPurchasesCount) || 0))
+        });
+      }
     }
   }
 
-  return true;
+  // Sort purchases chronologically ascending so latest purchases determine lastUnit/lastPrice
+  const sorted = [...purchases].sort(
+    (a, b) =>
+      a.purchaseDate.localeCompare(b.purchaseDate) ||
+      a.createdAt.localeCompare(b.createdAt)
+  );
+
+  const countByProduct = new Map<string, number>();
+
+  for (const p of sorted) {
+    const key = normalizeProductKey(p.productName);
+    const prevCount = countByProduct.get(key) || 0;
+    countByProduct.set(key, prevCount + 1);
+
+    const existing = existingMap.get(key);
+    if (!existing) {
+      existingMap.set(key, {
+        id: p.productId || `prod_${crypto.randomUUID()}`,
+        name: p.productName.trim(),
+        normalizedName: key,
+        lastUnit: p.unit,
+        lastPrice: p.totalAmount,
+        lastPurchaseDate: p.purchaseDate,
+        totalPurchasesCount: prevCount + 1
+      });
+    } else {
+      const isNewerOrEqual = p.purchaseDate >= existing.lastPurchaseDate;
+      existingMap.set(key, {
+        ...existing,
+        lastUnit: isNewerOrEqual ? p.unit : existing.lastUnit,
+        lastPrice: isNewerOrEqual ? p.totalAmount : existing.lastPrice,
+        lastPurchaseDate: isNewerOrEqual ? p.purchaseDate : existing.lastPurchaseDate,
+        totalPurchasesCount: prevCount + 1
+      });
+    }
+  }
+
+  return Array.from(existingMap.values());
+}
+
+export function validateBackupPayload(raw: unknown): BackupValidationResult {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { isValid: false, error: 'ساختار فایل پشتیبان نامعتبر است.' };
+  }
+
+  const data = raw as Record<string, unknown>;
+
+  if (
+    typeof data.version !== 'number' ||
+    !SUPPORTED_BACKUP_VERSIONS.includes(data.version)
+  ) {
+    return {
+      isValid: false,
+      error: 'نسخه فایل پشتیبان پشتیبانی نمی‌شود یا نامعتبر است.'
+    };
+  }
+
+  if (!Array.isArray(data.purchases)) {
+    return { isValid: false, error: 'فهرست خریدها در فایل پشتیبان یافت نشد.' };
+  }
+
+  const seenPurchaseIds = new Set<string>();
+  const validatedPurchases: Purchase[] = [];
+
+  for (let i = 0; i < data.purchases.length; i++) {
+    const item = data.purchases[i] as Record<string, unknown>;
+    if (!item || typeof item !== 'object') {
+      return { isValid: false, error: `ردیف خرید شماره ${i + 1} معتبر نیست.` };
+    }
+
+    const id = typeof item.id === 'string' ? item.id.trim() : '';
+    if (!id) {
+      return { isValid: false, error: `شناسه خرید در ردیف ${i + 1} وجود ندارد.` };
+    }
+    if (seenPurchaseIds.has(id)) {
+      return {
+        isValid: false,
+        error: `شناسه تکراری (${id}) در فایل پشتیبان یافت شد.`
+      };
+    }
+    seenPurchaseIds.add(id);
+
+    const productName =
+      typeof item.productName === 'string' ? item.productName.trim() : '';
+    if (!productName) {
+      return { isValid: false, error: `نام محصول در ردیف ${i + 1} خالی است.` };
+    }
+
+    const quantity = Number(item.quantity);
+    if (!Number.isFinite(quantity) || quantity <= 0 || quantity > MAX_SAFE_QUANTITY) {
+      return { isValid: false, error: `مقدار خرید در ردیف ${i + 1} نامعتبر است.` };
+    }
+
+    // Support both canonical `totalAmount` and prototype legacy `price`
+    const rawAmount =
+      item.totalAmount !== undefined ? Number(item.totalAmount) : Number(item.price);
+    if (!Number.isFinite(rawAmount) || rawAmount <= 0 || rawAmount > MAX_SAFE_AMOUNT) {
+      return { isValid: false, error: `مبلغ خرید در ردیف ${i + 1} نامعتبر است.` };
+    }
+
+    // Support both canonical `purchaseDate` and prototype legacy `date`
+    const purchaseDate =
+      typeof item.purchaseDate === 'string'
+        ? item.purchaseDate
+        : typeof item.date === 'string'
+          ? item.date
+          : '';
+    if (!isValidISODate(purchaseDate)) {
+      return { isValid: false, error: `تاریخ خرید در ردیف ${i + 1} نامعتبر است.` };
+    }
+
+    const unit =
+      typeof item.unit === 'string' && item.unit.trim()
+        ? item.unit.trim()
+        : 'کیلوگرم';
+
+    const nowIso = new Date().toISOString();
+    const createdAt =
+      typeof item.createdAt === 'string' && item.createdAt ? item.createdAt : nowIso;
+    const updatedAt =
+      typeof item.updatedAt === 'string' && item.updatedAt ? item.updatedAt : createdAt;
+
+    validatedPurchases.push({
+      id,
+      productId:
+        typeof item.productId === 'string' && item.productId.trim()
+          ? item.productId.trim()
+          : `prod_${normalizeProductKey(productName)}`,
+      productName,
+      quantity,
+      unit,
+      totalAmount: Math.round(rawAmount),
+      currency: 'IRT',
+      purchaseDate,
+      supplierName:
+        typeof item.supplierName === 'string' && item.supplierName.trim()
+          ? item.supplierName.trim()
+          : typeof item.supplier === 'string' && item.supplier.trim()
+            ? item.supplier.trim()
+            : undefined,
+      invoiceNumber:
+        typeof item.invoiceNumber === 'string' && item.invoiceNumber.trim()
+          ? item.invoiceNumber.trim()
+          : typeof item.invoice === 'string' && item.invoice.trim()
+            ? item.invoice.trim()
+            : undefined,
+      notes:
+        typeof item.notes === 'string' && item.notes.trim()
+          ? item.notes.trim()
+          : undefined,
+      createdAt,
+      updatedAt
+    });
+  }
+
+  const rawProducts = Array.isArray(data.products) ? (data.products as Product[]) : [];
+  const reconciledProducts = deriveProductsFromPurchases(validatedPurchases, rawProducts);
+
+  // Ensure every purchase has a matching productId from the reconciled product list
+  const productByKey = new Map<string, Product>(
+    reconciledProducts.map((p) => [p.normalizedName, p])
+  );
+  for (const purchase of validatedPurchases) {
+    const matched = productByKey.get(normalizeProductKey(purchase.productName));
+    if (matched) {
+      purchase.productId = matched.id;
+    }
+  }
+
+  const rawSettings =
+    data.settings && typeof data.settings === 'object'
+      ? (data.settings as Partial<ApplicationSettings>)
+      : {};
+
+  const validatedSettings: ApplicationSettings = {
+    serverAddress:
+      typeof rawSettings.serverAddress === 'string' ? rawSettings.serverAddress.trim() : '',
+    defaultUnit:
+      typeof rawSettings.defaultUnit === 'string' && rawSettings.defaultUnit.trim()
+        ? rawSettings.defaultUnit.trim()
+        : 'کیلوگرم',
+    currency: 'IRT',
+    lastSyncAt:
+      typeof rawSettings.lastSyncAt === 'string' ? rawSettings.lastSyncAt : null
+  };
+
+  return {
+    isValid: true,
+    normalizedBackup: {
+      version: data.version,
+      exportedAt:
+        typeof data.exportedAt === 'string'
+          ? data.exportedAt
+          : new Date().toISOString(),
+      purchases: validatedPurchases,
+      products: reconciledProducts,
+      settings: validatedSettings
+    }
+  };
+}
+
+export function validateBackupData(data: unknown): data is BackupData {
+  return validateBackupPayload(data).isValid;
 }
