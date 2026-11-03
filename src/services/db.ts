@@ -1,7 +1,7 @@
 import { normalizeProductKey } from '../utils/formatters';
 
 export const DB_NAME = 'gileh_kord_db';
-export const DB_VERSION = 3;
+export const DB_VERSION = 4;
 
 export const ALL_STORES = [
   'purchases',
@@ -9,6 +9,10 @@ export const ALL_STORES = [
   'suppliers',
   'inventory',
   'expenses',
+  'employees',
+  'revenues',
+  'timesheets',
+  'manager_auth',
   'settings'
 ] as const;
 
@@ -139,6 +143,37 @@ export class IndexedDBClient {
       if (!db.objectStoreNames.contains('expenses')) {
         const expenseStore = db.createObjectStore('expenses', { keyPath: 'id' });
         expenseStore.createIndex('expenseDate', 'expenseDate', { unique: false });
+      }
+    }
+
+    // Version 4: Employees, Revenues, Timesheets, Manager Auth, and Purchase employeeId index
+    if (oldVersion < 4) {
+      if (db.objectStoreNames.contains('purchases')) {
+        const purchaseStore = tx.objectStore('purchases');
+        if (!purchaseStore.indexNames.contains('employeeId')) {
+          purchaseStore.createIndex('employeeId', 'employeeId', { unique: false });
+        }
+      }
+
+      if (!db.objectStoreNames.contains('employees')) {
+        const empStore = db.createObjectStore('employees', { keyPath: 'id' });
+        empStore.createIndex('name', 'name', { unique: false });
+        empStore.createIndex('isActive', 'isActive', { unique: false });
+      }
+
+      if (!db.objectStoreNames.contains('revenues')) {
+        const revStore = db.createObjectStore('revenues', { keyPath: 'id' });
+        revStore.createIndex('date', 'date', { unique: true });
+      }
+
+      if (!db.objectStoreNames.contains('timesheets')) {
+        const tsStore = db.createObjectStore('timesheets', { keyPath: 'id' });
+        tsStore.createIndex('employeeId', 'employeeId', { unique: false });
+        tsStore.createIndex('date', 'date', { unique: false });
+      }
+
+      if (!db.objectStoreNames.contains('manager_auth')) {
+        db.createObjectStore('manager_auth', { keyPath: 'key' });
       }
     }
   }
