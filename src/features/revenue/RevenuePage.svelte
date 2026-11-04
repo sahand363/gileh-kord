@@ -1,43 +1,34 @@
 <script lang="ts">
   import {
-    revenues,
-    publicRevenueStore,
     saveDailyTotalRevenue,
-    addDetailedRevenueEntry,
-    switchRevenueDayMode,
-    deleteRevenueDayRecord
+    addDetailedRevenueEntry
   } from '../../stores/purchaseStore';
   import { showToast } from '../../stores/toastStore';
   import {
-    formatMoney,
     getTodayISODate,
     parseNumericInput,
-    toJalaliDate,
-    toJalaliNumeric
+    toJalaliDate
   } from '../../utils/formatters';
-  import {
-    formatJalaliYearMonthLabel,
-    getPersianWeekdayName
-  } from '../../utils/jalali';
+  import { getPersianWeekdayName } from '../../utils/jalali';
   import {
     REVENUE_CATEGORIES,
     type PaymentMethod,
     type RevenueCategory,
     type RevenueRecordingMode
   } from '../../models/types';
-  import EmptyState from '../../components/common/EmptyState.svelte';
   import JalaliDatePicker from '../../components/common/JalaliDatePicker.svelte';
-  import ColumnChart, { type ColumnChartItem } from '../../components/common/ColumnChart.svelte';
 
   let selectedDate = getTodayISODate();
   let recordingMode: RevenueRecordingMode = 'daily_total';
 
+  // Mode A: Single entry fields
   let dailyTotalAmount = '';
   let cardAmount = '';
   let onlineAmount = '';
   let cashAmount = '';
   let dailyNotes = '';
 
+  // Mode B: Itemized entry fields
   let entryCategory: RevenueCategory = 'فروش غذا (سالن)';
   let entryDescription = '';
   let entryQuantity = '';
@@ -47,37 +38,9 @@
   let entryNotes = '';
 
   let formError = '';
+  let isSubmitting = false;
 
-  $: currentDayRecord = $revenues.find((r) => r.date === selectedDate) || null;
-  $: publicDayItem =
-    $publicRevenueStore.dailySeries.find((d) => d.date === selectedDate) || null;
-  $: publicDayAmount = publicDayItem ? publicDayItem.amount : 0;
-
-  $: dailyColumnItems = [...$publicRevenueStore.dailySeries]
-    .slice(0, 10)
-    .reverse()
-    .map(
-      (d): ColumnChartItem => ({
-        id: d.id,
-        label: getPersianWeekdayName(d.date),
-        subLabel: toJalaliNumeric(d.date).slice(5),
-        value: d.amount,
-        tone: 'primary'
-      })
-    );
-
-  $: monthlyColumnItems = [...$publicRevenueStore.monthlySeries]
-    .reverse()
-    .map(
-      (m): ColumnChartItem => ({
-        id: m.ym,
-        label: formatJalaliYearMonthLabel(m.ym),
-        subLabel: `${m.days} روز`,
-        value: m.amount,
-        tone: 'gold'
-      })
-    );
-
+  // Auto-calculate itemized amount if quantity and unit price are provided
   $: {
     const q = parseNumericInput(entryQuantity);
     const up = parseNumericInput(entryUnitPrice);
@@ -86,23 +49,12 @@
     }
   }
 
-  async function handleModeSwitch(mode: RevenueRecordingMode) {
-    recordingMode = mode;
-    if (currentDayRecord && currentDayRecord.mode !== mode) {
-      await switchRevenueDayMode(selectedDate, mode);
-      showToast(
-        mode === 'daily_total'
-          ? 'حالت ثبت این روز به «مجموع فروش روزانه» تغییر یافت.'
-          : 'حالت ثبت این روز به «ریز تراکنش‌های فروش» تغییر یافت.'
-      );
-    }
-  }
-
   async function handleSaveDailyTotal() {
+    if (isSubmitting) return;
     formError = '';
     const total = parseNumericInput(dailyTotalAmount);
     if (isNaN(total) || total <= 0) {
-      formError = 'مبلغ فروش روزانه باید عددی بزرگ‌تر از صفر باشد.';
+      formError = 'لطفاً مبلغ معتبر بزرگ‌تر از صفر وارد کنید.';
       return;
     }
 
@@ -110,6 +62,7 @@
     const online = parseNumericInput(onlineAmount);
     const cash = parseNumericInput(cashAmount);
 
+    isSubmitting = true;
     try {
       await saveDailyTotalRevenue({
         date: selectedDate,
@@ -119,28 +72,33 @@
         cashAmount: !isNaN(cash) && cash > 0 ? cash : undefined,
         notes: dailyNotes
       });
+
       dailyTotalAmount = '';
       cardAmount = '';
       onlineAmount = '';
       cashAmount = '';
       dailyNotes = '';
-      showToast(`درآمد روز ${toJalaliDate(selectedDate)} ثبت شد.`);
+      showToast('اطلاعات فروش با موفقیت ثبت شد.');
     } catch (err) {
-      formError = err instanceof Error ? err.message : 'خطا در ثبت درآمد روزانه.';
+      formError = err instanceof Error ? err.message : 'خطا در ثبت اطلاعات.';
+    } finally {
+      isSubmitting = false;
     }
   }
 
   async function handleAddDetailedItem() {
+    if (isSubmitting) return;
     formError = '';
     const amount = parseNumericInput(entryAmount);
     if (isNaN(amount) || amount <= 0) {
-      formError = 'مبلغ تراکنش فروش باید عددی بزرگ‌تر از صفر باشد.';
+      formError = 'مبلغ تراکنش باید عددی بزرگ‌تر از صفر باشد.';
       return;
     }
 
     const q = parseNumericInput(entryQuantity);
     const up = parseNumericInput(entryUnitPrice);
 
+    isSubmitting = true;
     try {
       await addDetailedRevenueEntry({
         date: selectedDate,
@@ -158,71 +116,70 @@
       entryUnitPrice = '';
       entryAmount = '';
       entryNotes = '';
-      showToast('ردیف فروش اضافه شد.');
+      showToast('ردیف فروش با موفقیت ثبت شد.');
     } catch (err) {
-      formError = err instanceof Error ? err.message : 'خطا در افزودن ردیف درآمد.';
+      formError = err instanceof Error ? err.message : 'خطا در ثبت ردیف فروش.';
+    } finally {
+      isSubmitting = false;
     }
-  }
-
-  async function handleDeleteDayRecord(id: string, date: string) {
-    const confirmed = window.confirm(
-      `آیا از حذف درآمد ثبت‌شده برای تاریخ ${toJalaliDate(date)} مطمئن هستید؟`
-    );
-    if (!confirmed) return;
-    await deleteRevenueDayRecord(id);
-    showToast('رکورد درآمد روز حذف شد.');
   }
 </script>
 
 <section class="page active" aria-labelledby="revenueTitle">
   <div class="page-heading">
     <div>
-      <p class="eyebrow">ثبت و نمودار ستونی درآمد (شمسی)</p>
-      <h1 id="revenueTitle">درآمد</h1>
-      <p class="subheading">ثبت فروش روزانه و مشاهده نمودار ستونی درآمد.</p>
+      <p class="eyebrow">ثبت سریع صندوق و فروش</p>
+      <h1 id="revenueTitle">ثبت درآمد</h1>
+      <p class="subheading">اطلاعات فروش را وارد و ثبت کنید.</p>
     </div>
   </div>
 
-  <div class="entry-layout">
+  <div style="max-width: 620px; margin: 0 auto;">
     <section class="panel form-panel">
       <div class="field">
-        <label for="revDate">تاریخ ثبت درآمد (شمسی)</label>
+        <label for="revDate">تاریخ ثبت (شمسی)</label>
         <JalaliDatePicker
           id="revDate"
           bind:value={selectedDate}
-          ariaLabel="تاریخ ثبت درآمد"
+          ariaLabel="تاریخ ثبت"
         />
       </div>
 
-      <div class="mode-switch-box" style="margin-bottom: 16px;">
+      <div class="mode-switch-box" style="margin-bottom: 18px;">
         <div style="font-size: 11px; font-weight: 700; margin-bottom: 8px;">
-          شیوه ثبت برای {getPersianWeekdayName(selectedDate)} {toJalaliDate(selectedDate)}:
+          روش ثبت برای {getPersianWeekdayName(selectedDate)} {toJalaliDate(selectedDate)}:
         </div>
         <div class="setting-actions">
           <button
             type="button"
             class={recordingMode === 'daily_total' ? 'secondary-btn' : 'quiet-btn'}
-            on:click={() => handleModeSwitch('daily_total')}
+            on:click={() => {
+              recordingMode = 'daily_total';
+              formError = '';
+            }}
           >
             {recordingMode === 'daily_total' ? '● ' : '○ '}
-            مجموع فروش روزانه
+            ثبت کلی (یکجا)
           </button>
           <button
             type="button"
             class={recordingMode === 'detailed' ? 'secondary-btn' : 'quiet-btn'}
-            on:click={() => handleModeSwitch('detailed')}
+            on:click={() => {
+              recordingMode = 'detailed';
+              formError = '';
+            }}
           >
             {recordingMode === 'detailed' ? '● ' : '○ '}
-            ریز تراکنش‌ها
+            ثبت موردی (ریز فروش)
           </button>
         </div>
       </div>
 
       {#if recordingMode === 'daily_total'}
-        <form on:submit|preventDefault={handleSaveDailyTotal} novalidate>
+        <form on:submit|preventDefault={handleSaveDailyTotal} autocomplete="off" novalidate>
           <div class="field">
             <label for="dailyRevTotal">
-              مبلغ فروش روزانه <span class="label-unit">تومان</span> <b class="required">*</b>
+              مبلغ کل <span class="label-unit">تومان</span> <b class="required">*</b>
             </label>
             <div class="input-wrap price-wrap">
               <input
@@ -239,22 +196,41 @@
           <div class="field-row">
             <div class="field">
               <label for="revCard">کارت‌خوان (اختیاری)</label>
-              <input id="revCard" inputmode="numeric" bind:value={cardAmount} placeholder="مبلغ کارت‌خوان" />
+              <input
+                id="revCard"
+                inputmode="numeric"
+                bind:value={cardAmount}
+                placeholder="مبلغ کارت‌خوان"
+              />
             </div>
             <div class="field">
               <label for="revOnline">آنلاین (اختیاری)</label>
-              <input id="revOnline" inputmode="numeric" bind:value={onlineAmount} placeholder="مبلغ آنلاین" />
+              <input
+                id="revOnline"
+                inputmode="numeric"
+                bind:value={onlineAmount}
+                placeholder="مبلغ آنلاین"
+              />
             </div>
           </div>
 
           <div class="field-row">
             <div class="field">
               <label for="revCash">نقدی (اختیاری)</label>
-              <input id="revCash" inputmode="numeric" bind:value={cashAmount} placeholder="مبلغ نقدی" />
+              <input
+                id="revCash"
+                inputmode="numeric"
+                bind:value={cashAmount}
+                placeholder="مبلغ نقدی"
+              />
             </div>
             <div class="field">
-              <label for="revDailyNotes">توضیحات</label>
-              <input id="revDailyNotes" bind:value={dailyNotes} placeholder="توضیحات..." />
+              <label for="revDailyNotes">توضیحات (اختیاری)</label>
+              <input
+                id="revDailyNotes"
+                bind:value={dailyNotes}
+                placeholder="توضیحات..."
+              />
             </div>
           </div>
 
@@ -262,13 +238,16 @@
             <div class="form-error" role="alert">{formError}</div>
           {/if}
 
-          <button type="submit" class="primary-btn">
-            <span>ثبت درآمد روز</span>
+          <button type="submit" class="primary-btn" disabled={isSubmitting}>
+            <span>{isSubmitting ? 'در حال ثبت...' : 'ثبت درآمد'}</span>
             <span class="btn-arrow">←</span>
           </button>
+          <p class="secure-note">
+            <span>✓</span> اطلاعات در حافظه دستگاه ثبت شده و فقط در پنل مدیریت قابل مشاهده است.
+          </p>
         </form>
       {:else}
-        <form on:submit|preventDefault={handleAddDetailedItem} novalidate>
+        <form on:submit|preventDefault={handleAddDetailedItem} autocomplete="off" novalidate>
           <div class="field-row">
             <div class="field">
               <label for="revEntryCat">دسته‌بندی فروش</label>
@@ -291,26 +270,46 @@
 
           <div class="field">
             <label for="revDesc">شرح فروش</label>
-            <input id="revDesc" bind:value={entryDescription} placeholder="شرح فروش..." />
+            <input
+              id="revDesc"
+              bind:value={entryDescription}
+              placeholder="مثلاً فروش سالن یا سفارش بیرون‌بر..."
+            />
           </div>
 
           <div class="field-row">
             <div class="field">
               <label for="revQty">تعداد (اختیاری)</label>
-              <input id="revQty" inputmode="decimal" bind:value={entryQuantity} placeholder="مثلاً ۲۰" />
+              <input
+                id="revQty"
+                inputmode="decimal"
+                bind:value={entryQuantity}
+                placeholder="مثلاً ۲۰"
+              />
             </div>
             <div class="field">
               <label for="revUnitPrice">فی واحد (اختیاری)</label>
-              <input id="revUnitPrice" inputmode="numeric" bind:value={entryUnitPrice} placeholder="مثلاً ۳۰۰٬۰۰۰" />
+              <input
+                id="revUnitPrice"
+                inputmode="numeric"
+                bind:value={entryUnitPrice}
+                placeholder="مثلاً ۳۰۰٬۰۰۰"
+              />
             </div>
           </div>
 
           <div class="field">
             <label for="revItemAmount">
-              مبلغ کل این ردیف <span class="label-unit">تومان</span> <b class="required">*</b>
+              مبلغ این ردیف <span class="label-unit">تومان</span> <b class="required">*</b>
             </label>
             <div class="input-wrap price-wrap">
-              <input id="revItemAmount" inputmode="numeric" bind:value={entryAmount} placeholder="مثلاً ۶٬۰۰۰٬۰۰۰" required />
+              <input
+                id="revItemAmount"
+                inputmode="numeric"
+                bind:value={entryAmount}
+                placeholder="مثلاً ۶٬۰۰۰٬۰۰۰"
+                required
+              />
               <span class="currency">تومان</span>
             </div>
           </div>
@@ -319,118 +318,15 @@
             <div class="form-error" role="alert">{formError}</div>
           {/if}
 
-          <button type="submit" class="primary-btn">
-            <span>＋ افزودن به درآمد این روز</span>
+          <button type="submit" class="primary-btn" disabled={isSubmitting}>
+            <span>{isSubmitting ? 'در حال ثبت...' : '＋ ثبت ردیف فروش'}</span>
             <span class="btn-arrow">←</span>
           </button>
+          <p class="secure-note">
+            <span>✓</span> گزارش‌ها و نمودارهای درآمد فقط در پنل مدیریت نمایش داده می‌شوند.
+          </p>
         </form>
       {/if}
     </section>
-
-    <aside class="side-column">
-      <section class="panel insight-card">
-        <div class="card-topline">
-          <span class="mini-icon">↗</span>
-          <span>درآمد ({toJalaliDate(selectedDate)})</span>
-        </div>
-        <div class="stat-number">
-          {formatMoney(publicDayAmount)} <small>تومان</small>
-        </div>
-        <p class="stat-caption">
-          درآمد امروز: <strong>{formatMoney($publicRevenueStore.todayAmount)} تومان</strong>
-        </p>
-        <div class="stat-divider"></div>
-        <div class="stat-foot">
-          <span>درآمد کل دوره</span>
-          <strong>{formatMoney($publicRevenueStore.totalAmount)} تومان</strong>
-        </div>
-      </section>
-
-      <section class="tip-card">
-        <span class="tip-icon">✳</span>
-        <div>
-          <strong>نمودارهای ستونی درآمد</strong>
-          <p>درآمد هر روز پس از ثبت، به‌صورت خودکار در نمودارهای ستونی روزانه و ماهانه پایین صفحه نمایش داده می‌شود.</p>
-        </div>
-      </section>
-    </aside>
   </div>
-
-  <!-- Public Vertical Column Charts: Labeled simply "درآمد" -->
-  <div class="two-col-grid" style="margin-top: 20px;">
-    <section class="panel card-pad">
-      <div class="section-heading">
-        <div>
-          <h2>درآمد</h2>
-          <p>نمودار ستونی روزانه (شمسی)</p>
-        </div>
-      </div>
-
-      {#if dailyColumnItems.length > 0}
-        <ColumnChart items={dailyColumnItems} height={190} />
-      {:else}
-        <EmptyState title="درآمدی ثبت نشده است" message="از فرم بالا درآمد روزانه را ثبت کنید." />
-      {/if}
-    </section>
-
-    <section class="panel card-pad">
-      <div class="section-heading">
-        <div>
-          <h2>درآمد ماهانه</h2>
-          <p>نمودار ستونی ماه‌های شمسی</p>
-        </div>
-      </div>
-
-      {#if monthlyColumnItems.length > 0}
-        <ColumnChart items={monthlyColumnItems} height={190} />
-      {:else}
-        <EmptyState title="داده ماهانه‌ای وجود ندارد" message="پس از ثبت درآمد، نمودار ماهانه تکمیل می‌شود." />
-      {/if}
-    </section>
-  </div>
-
-  <section class="recent-section">
-    <div class="section-heading">
-      <div>
-        <h2>فهرست روزهای ثبت‌شده</h2>
-        <p>خلاصه درآمد به تفکیک تاریخ شمسی</p>
-      </div>
-    </div>
-
-    <div class="purchase-list">
-      {#if $publicRevenueStore.dailySeries.length > 0}
-        {#each $publicRevenueStore.dailySeries as item (item.id)}
-          <article class="purchase-item" style="flex-wrap: wrap;">
-            <div class="product-avatar">₿</div>
-            <div class="purchase-main">
-              <div class="purchase-name">
-                <span>
-                  {getPersianWeekdayName(item.date)} {toJalaliDate(item.date)} ({toJalaliNumeric(item.date)})
-                </span>
-                {#if item.isDemo}
-                  <span class="badge-demo">نمونه آزمایشی</span>
-                {:else}
-                  <span class="badge-real">ثبت واقعی</span>
-                {/if}
-              </div>
-              <div class="purchase-meta">
-                <span>درآمد</span>
-              </div>
-            </div>
-            <div class="purchase-side" style="display: flex; align-items: center; gap: 8px;">
-              <div class="purchase-amount">{formatMoney(item.amount)} تومان</div>
-              <button type="button" class="quiet-btn" on:click={() => (selectedDate = item.date)}>
-                انتخاب
-              </button>
-              <button type="button" class="quiet-btn" on:click={() => handleDeleteDayRecord(item.id, item.date)}>
-                حذف
-              </button>
-            </div>
-          </article>
-        {/each}
-      {:else}
-        <EmptyState title="هنوز درآمدی ثبت نشده است" message="از فرم بالا درآمد روزانه رستوران را ثبت کنید." />
-      {/if}
-    </div>
-  </section>
 </section>
