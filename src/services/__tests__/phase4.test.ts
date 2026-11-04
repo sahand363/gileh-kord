@@ -7,6 +7,8 @@ import {
   revenues,
   timesheets,
   appSettings,
+  publicRevenueStore,
+  dashboardSummary,
   addEmployee,
   updateEmployee,
   toggleEmployeeActive,
@@ -15,6 +17,7 @@ import {
   saveDailyTotalRevenue,
   addDetailedRevenueEntry,
   switchRevenueDayMode,
+  updateGlobalRevenueCoefficient,
   addTimesheetEntry,
   updateTimesheetEntry,
   loadDemoDataset,
@@ -39,7 +42,7 @@ import {
 } from '../../utils/timesheetUtils';
 import { getPersianWeekdayName, parseJalaliInputToISO } from '../../utils/jalali';
 
-describe('Phase 4: Employees, Purchase Attribution, Revenue, Financials & Timesheets', () => {
+describe('Phase 4: Employees, Purchase Attribution, Revenue Privacy, Financials & Timesheets', () => {
   beforeEach(async () => {
     await dbClient.executeTransaction([...ALL_STORES], 'readwrite', async (stores) => {
       for (const name of ALL_STORES) {
@@ -59,11 +62,8 @@ describe('Phase 4: Employees, Purchase Attribution, Revenue, Financials & Timesh
     expect(ali.id).toMatch(/^emp_/);
     expect(ali.isActive).toBe(true);
     expect(ali.performanceCoefficient).toBe(1.15);
-
-    // Sticky employee should automatically be set to Ali
     expect(get(appSettings).lastSelectedEmployeeId).toBe(ali.id);
 
-    // Record a purchase attributed to Ali
     const purch = await addPurchase({
       productName: 'برنج هاشمی',
       quantity: 25,
@@ -76,14 +76,12 @@ describe('Phase 4: Employees, Purchase Attribution, Revenue, Financials & Timesh
 
     expect(purch.employeeId).toBe(ali.id);
 
-    // Rename Ali -> previous purchase must resolve to new name via permanent employeeId
     await updateEmployee(ali.id, { name: 'علی رضوانی', role: 'سرپرست خرید' });
     const latestPurchase = get(purchases).find((p) => p.id === purch.id)!;
     expect(resolvePurchaseEmployeeName(latestPurchase, get(employeeByIdMap))).toBe(
       'علی رضوانی'
     );
 
-    // Deactivate Ali -> historical purchase still remains linked
     await toggleEmployeeActive(ali.id);
     const deactivated = get(employees).find((e) => e.id === ali.id)!;
     expect(deactivated.isActive).toBe(false);
@@ -143,21 +141,36 @@ describe('Phase 4: Employees, Purchase Attribution, Revenue, Financials & Timesh
     expect(analytics.topProducts[0].count).toBe(2);
   });
 
-  it('prevents double-counting between daily_total and detailed revenue modes and computes Estimated Net Operating Balance', async () => {
+  it('enforces public revenue chart privacy (adjusted only) while preserving raw revenue records for the Manager Area', async () => {
     const date = '2026-11-03'; // 1405/08/12 (Tuesday / سه‌شنبه)
     expect(getPersianWeekdayName(date)).toBe('سه‌شنبه');
 
-    // First record a daily total of 100,000,000 Toman
     await saveDailyTotalRevenue({
       date,
       dailyTotalAmount: 100_000_000
     });
 
+    // Default global coefficient is 0.7 -> publicRevenueStore must show 70,000,000
+    const publicView1 = get(publicRevenueStore);
+    expect(publicView1.totalAmount).toBe(70_000_000);
+    expect(publicView1.dailySeries[0].amount).toBe(70_000_000);
+
+    // Ensure shared public dashboardSummary does not leak raw totalRevenue
+    const pubDash = get(dashboardSummary) as Record<string, unknown>;
+    expect(pubDash.totalRevenue).toBeUndefined();
+    expect(pubDash.estimatedNetOperatingBalance).toBeUndefined();
+
+    // Manager updates coefficient to 0.5 -> public view updates to 50,000,000 without modifying raw DB record
+    await updateGlobalRevenueCoefficient(0.5);
+    const publicView2 = get(publicRevenueStore);
+    expect(publicView2.totalAmount).toBe(50_000_000);
+    expect(publicView2.dailySeries[0].amount).toBe(50_000_000);
+
+    // Raw record in IndexedDB must still be 100,000,000
     let rec = get(revenues).find((r) => r.date === date)!;
-    expect(rec.mode).toBe('daily_total');
     expect(getEffectiveDayRevenue(rec)).toBe(100_000_000);
 
-    // Add detailed entries for the same date -> mode switches to 'detailed', never summing both!
+    // Switch to detailed mode -> never double counts
     await addDetailedRevenueEntry({
       date,
       category: 'فروش غذا (سالن)',
@@ -175,13 +188,10 @@ describe('Phase 4: Employees, Purchase Attribution, Revenue, Financials & Timesh
     expect(rec.mode).toBe('detailed');
     expect(getEffectiveDayRevenue(rec)).toBe(100_000_000);
 
-    // Switch back to daily_total mode
     await switchRevenueDayMode(date, 'daily_total');
-    rec = get(revenues).find((r) => r.date === date)!;
-    expect(rec.mode).toBe('daily_total');
-    expect(getEffectiveDayRevenue(rec)).toBe(100_000_000);
+    await updateGlobalRevenueCoefficient(0.7);
 
-    // Record 45,000,000 Toman in purchases and 10,000,000 Toman in operational expenses
+    // Manager Financial Overview sees both Actual (100M) and Adjusted (70M) + Net Operating Balance (45M)
     const emp = await addEmployee({ name: 'مهدی', role: 'انباردار' });
     await addPurchase({
       productName: 'اقلام کلی آشپزخانه',
@@ -211,18 +221,20 @@ describe('Phase 4: Employees, Purchase Attribution, Revenue, Financials & Timesh
           createdAt: new Date().toISOString()
         }
       ],
+      coefficient: 0.7,
       dateFrom: date,
       dateTo: date
     });
 
     expect(fin.totalRevenue).toBe(100_000_000);
+    expect(fin.totalAdjustedRevenue).toBe(70_000_000);
     expect(fin.totalPurchases).toBe(45_000_000);
     expect(fin.totalOperationalExpenses).toBe(10_000_000);
     expect(fin.estimatedNetOperatingBalance).toBe(45_000_000);
   });
 
   it('calculates regular and overnight timesheet shifts, break deductions, overlaps, and expected schedule comparisons', async () => {
-    const schedule = createDefaultWeeklySchedule(true); // 08:00 to 17:00 (540 mins) Saturday..Thursday
+    const schedule = createDefaultWeeklySchedule(true);
     const emp = await addEmployee({
       name: 'محمد',
       role: 'کمک‌آشپز',
@@ -230,10 +242,9 @@ describe('Phase 4: Employees, Purchase Attribution, Revenue, Financials & Timesh
       expectedSchedule: schedule
     });
 
-    // 1. Standard shift: 08:00 to 17:30 with 60m break -> 8h 30m (510m)
     const shift1 = await addTimesheetEntry({
       employeeId: emp.id,
-      date: '2026-11-03', // Tuesday (index 3)
+      date: '2026-11-03',
       clockIn: '08:00',
       clockOut: '17:30',
       breakMinutes: 60
@@ -241,7 +252,6 @@ describe('Phase 4: Employees, Purchase Attribution, Revenue, Financials & Timesh
     expect(shift1.netMinutes).toBe(510);
     expect(shift1.overnight).toBe(false);
 
-    // 2. Detect overlapping shift on same date (10:00 to 14:00 overlaps 08:00..17:30)
     const overlap = findOverlappingShift(get(timesheets), {
       employeeId: emp.id,
       date: '2026-11-03',
@@ -250,7 +260,6 @@ describe('Phase 4: Employees, Purchase Attribution, Revenue, Financials & Timesh
     });
     expect(overlap?.id).toBe(shift1.id);
 
-    // 3. Overnight shift across midnight: 18:00 to 02:00 next day with 30m break -> 7h 30m (450m)
     const shift2 = await addTimesheetEntry({
       employeeId: emp.id,
       date: '2026-11-04',
@@ -262,9 +271,8 @@ describe('Phase 4: Employees, Purchase Attribution, Revenue, Financials & Timesh
     expect(shift2.overnight).toBe(true);
     expect(shift2.netMinutes).toBe(450);
 
-    // 4. Edit shift1 with audit trail
     const edited = await updateTimesheetEntry(shift1.id, {
-      clockIn: '08:30', // 30m late arrival compared to 08:00 expected
+      clockIn: '08:30',
       clockOut: '18:30',
       breakMinutes: 60,
       editReason: 'ثبت دقیق ورود'
@@ -281,7 +289,6 @@ describe('Phase 4: Employees, Purchase Attribution, Revenue, Financials & Timesh
     expect(summary.totalWorkingMinutes).toBe(540 + 450);
     expect(summary.lateArrivalsCount).toBeGreaterThanOrEqual(1);
 
-    // Invalid shift without overnight flag when clockOut < clockIn
     const invalidCalc = calculateShiftDuration({
       clockIn: '18:00',
       clockOut: '02:00',
@@ -295,7 +302,6 @@ describe('Phase 4: Employees, Purchase Attribution, Revenue, Financials & Timesh
     await loadDemoDataset();
     expect(get(employees)).toHaveLength(4);
 
-    // Add real employee, purchase, revenue, and timesheet
     const realEmp = await addEmployee({
       name: 'کاوه حقیقی',
       role: 'مدیر خرید',
@@ -324,7 +330,6 @@ describe('Phase 4: Employees, Purchase Attribution, Revenue, Financials & Timesh
       breakMinutes: 30
     });
 
-    // Remove demo dataset -> only real records must remain
     await clearDemoDataset();
     expect(get(employees)).toHaveLength(1);
     expect(get(employees)[0].name).toBe('کاوه حقیقی');
@@ -333,14 +338,12 @@ describe('Phase 4: Employees, Purchase Attribution, Revenue, Financials & Timesh
     expect(get(revenues)).toHaveLength(1);
     expect(get(timesheets)).toHaveLength(1);
 
-    // Export full v3 backup
     const backup = await backupService.exportBackup();
     expect(backup.version).toBe(3);
     expect(backup.employees).toHaveLength(1);
     expect(backup.revenues).toHaveLength(1);
     expect(backup.timesheets).toHaveLength(1);
 
-    // Clear and restore atomically
     await purchaseRepository.clear();
     await backupService.restoreBackup(backup);
     const restoredPurchases = await purchaseRepository.getAll();
