@@ -13,7 +13,8 @@
     employees,
     timesheets,
     appSettings,
-    updateGlobalRevenueCoefficient
+    updateGlobalRevenueCoefficient,
+    deleteRevenueDayRecord
   } from '../../stores/purchaseStore';
   import {
     activeManagerTab,
@@ -34,12 +35,10 @@
     getPersianWeekdayName
   } from '../../utils/jalali';
   import {
-    calculateAdjustedRevenueTotal,
     calculateFinancialOverview,
     calculateRevenueTotal,
     compareEmployeePurchaseTotals,
     filterRevenueRecords,
-    getAdjustedDayRevenue,
     getEffectiveDayRevenue
   } from '../../utils/calculations';
   import {
@@ -58,15 +57,15 @@
   import BackupPage from '../backup/BackupPage.svelte';
 
   const MANAGER_TABS: Array<{ id: ManagerSubTab; label: string; icon: string }> = [
-    { id: 'overview', label: 'تراز مالی و ضریب', icon: '⌑' },
-    { id: 'employees', label: 'کارکنان و حقوق', icon: '♟' },
+    { id: 'overview', label: 'درآمد، تراز مالی و حقوق', icon: '⌑' },
+    { id: 'employees', label: 'کارکنان', icon: '♟' },
     { id: 'suppliers', label: 'تأمین‌کنندگان', icon: '◈' },
     { id: 'inventory', label: 'انبار و موجودی', icon: '◫' },
     { id: 'reports', label: 'گزارش‌های خرید', icon: '↗' },
     { id: 'backup', label: 'پشتیبان‌گیری', icon: '⇧' }
   ];
 
-  const COEFF_PRESETS = [0.5, 0.6, 0.7, 0.8, 1.0];
+  const SALARY_COEFF_PRESETS = [0.5, 0.6, 0.7, 0.8, 1.0];
 
   // Setup & Login form state
   let usernameInput = 'manager';
@@ -80,8 +79,8 @@
   let newPassInput = '';
   let changePassError = '';
 
-  // Editable Coefficient (0.7 or any custom number)
-  let coefficientInput = '0.7';
+  // Editable Salary Coefficient (Default 0.7, changeable to any number)
+  let salaryCoeffInput = '0.7';
   let coeffError = '';
 
   // Date filters for Manager Financial Analytics
@@ -100,57 +99,53 @@
 
   const sevenDaysAgoISO = getDaysAgoISO(6);
 
-  $: activeCoefficient = $appSettings.globalRevenueCoefficient ?? 0.7;
+  $: salaryCoefficient = $appSettings.globalRevenueCoefficient ?? 0.7;
 
   onMount(async () => {
     await managerAuthService.checkInitialized();
     if ($activeManagerUsername) {
       usernameInput = $activeManagerUsername;
     }
-    coefficientInput = String($appSettings.globalRevenueCoefficient ?? 0.7);
+    salaryCoeffInput = String($appSettings.globalRevenueCoefficient ?? 0.7);
   });
 
+  // 100% Real Income KPIs (Today, 7-Day, Current Jalali Month)
   $: todayRecords = filterRevenueRecords($revenues, todayISO, todayISO, onlyReal);
-  $: todayActualRevenue = calculateRevenueTotal(todayRecords);
-  $: todayAdjustedRevenue = calculateAdjustedRevenueTotal(todayRecords, activeCoefficient);
+  $: todayRealRevenue = calculateRevenueTotal(todayRecords);
 
   $: weekRecords = filterRevenueRecords($revenues, sevenDaysAgoISO, todayISO, onlyReal);
-  $: weekActualRevenue = calculateRevenueTotal(weekRecords);
-  $: weekAdjustedRevenue = calculateAdjustedRevenueTotal(weekRecords, activeCoefficient);
+  $: weekRealRevenue = calculateRevenueTotal(weekRecords);
 
   $: monthRecords = $revenues.filter(
     (r) =>
       (!onlyReal || !r.isDemo) &&
       getJalaliYearMonthKey(r.date) === currentJalaliMonthKey
   );
-  $: monthActualRevenue = calculateRevenueTotal(monthRecords);
-  $: monthAdjustedRevenue = calculateAdjustedRevenueTotal(monthRecords, activeCoefficient);
+  $: monthRealRevenue = calculateRevenueTotal(monthRecords);
 
   $: financialOverview = calculateFinancialOverview({
     revenues: $revenues,
     purchases: $purchases,
     expenses: $expenses,
-    coefficient: activeCoefficient,
+    coefficient: salaryCoefficient,
     dateFrom,
     dateTo,
     onlyReal
   });
 
-  // Column Chart 1: Financial Overview Columns
+  // Calculated Salary Pool based on the editable 0.7 (or custom) salary coefficient
+  $: calculatedSalaryPool = Math.round(
+    financialOverview.totalRevenue * salaryCoefficient
+  );
+
+  // Column Chart 1: Real Financial Overview Columns
   $: financialBalanceColumns = [
     {
-      id: 'fin_actual_rev',
+      id: 'fin_real_rev',
       label: 'درآمد واقعی',
-      subLabel: '۱۰۰٪ فروش',
+      subLabel: 'کل فروش',
       value: financialOverview.totalRevenue,
       tone: 'primary'
-    },
-    {
-      id: 'fin_adj_rev',
-      label: `با ضریب ${formatNumber(activeCoefficient)}`,
-      subLabel: 'درآمد/سهم',
-      value: financialOverview.totalAdjustedRevenue,
-      tone: 'gold'
     },
     {
       id: 'fin_purchases',
@@ -175,9 +170,17 @@
     }
   ] as ColumnChartItem[];
 
-  // Column Chart 2: Dual-Series Daily Revenue (Actual vs. Adjusted)
-  $: dailyDualColumnItems = filterRevenueRecords($revenues, dateFrom, dateTo, onlyReal)
-    .slice(0, 10)
+  // Filtered daily revenue list for Manager inspection
+  $: filteredDailyRevenues = filterRevenueRecords(
+    $revenues,
+    dateFrom,
+    dateTo,
+    onlyReal
+  );
+
+  // Column Chart 2: 100% Real Daily Revenue Column Chart (No 0.7 scaling on chart)
+  $: realDailyRevenueColumns = filteredDailyRevenues
+    .slice(0, 12)
     .reverse()
     .map(
       (r): ColumnChartItem => ({
@@ -185,23 +188,18 @@
         label: getPersianWeekdayName(r.date),
         subLabel: toJalaliNumeric(r.date).slice(5),
         value: getEffectiveDayRevenue(r),
-        secondaryValue: getAdjustedDayRevenue(r, activeCoefficient)
+        tone: 'primary'
       })
     );
 
-  // Column Chart 3: Dual-Series Monthly Revenue (Actual vs. Adjusted)
-  $: monthlyDualColumnItems = (() => {
-    const map = new Map<
-      string,
-      { ym: string; actualTotal: number; adjustedTotal: number; days: number }
-    >();
-    const list = filterRevenueRecords($revenues, dateFrom, dateTo, onlyReal);
-    for (const r of list) {
+  // Column Chart 3: 100% Real Monthly Revenue Column Chart (No 0.7 scaling on chart)
+  $: realMonthlyRevenueColumns = (() => {
+    const map = new Map<string, { ym: string; total: number; days: number }>();
+    for (const r of filteredDailyRevenues) {
       const ym = getJalaliYearMonthKey(r.date);
       if (!ym) continue;
-      const prev = map.get(ym) || { ym, actualTotal: 0, adjustedTotal: 0, days: 0 };
-      prev.actualTotal += getEffectiveDayRevenue(r);
-      prev.adjustedTotal += getAdjustedDayRevenue(r, activeCoefficient);
+      const prev = map.get(ym) || { ym, total: 0, days: 0 };
+      prev.total += getEffectiveDayRevenue(r);
       prev.days += 1;
       map.set(ym, prev);
     }
@@ -212,13 +210,13 @@
           id: m.ym,
           label: formatJalaliYearMonthLabel(m.ym),
           subLabel: `${m.days} روز`,
-          value: m.actualTotal,
-          secondaryValue: m.adjustedTotal
+          value: m.total,
+          tone: 'gold'
         })
       );
   })();
 
-  // Employee Purchase, Timesheet & Salary/Share Coefficient Table
+  // Employee Purchase, Timesheet & Salary Coefficient Calculations
   $: employeePurchaseComparisons = compareEmployeePurchaseTotals(
     $purchases.filter((p) => !onlyReal || !p.isDemo),
     $employees,
@@ -226,37 +224,54 @@
     dateTo
   );
 
-  $: employeeWorkAndCoeffTable = $employees.map((emp) => {
-    const empShifts = $timesheets.filter(
-      (t) =>
-        t.employeeId === emp.id &&
-        (!onlyReal || !t.isDemo) &&
-        (!dateFrom || t.date >= dateFrom) &&
-        (!dateTo || t.date <= dateTo)
-    );
-    const tsSummary = calculateEmployeeTimesheetSummary(empShifts, emp);
-    const purchSummary = employeePurchaseComparisons.find(
-      (c) => c.employeeId === emp.id
-    );
-    const weightedUnits = Number(
-      (tsSummary.totalWorkingHoursDecimal * emp.performanceCoefficient).toFixed(2)
-    );
-    const salaryCoeffUnits = Number(
-      (weightedUnits * activeCoefficient).toFixed(2)
+  $: employeeSalaryRows = (() => {
+    const rawRows = $employees.map((emp) => {
+      const empShifts = $timesheets.filter(
+        (t) =>
+          t.employeeId === emp.id &&
+          (!onlyReal || !t.isDemo) &&
+          (!dateFrom || t.date >= dateFrom) &&
+          (!dateTo || t.date <= dateTo)
+      );
+      const tsSummary = calculateEmployeeTimesheetSummary(empShifts, emp);
+      const purchSummary = employeePurchaseComparisons.find(
+        (c) => c.employeeId === emp.id
+      );
+      const salaryAdjustedHours = Number(
+        (
+          tsSummary.totalWorkingHoursDecimal *
+          emp.performanceCoefficient *
+          salaryCoefficient
+        ).toFixed(2)
+      );
+
+      return {
+        employee: emp,
+        purchasesCount: purchSummary?.count || 0,
+        purchasesAmount: purchSummary?.totalAmount || 0,
+        workingDays: tsSummary.workingDaysCount,
+        workingMinutes: tsSummary.totalWorkingMinutes,
+        workingHoursDecimal: tsSummary.totalWorkingHoursDecimal,
+        overtimeMinutes: tsSummary.totalOvertimeMinutes,
+        salaryAdjustedHours
+      };
+    });
+
+    const totalWeightedHours = rawRows.reduce(
+      (s, r) => s + r.salaryAdjustedHours,
+      0
     );
 
-    return {
-      employee: emp,
-      purchasesCount: purchSummary?.count || 0,
-      purchasesAmount: purchSummary?.totalAmount || 0,
-      workingDays: tsSummary.workingDaysCount,
-      workingMinutes: tsSummary.totalWorkingMinutes,
-      workingHoursDecimal: tsSummary.totalWorkingHoursDecimal,
-      overtimeMinutes: tsSummary.totalOvertimeMinutes,
-      weightedUnits,
-      salaryCoeffUnits
-    };
-  });
+    return rawRows.map((row) => ({
+      ...row,
+      estimatedSalaryShare:
+        totalWeightedHours > 0
+          ? Math.round(
+              (row.salaryAdjustedHours / totalWeightedHours) * calculatedSalaryPool
+            )
+          : 0
+    }));
+  })();
 
   $: employeeSpendColumns = employeePurchaseComparisons
     .filter((c) => c.totalAmount > 0)
@@ -270,7 +285,7 @@
       })
     );
 
-  async function applyCoefficientValue(val: number) {
+  async function applySalaryCoefficient(val: number) {
     coeffError = '';
     if (isNaN(val) || val <= 0 || val > 100) {
       coeffError = 'لطفاً عددی بزرگ‌تر از صفر وارد کنید.';
@@ -278,18 +293,27 @@
     }
     try {
       const saved = await updateGlobalRevenueCoefficient(val);
-      coefficientInput = String(saved.globalRevenueCoefficient);
+      salaryCoeffInput = String(saved.globalRevenueCoefficient);
       showToast(
-        `ضریب به ${formatNumber(saved.globalRevenueCoefficient)} تغییر یافت و در کل برنامه اعمال شد.`
+        `ضریب محاسبه حقوق به ${formatNumber(saved.globalRevenueCoefficient)} تغییر یافت.`
       );
     } catch (err) {
-      coeffError = err instanceof Error ? err.message : 'خطا در ذخیره ضریب.';
+      coeffError = err instanceof Error ? err.message : 'خطا در ذخیره ضریب حقوق.';
     }
   }
 
-  async function handleSaveGlobalCoefficient() {
-    const parsed = parseNumericInput(coefficientInput);
-    await applyCoefficientValue(parsed);
+  async function handleSaveSalaryCoefficient() {
+    const parsed = parseNumericInput(salaryCoeffInput);
+    await applySalaryCoefficient(parsed);
+  }
+
+  async function handleDeleteRevenueRecord(id: string, date: string) {
+    const confirmed = window.confirm(
+      `آیا از حذف درآمد ثبت‌شده برای تاریخ ${toJalaliDate(date)} مطمئن هستید؟`
+    );
+    if (!confirmed) return;
+    await deleteRevenueDayRecord(id);
+    showToast('رکورد درآمد حذف شد.');
   }
 
   async function handleInitialSetup() {
@@ -308,7 +332,7 @@
     }
     passwordInput = '';
     confirmPasswordInput = '';
-    coefficientInput = String($appSettings.globalRevenueCoefficient ?? 0.7);
+    salaryCoeffInput = String($appSettings.globalRevenueCoefficient ?? 0.7);
     showToast('حساب مدیر ایجاد شد و پنل مدیریت باز گردید.');
   }
 
@@ -320,7 +344,7 @@
       return;
     }
     passwordInput = '';
-    coefficientInput = String($appSettings.globalRevenueCoefficient ?? 0.7);
+    salaryCoeffInput = String($appSettings.globalRevenueCoefficient ?? 0.7);
     showToast('ورود به پنل مدیریت انجام شد.');
   }
 
@@ -353,7 +377,7 @@
       <div class="lock-mark">⌑</div>
       <h1 id="managerTitle" style="font-size: 19px; margin: 0;">راه‌اندازی رمز پنل مدیریت</h1>
       <p>
-        بخش‌های مدیریتی (تنظیم ضریب ۰.۷، کارکنان، انبار، تأمین‌کنندگان، گزارش‌ها و پشتیبان‌گیری) فقط با نام کاربری و رمز عبور شما قابل مشاهده هستند.
+        مشاهده درآمدهای واقعی، نمودارهای فروش، تنظیم ضریب ۰.۷ حقوق، کارکنان، انبار، تأمین‌کنندگان، گزارش‌ها و پشتیبان‌گیری فقط با رمز مدیر امکان‌پذیر است.
       </p>
 
       <form on:submit|preventDefault={handleInitialSetup} novalidate>
@@ -407,7 +431,7 @@
       <div class="lock-mark">⌑</div>
       <h1 id="managerTitle" style="font-size: 19px; margin: 0;">ورود به پنل مدیریت</h1>
       <p>
-        برای دسترسی به تنظیم ضریب درآمد و حقوق، کارکنان، انبار، تأمین‌کنندگان، گزارش‌ها و پشتیبان‌گیری وارد شوید.
+        برای مشاهده نمودارهای درآمد واقعی، تنظیم ضریب حقوق، مدیریت کارکنان، انبار، تأمین‌کنندگان و پشتیبان‌گیری وارد شوید.
       </p>
 
       <form id="loginForm" on:submit|preventDefault={handleLogin} novalidate>
@@ -444,7 +468,7 @@
       </form>
     </div>
   {:else}
-    <!-- Unlocked Manager Header & Mobile-First Segmented Navigation -->
+    <!-- Unlocked Manager Top Bar -->
     <div class="manager-top-bar panel">
       <div class="manager-top-info">
         <span class="badge-real">مدیر: {$activeManagerUsername}</span>
@@ -497,7 +521,7 @@
       </div>
     {/if}
 
-    <!-- Segmented Sub-Navigation for All Manager-Protected Sections -->
+    <!-- Segmented Sub-Navigation for All Manager-Protected Modules -->
     <nav class="manager-subnav" aria-label="بخش‌های پنل مدیریت">
       {#each MANAGER_TABS as tab (tab.id)}
         <button
@@ -513,67 +537,8 @@
     </nav>
 
     {#if $activeManagerTab === 'overview'}
-      <!-- Editable 0.7 Salary / Revenue Coefficient Card -->
-      <section class="panel card-pad coeff-editor-card" style="margin-bottom: 16px;">
-        <div class="two-col-grid" style="align-items: center;">
-          <div>
-            <span class="eyebrow">تنظیم ضریب محاسبه درآمد و حقوق (پیش‌فرض ۰.۷)</span>
-            <h2 style="font-size: 17px; margin: 0 0 5px;">
-              ضریب فعلی: <strong style="color: var(--green); font-size: 20px;">{formatNumber(activeCoefficient)}</strong>
-            </h2>
-            <p style="margin: 0; font-size: 11px; color: var(--muted); line-height: 1.7;">
-              می‌توانید عدد <strong>۰.۷</strong> را به هر عدد دلخواه (مثلاً ۰.۵، ۰.۶۵، ۰.۸، ۱.۲ و غیره) تغییر دهید. نمودار عمومی «درآمد» و محاسبه سهم/حقوق کارکنان بلافاصله با این عدد جدید محاسبه می‌شوند.
-            </p>
-          </div>
-
-          <div>
-            <form
-              on:submit|preventDefault={handleSaveGlobalCoefficient}
-              class="coeff-form-row"
-              novalidate
-            >
-              <input
-                id="globalRevCoeff"
-                inputmode="decimal"
-                dir="ltr"
-                bind:value={coefficientInput}
-                placeholder="0.7"
-                class="coeff-input"
-                aria-label="ضریب درآمد و حقوق"
-              />
-              <button type="submit" class="primary-btn" style="width: auto; min-height: 44px; gap: 10px;">
-                <span>اعمال ضریب جدید</span>
-                <span>✓</span>
-              </button>
-            </form>
-
-            <div class="coeff-presets">
-              <span>انتخاب سریع:</span>
-              {#each COEFF_PRESETS as preset}
-                <button
-                  type="button"
-                  class="preset-chip"
-                  class:active={activeCoefficient === preset}
-                  on:click={() => {
-                    coefficientInput = String(preset);
-                    applyCoefficientValue(preset);
-                  }}
-                >
-                  {formatNumber(preset)}
-                </button>
-              {/each}
-            </div>
-          </div>
-        </div>
-
-        {#if coeffError}
-          <div class="form-error" role="alert" style="margin-top: 10px; margin-bottom: 0;">
-            {coeffError}
-          </div>
-        {/if}
-
-        <div class="stat-divider" style="margin: 14px 0;"></div>
-
+      <!-- Date Filter Bar -->
+      <section class="panel card-pad" style="margin-bottom: 16px;">
         <div class="filters">
           <div class="date-filter">
             <span>از تاریخ (شمسی)</span>
@@ -625,39 +590,33 @@
         </div>
       </section>
 
-      <!-- KPI Cards: Actual vs. Adjusted Revenue -->
+      <!-- 100% Real Income KPI Cards -->
       <div class="kpi-grid">
         <section class="panel kpi-card">
           <div class="card-topline">
             <span class="mini-icon">₿</span>
-            <span>درآمد امروز</span>
+            <span>درآمد واقعی امروز</span>
           </div>
-          <div class="kpi-value">{formatMoney(todayActualRevenue)} <small>واقعی</small></div>
-          <div class="kpi-sub">
-            با ضریب {formatNumber(activeCoefficient)}: <strong>{formatMoney(todayAdjustedRevenue)} تومان</strong>
-          </div>
+          <div class="kpi-value">{formatMoney(todayRealRevenue)} <small>تومان</small></div>
+          <div class="kpi-sub">{toJalaliDate(todayISO)}</div>
         </section>
 
         <section class="panel kpi-card">
           <div class="card-topline">
             <span class="mini-icon">↗</span>
-            <span>درآمد ۷ روز اخیر</span>
+            <span>درآمد واقعی ۷ روز اخیر</span>
           </div>
-          <div class="kpi-value">{formatMoney(weekActualRevenue)} <small>واقعی</small></div>
-          <div class="kpi-sub">
-            با ضریب {formatNumber(activeCoefficient)}: <strong>{formatMoney(weekAdjustedRevenue)} تومان</strong>
-          </div>
+          <div class="kpi-value">{formatMoney(weekRealRevenue)} <small>تومان</small></div>
+          <div class="kpi-sub">هفته جاری</div>
         </section>
 
         <section class="panel kpi-card">
           <div class="card-topline">
             <span class="mini-icon">▦</span>
-            <span>درآمد ماه جاری</span>
+            <span>درآمد واقعی ماه جاری</span>
           </div>
-          <div class="kpi-value">{formatMoney(monthActualRevenue)} <small>واقعی</small></div>
-          <div class="kpi-sub">
-            با ضریب {formatNumber(activeCoefficient)}: <strong>{formatMoney(monthAdjustedRevenue)} تومان</strong>
-          </div>
+          <div class="kpi-value">{formatMoney(monthRealRevenue)} <small>تومان</small></div>
+          <div class="kpi-sub">{formatJalaliYearMonthLabel(currentJalaliMonthKey)}</div>
         </section>
 
         <section class="panel kpi-card" style="border-color: #bfd2c5; background: #f8fbf8;">
@@ -677,61 +636,165 @@
         </section>
       </div>
 
-      <!-- Vertical Column Chart: Financial Balance Comparison -->
-      <section class="panel card-pad" style="margin-bottom: 16px;">
-        <div class="section-heading">
-          <div>
-            <h2>نمودار ستونی تراز مالی و مانده عملیاتی تخمینی</h2>
-            <p>مقایسه ستونی درآمد واقعی، درآمد با ضریب {formatNumber(activeCoefficient)}، خریدها، هزینه‌ها و مانده عملیاتی</p>
-          </div>
-        </div>
-        <ColumnChart items={financialBalanceColumns} height={195} />
-      </section>
-
-      <!-- Dual-Series Vertical Column Charts: Daily & Monthly Revenue -->
+      <!-- 100% Real Daily & Monthly Revenue Column Charts -->
       <div class="two-col-grid" style="margin-bottom: 16px;">
         <section class="panel card-pad">
           <div class="section-heading">
             <div>
-              <h2>نمودار ستونی دوگانه درآمد روزانه</h2>
-              <p>مقایسه ستون درآمد واقعی و ستون تعدیل‌شده با ضریب {formatNumber(activeCoefficient)}</p>
+              <h2>نمودار ستونی درآمد واقعی روزانه</h2>
+              <p>مبالغ واقعی فروش روزانه به تاریخ شمسی (بدون اعمال ضریب)</p>
             </div>
           </div>
 
-          {#if dailyDualColumnItems.length > 0}
-            <ColumnChart
-              items={dailyDualColumnItems}
-              height={200}
-              showSecondary={true}
-              primaryLegend="درآمد واقعی"
-              secondaryLegend="با ضریب {formatNumber(activeCoefficient)}"
-            />
+          {#if realDailyRevenueColumns.length > 0}
+            <ColumnChart items={realDailyRevenueColumns} height={200} />
           {:else}
-            <EmptyState title="درآمدی ثبت نشده است" message="از تب درآمد فروش روزانه را ثبت کنید." />
+            <EmptyState title="درآمدی ثبت نشده است" message="از تب درآمد، فروش روزانه را ثبت کنید." />
           {/if}
         </section>
 
         <section class="panel card-pad">
           <div class="section-heading">
             <div>
-              <h2>نمودار ستونی دوگانه درآمد ماهانه</h2>
-              <p>مقایسه ماهانه درآمد واقعی و تعدیل‌شده (شمسی)</p>
+              <h2>نمودار ستونی درآمد واقعی ماهانه</h2>
+              <p>مجموع درآمد واقعی به تفکیک ماه‌های شمسی</p>
             </div>
           </div>
 
-          {#if monthlyDualColumnItems.length > 0}
-            <ColumnChart
-              items={monthlyDualColumnItems}
-              height={200}
-              showSecondary={true}
-              primaryLegend="درآمد واقعی ماه"
-              secondaryLegend="با ضریب {formatNumber(activeCoefficient)}"
-            />
+          {#if realMonthlyRevenueColumns.length > 0}
+            <ColumnChart items={realMonthlyRevenueColumns} height={200} />
           {:else}
             <EmptyState title="داده ماهانه‌ای وجود ندارد" message="پس از ثبت درآمد، نمودار ماهانه تکمیل می‌شود." />
           {/if}
         </section>
       </div>
+
+      <!-- Financial Balance Column Chart -->
+      <section class="panel card-pad" style="margin-bottom: 16px;">
+        <div class="section-heading">
+          <div>
+            <h2>نمودار ستونی تراز مالی (درآمد واقعی در برابر خریدها و هزینه‌ها)</h2>
+            <p>مقایسه کل درآمد واقعی، کل خریدهای مواد اولیه، هزینه‌های جاری و مانده عملیاتی تخمینی</p>
+          </div>
+        </div>
+        <ColumnChart items={financialBalanceColumns} height={190} />
+      </section>
+
+      <!-- Editable 0.7 Salary Coefficient & Employee Salary Table -->
+      <section class="panel card-pad coeff-editor-card" style="margin-bottom: 16px;">
+        <div class="two-col-grid" style="align-items: center; margin-bottom: 14px;">
+          <div>
+            <span class="eyebrow">تنظیم ضریب محاسبه حقوق کارکنان (پیش‌فرض ۰.۷)</span>
+            <h2 style="font-size: 17px; margin: 0 0 5px;">
+              ضریب فعلی حقوق: <strong style="color: var(--green); font-size: 20px;">{formatNumber(salaryCoefficient)}</strong>
+            </h2>
+            <p style="margin: 0; font-size: 11px; color: var(--muted); line-height: 1.7;">
+              این ضریب مخصوص فرمول حقوق و سهم کارکنان است و می‌توانید آن را از <strong>۰.۷</strong> به هر عدد دلخواه تغییر دهید.
+            </p>
+          </div>
+
+          <div>
+            <form
+              on:submit|preventDefault={handleSaveSalaryCoefficient}
+              class="coeff-form-row"
+              novalidate
+            >
+              <input
+                id="globalRevCoeff"
+                inputmode="decimal"
+                dir="ltr"
+                bind:value={salaryCoeffInput}
+                placeholder="0.7"
+                class="coeff-input"
+                aria-label="ضریب محاسبه حقوق"
+              />
+              <button type="submit" class="primary-btn" style="width: auto; min-height: 44px; gap: 10px;">
+                <span>اعمال ضریب حقوق</span>
+                <span>✓</span>
+              </button>
+            </form>
+
+            <div class="coeff-presets">
+              <span>انتخاب سریع:</span>
+              {#each SALARY_COEFF_PRESETS as preset}
+                <button
+                  type="button"
+                  class="preset-chip"
+                  class:active={salaryCoefficient === preset}
+                  on:click={() => {
+                    salaryCoeffInput = String(preset);
+                    applySalaryCoefficient(preset);
+                  }}
+                >
+                  {formatNumber(preset)}
+                </button>
+              {/each}
+            </div>
+          </div>
+        </div>
+
+        {#if coeffError}
+          <div class="form-error" role="alert" style="margin-top: 8px; margin-bottom: 10px;">
+            {coeffError}
+          </div>
+        {/if}
+
+        <div class="stat-divider" style="margin: 14px 0;"></div>
+
+        <div class="section-heading">
+          <div>
+            <h2>جدول عملکرد، ساعت کار و محاسبه ضریب حقوق کارکنان (ضریب: {formatNumber(salaryCoefficient)})</h2>
+            <p>محاسبه ساعت کار وزنی و سهم حقوق هر کارمند بر اساس ضریب {formatNumber(salaryCoefficient)}</p>
+          </div>
+          <button
+            type="button"
+            class="secondary-btn"
+            on:click={() => activeManagerTab.set('employees')}
+          >
+            مدیریت کارکنان ←
+          </button>
+        </div>
+
+        {#if employeeSalaryRows.length > 0}
+          <div class="table-scroll">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>نام کارمند</th>
+                  <th>سمت</th>
+                  <th>تعداد خرید</th>
+                  <th>مجموع خرید (تومان)</th>
+                  <th>ساعت کار</th>
+                  <th>ضریب فردی</th>
+                  <th>شاخص حقوق (با ضریب {formatNumber(salaryCoefficient)})</th>
+                  <th>سهم تخمینی از ضریب (تومان)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each employeeSalaryRows as row (row.employee.id)}
+                  <tr>
+                    <td>
+                      <strong>{row.employee.name}</strong>
+                      {#if !row.employee.isActive}
+                        <span class="badge-low">غیرفعال</span>
+                      {/if}
+                    </td>
+                    <td>{row.employee.role}</td>
+                    <td>{formatNumber(row.purchasesCount)}</td>
+                    <td>{formatMoney(row.purchasesAmount)}</td>
+                    <td>{formatMinutesToPersianHours(row.workingMinutes)}</td>
+                    <td>{formatNumber(row.employee.performanceCoefficient)}</td>
+                    <td><strong>{formatNumber(row.salaryAdjustedHours)} واحد</strong></td>
+                    <td><strong>{formatMoney(row.estimatedSalaryShare)}</strong></td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {:else}
+          <EmptyState title="کارمندی ثبت نشده است" message="از تب کارکنان پرسنل را اضافه کنید." />
+        {/if}
+      </section>
 
       {#if employeeSpendColumns.length > 0}
         <section class="panel card-pad" style="margin-bottom: 16px;">
@@ -745,59 +808,68 @@
         </section>
       {/if}
 
-      <!-- Employee Performance & Salary Coefficient Table -->
+      <!-- Full Recorded Revenue History List (Visible Only to Manager) -->
       <section class="panel card-pad">
         <div class="section-heading">
           <div>
-            <h2>جدول عملکرد، ساعت کار و ضریب حقوق کارکنان (ضریب فعال: {formatNumber(activeCoefficient)})</h2>
-            <p>بررسی یکپارچه خریدها، ساعات کاری و شاخص ضریب حقوق و عملکرد هر کارمند</p>
+            <h2>فهرست درآمدهای واقعی ثبت‌شده ({formatNumber(filteredDailyRevenues.length)} روز)</h2>
+            <p>این فهرست فقط در پنل مدیریت قابل مشاهده است</p>
           </div>
-          <button
-            type="button"
-            class="secondary-btn"
-            on:click={() => activeManagerTab.set('employees')}
-          >
-            مدیریت کامل کارکنان ←
-          </button>
         </div>
 
-        {#if employeeWorkAndCoeffTable.length > 0}
-          <div class="table-scroll">
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th>نام کارمند</th>
-                  <th>سمت</th>
-                  <th>تعداد خرید</th>
-                  <th>مجموع خرید (تومان)</th>
-                  <th>مجموع ساعت کار</th>
-                  <th>ضریب فردی</th>
-                  <th>شاخص با ضریب {formatNumber(activeCoefficient)}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each employeeWorkAndCoeffTable as row (row.employee.id)}
-                  <tr>
-                    <td>
-                      <strong>{row.employee.name}</strong>
-                      {#if !row.employee.isActive}
-                        <span class="badge-low">غیرفعال</span>
-                      {/if}
-                    </td>
-                    <td>{row.employee.role}</td>
-                    <td>{formatNumber(row.purchasesCount)}</td>
-                    <td><strong>{formatMoney(row.purchasesAmount)}</strong></td>
-                    <td>{formatMinutesToPersianHours(row.workingMinutes)}</td>
-                    <td>{formatNumber(row.employee.performanceCoefficient)}</td>
-                    <td><strong>{formatNumber(row.salaryCoeffUnits)} واحد</strong></td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          </div>
-        {:else}
-          <EmptyState title="کارمندی ثبت نشده است" message="از تب کارکنان در بالای همین پنل، پرسنل را اضافه کنید." />
-        {/if}
+        <div class="purchase-list">
+          {#if filteredDailyRevenues.length > 0}
+            {#each filteredDailyRevenues as rev (rev.id)}
+              {@const dayTotal = getEffectiveDayRevenue(rev)}
+              <article class="purchase-item" style="flex-wrap: wrap;">
+                <div class="product-avatar">₿</div>
+                <div class="purchase-main">
+                  <div class="purchase-name">
+                    <span>
+                      {getPersianWeekdayName(rev.date)} {toJalaliDate(rev.date)} ({toJalaliNumeric(rev.date)})
+                    </span>
+                    <span class="badge-employee">
+                      {rev.mode === 'daily_total'
+                        ? 'ثبت کلی'
+                        : `ریز فروش (${formatNumber(rev.entries.length)} ردیف)`}
+                    </span>
+                    {#if rev.isDemo}
+                      <span class="badge-demo">نمونه آزمایشی</span>
+                    {:else}
+                      <span class="badge-real">ثبت واقعی</span>
+                    {/if}
+                  </div>
+                  <div class="purchase-meta">
+                    {#if rev.cardAmount}
+                      <span>کارت‌خوان: {formatMoney(rev.cardAmount)}</span>
+                    {/if}
+                    {#if rev.onlineAmount}
+                      <span>آنلاین: {formatMoney(rev.onlineAmount)}</span>
+                    {/if}
+                    {#if rev.cashAmount}
+                      <span>نقدی: {formatMoney(rev.cashAmount)}</span>
+                    {/if}
+                    {#if rev.notes}
+                      <span>({rev.notes})</span>
+                    {/if}
+                  </div>
+                </div>
+                <div class="purchase-side" style="display: flex; align-items: center; gap: 8px;">
+                  <div class="purchase-amount">{formatMoney(dayTotal)} تومان</div>
+                  <button
+                    type="button"
+                    class="quiet-btn"
+                    on:click={() => handleDeleteRevenueRecord(rev.id, rev.date)}
+                  >
+                    حذف
+                  </button>
+                </div>
+              </article>
+            {/each}
+          {:else}
+            <EmptyState title="درآمدی در این بازه ثبت نشده است" message="رکوردهای ثبت‌شده از تب درآمد در این فهرست نمایش داده می‌شوند." />
+          {/if}
+        </div>
       </section>
     {:else if $activeManagerTab === 'employees'}
       <EmployeesPage />
