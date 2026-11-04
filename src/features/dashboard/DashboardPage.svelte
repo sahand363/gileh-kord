@@ -2,9 +2,9 @@
   import {
     todayPurchasesStats,
     dashboardSummary,
-    recentPurchases
+    recentPurchases,
+    publicRevenueStore
   } from '../../stores/purchaseStore';
-  import { isManagerUnlocked } from '../../services/ManagerAuthService';
   import { navigateTo, NAV_SECTIONS } from '../../stores/navigationStore';
   import {
     formatMoney,
@@ -19,15 +19,21 @@
 
   const todayISO = getTodayISODate();
   const todayJalali = `${getPersianWeekdayName(todayISO)} ${toJalaliDate(todayISO)} (${toJalaliNumeric(todayISO)})`;
+
+  $: publicDailySeries = $publicRevenueStore.dailySeries.slice(0, 7);
+  $: maxPublicDailyRev =
+    publicDailySeries.length > 0
+      ? Math.max(1, ...publicDailySeries.map((d) => d.amount))
+      : 1;
 </script>
 
 <section class="page active" aria-labelledby="dashboardTitle">
   <div class="page-heading">
     <div>
       <p class="eyebrow">نمای کلی عملیات روزانه رستوران</p>
-      <h1 id="dashboardTitle">پیشخوان عملیاتی گیله‌کُرد</h1>
+      <h1 id="dashboardTitle">پیشخوان گیله‌کُرد</h1>
       <p class="subheading">
-        خلاصه وضعیت خریدهای روزانه، پرسنل فعال و هشدارهای موجودی انبار (اطلاعات حساس مالی و درآمد در «پنل مدیریت» محافظت می‌شود).
+        خلاصه وضعیت خریدهای روزانه، درآمد، پرسنل فعال و هشدارهای موجودی انبار.
       </p>
     </div>
     <div class="heading-date">
@@ -48,11 +54,11 @@
 
     <section class="panel kpi-card">
       <div class="card-topline">
-        <span class="mini-icon">▤</span>
-        <span>کل فاکتورهای خرید</span>
+        <span class="mini-icon">₿</span>
+        <span>درآمد امروز</span>
       </div>
-      <div class="kpi-value">{formatNumber($dashboardSummary.totalPurchasesCount)} <small>فاکتور</small></div>
-      <div class="kpi-sub">در کل دوره ({formatNumber($dashboardSummary.productsCount)} قلم کالا)</div>
+      <div class="kpi-value">{formatMoney($publicRevenueStore.todayAmount)} <small>تومان</small></div>
+      <div class="kpi-sub">درآمد کل دوره: {formatMoney($publicRevenueStore.totalAmount)} تومان</div>
     </section>
 
     <section class="panel kpi-card">
@@ -70,24 +76,55 @@
 
     <section class="panel kpi-card">
       <div class="card-topline">
-        <span class="mini-icon">⌑</span>
-        <span>پنل مدیریت مالی</span>
+        <span class="mini-icon">◫</span>
+        <span>هشدار کسری انبار</span>
       </div>
-      <div class="kpi-value" style="font-size: 16px;">
-        {$isManagerUnlocked ? 'باز (دسترسی فعال)' : 'محافظت‌شده با رمز'}
+      <div class="kpi-value">
+        {formatNumber($dashboardSummary.lowStockItems.length)} <small>قلم کالا</small>
       </div>
-      <div class="kpi-sub">
-        <button
-          type="button"
-          class="text-btn"
-          style="padding: 0; font-size: 10px;"
-          on:click={() => navigateTo('manager')}
-        >
-          مشاهده تراز مالی و درآمد ←
-        </button>
-      </div>
+      <div class="kpi-sub">نیازمند تأمین و سفارش مجدد</div>
     </section>
   </div>
+
+  <!-- Public Revenue Chart: Labeled simply "درآمد" and showing ONLY calculated values -->
+  <section class="panel card-pad" style="margin-bottom: 18px;">
+    <div class="section-heading">
+      <div>
+        <h2>درآمد</h2>
+        <p>روند درآمد روزانه به تاریخ شمسی</p>
+      </div>
+      <button type="button" class="text-btn" on:click={() => navigateTo('revenue')}>
+        بخش درآمد <span>←</span>
+      </button>
+    </div>
+
+    {#if publicDailySeries.length > 0}
+      {#each publicDailySeries as item (item.id)}
+        <div class="bar-row">
+          <div class="bar-labels">
+            <strong>
+              {getPersianWeekdayName(item.date)} {toJalaliDate(item.date)} ({toJalaliNumeric(item.date)})
+            </strong>
+            <span>{formatMoney(item.amount)} تومان</span>
+          </div>
+          <div class="bar-track">
+            <div
+              class="bar-fill"
+              style="width: {Math.max(
+                6,
+                Math.round((item.amount / maxPublicDailyRev) * 100)
+              )}%;"
+            ></div>
+          </div>
+        </div>
+      {/each}
+    {:else}
+      <EmptyState
+        title="درآمدی ثبت نشده است"
+        message="پس از ثبت فروش روزانه، نمودار درآمد در این قسمت نمایش داده می‌شود."
+      />
+    {/if}
+  </section>
 
   <div class="two-col-grid">
     <section class="panel card-pad">
