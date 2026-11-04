@@ -55,7 +55,7 @@ export interface Employee {
   notes?: string;
   isActive: boolean;
   performanceCoefficient: number; // Default 1.0, prepared for future profit-sharing
-  expectedSchedule?: WeeklyExpectedSchedule; // Optional per-weekday expected hours
+  expectedSchedule?: WeeklyExpectedSchedule;
   isDemo?: boolean;
   createdAt: string;
   updatedAt: string;
@@ -70,15 +70,15 @@ export interface Purchase {
   totalAmount: number;
   currency: 'IRT';
   purchaseDate: string; // YYYY-MM-DD
-  employeeId?: string; // Permanent employee ID reference
-  employeeNameSnapshot?: string; // Historical fallback name if needed
+  employeeId?: string;
+  employeeNameSnapshot?: string;
   supplierId?: string;
   supplierName?: string;
   invoiceNumber?: string;
   notes?: string;
   isDemo?: boolean;
-  createdAt: string; // ISO 8601
-  updatedAt: string; // ISO 8601
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface Product {
@@ -162,20 +162,16 @@ export interface RevenueItemEntry {
   createdAt: string;
 }
 
-/**
- * Keyed by `date` (YYYY-MM-DD) or unique `id` (one canonical record per date)
- * so daily_total and detailed entries never double-count the same day's income.
- */
 export interface RevenueDayRecord {
   id: string;
   date: string; // YYYY-MM-DD
   mode: RevenueRecordingMode;
-  dailyTotalAmount: number; // Used when mode === 'daily_total'
+  dailyTotalAmount: number;
   cashAmount?: number;
   cardAmount?: number;
   onlineAmount?: number;
   notes?: string;
-  entries: RevenueItemEntry[]; // Used when mode === 'detailed'
+  entries: RevenueItemEntry[];
   isDemo?: boolean;
   createdAt: string;
   updatedAt: string;
@@ -192,12 +188,12 @@ export interface TimesheetEditLog {
 export interface TimesheetEntry {
   id: string;
   employeeId: string;
-  date: string; // YYYY-MM-DD (Shift start date)
-  clockIn: string; // HH:MM (24h)
-  clockOut: string; // HH:MM (24h)
-  overnight: boolean; // True if shift ends on the next calendar day
+  date: string; // YYYY-MM-DD
+  clockIn: string; // HH:MM
+  clockOut: string; // HH:MM
+  overnight: boolean;
   breakMinutes: number;
-  netMinutes: number; // Calculated working minutes excluding break
+  netMinutes: number;
   notes?: string;
   editHistory?: TimesheetEditLog[];
   isDemo?: boolean;
@@ -220,7 +216,8 @@ export interface ApplicationSettings {
   serverAddress: string;
   defaultUnit: string;
   currency: 'IRT';
-  lastSelectedEmployeeId: string; // Sticky employee selection for purchase form
+  lastSelectedEmployeeId: string;
+  globalRevenueCoefficient: number; // Default 0.7; visible & editable only in Manager Area
   showDemoBadges: boolean;
   demoSeedInitialized: boolean;
   lastSyncAt: string | null;
@@ -245,7 +242,7 @@ export interface PurchaseFilterCriteria {
   dateFrom?: string;
   dateTo?: string;
   supplierName?: string;
-  employeeId?: string; // '' = all, '__unassigned__' = no employee, or employee.id
+  employeeId?: string;
   onlyReal?: boolean;
 }
 
