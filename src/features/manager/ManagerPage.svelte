@@ -15,7 +15,10 @@
     appSettings,
     updateGlobalRevenueCoefficient
   } from '../../stores/purchaseStore';
-  import { navigateTo } from '../../stores/navigationStore';
+  import {
+    activeManagerTab,
+    type ManagerSubTab
+  } from '../../stores/navigationStore';
   import { showToast } from '../../stores/toastStore';
   import {
     formatMoney,
@@ -45,6 +48,25 @@
   } from '../../utils/timesheetUtils';
   import EmptyState from '../../components/common/EmptyState.svelte';
   import JalaliDatePicker from '../../components/common/JalaliDatePicker.svelte';
+  import ColumnChart, { type ColumnChartItem } from '../../components/common/ColumnChart.svelte';
+
+  // Embedded Manager-Only Sub-Modules
+  import EmployeesPage from '../employees/EmployeesPage.svelte';
+  import SuppliersPage from '../suppliers/SuppliersPage.svelte';
+  import InventoryPage from '../inventory/InventoryPage.svelte';
+  import ReportsPage from '../reports/ReportsPage.svelte';
+  import BackupPage from '../backup/BackupPage.svelte';
+
+  const MANAGER_TABS: Array<{ id: ManagerSubTab; label: string; icon: string }> = [
+    { id: 'overview', label: 'تراز مالی و ضریب', icon: '⌑' },
+    { id: 'employees', label: 'کارکنان و حقوق', icon: '♟' },
+    { id: 'suppliers', label: 'تأمین‌کنندگان', icon: '◈' },
+    { id: 'inventory', label: 'انبار و موجودی', icon: '◫' },
+    { id: 'reports', label: 'گزارش‌های خرید', icon: '↗' },
+    { id: 'backup', label: 'پشتیبان‌گیری', icon: '⇧' }
+  ];
+
+  const COEFF_PRESETS = [0.5, 0.6, 0.7, 0.8, 1.0];
 
   // Setup & Login form state
   let usernameInput = 'manager';
@@ -58,7 +80,7 @@
   let newPassInput = '';
   let changePassError = '';
 
-  // Global Revenue Coefficient Editor state (Exclusive to Manager Area)
+  // Editable Coefficient (0.7 or any custom number)
   let coefficientInput = '0.7';
   let coeffError = '';
 
@@ -88,25 +110,13 @@
     coefficientInput = String($appSettings.globalRevenueCoefficient ?? 0.7);
   });
 
-  // Actual vs. Adjusted Revenue KPIs (Today, 7-Day, Month)
   $: todayRecords = filterRevenueRecords($revenues, todayISO, todayISO, onlyReal);
   $: todayActualRevenue = calculateRevenueTotal(todayRecords);
-  $: todayAdjustedRevenue = calculateAdjustedRevenueTotal(
-    todayRecords,
-    activeCoefficient
-  );
+  $: todayAdjustedRevenue = calculateAdjustedRevenueTotal(todayRecords, activeCoefficient);
 
-  $: weekRecords = filterRevenueRecords(
-    $revenues,
-    sevenDaysAgoISO,
-    todayISO,
-    onlyReal
-  );
+  $: weekRecords = filterRevenueRecords($revenues, sevenDaysAgoISO, todayISO, onlyReal);
   $: weekActualRevenue = calculateRevenueTotal(weekRecords);
-  $: weekAdjustedRevenue = calculateAdjustedRevenueTotal(
-    weekRecords,
-    activeCoefficient
-  );
+  $: weekAdjustedRevenue = calculateAdjustedRevenueTotal(weekRecords, activeCoefficient);
 
   $: monthRecords = $revenues.filter(
     (r) =>
@@ -114,12 +124,8 @@
       getJalaliYearMonthKey(r.date) === currentJalaliMonthKey
   );
   $: monthActualRevenue = calculateRevenueTotal(monthRecords);
-  $: monthAdjustedRevenue = calculateAdjustedRevenueTotal(
-    monthRecords,
-    activeCoefficient
-  );
+  $: monthAdjustedRevenue = calculateAdjustedRevenueTotal(monthRecords, activeCoefficient);
 
-  // Selected Period Financial Overview
   $: financialOverview = calculateFinancialOverview({
     revenues: $revenues,
     purchases: $purchases,
@@ -130,42 +136,61 @@
     onlyReal
   });
 
-  $: maxFinancialBar = Math.max(
-    1,
-    financialOverview.totalRevenue,
-    financialOverview.totalAdjustedRevenue,
-    financialOverview.totalPurchases,
-    financialOverview.totalOperationalExpenses,
-    Math.abs(financialOverview.estimatedNetOperatingBalance)
-  );
+  // Column Chart 1: Financial Overview Columns
+  $: financialBalanceColumns = [
+    {
+      id: 'fin_actual_rev',
+      label: 'درآمد واقعی',
+      subLabel: '۱۰۰٪ فروش',
+      value: financialOverview.totalRevenue,
+      tone: 'primary'
+    },
+    {
+      id: 'fin_adj_rev',
+      label: `با ضریب ${formatNumber(activeCoefficient)}`,
+      subLabel: 'درآمد/سهم',
+      value: financialOverview.totalAdjustedRevenue,
+      tone: 'gold'
+    },
+    {
+      id: 'fin_purchases',
+      label: 'کل خریدها',
+      subLabel: 'مواد اولیه',
+      value: financialOverview.totalPurchases,
+      tone: 'gold'
+    },
+    {
+      id: 'fin_expenses',
+      label: 'هزینه جاری',
+      subLabel: 'قبوض/حمل',
+      value: financialOverview.totalOperationalExpenses,
+      tone: 'danger'
+    },
+    {
+      id: 'fin_net',
+      label: 'مانده عملیاتی',
+      subLabel: 'تخمینی',
+      value: Math.max(0, financialOverview.estimatedNetOperatingBalance),
+      tone: financialOverview.estimatedNetOperatingBalance >= 0 ? 'primary' : 'danger'
+    }
+  ] as ColumnChartItem[];
 
-  // Dual-Series Daily Revenue (Both Actual and Adjusted series)
-  $: periodDailyDualSeries = filterRevenueRecords(
-    $revenues,
-    dateFrom,
-    dateTo,
-    onlyReal
-  )
-    .slice(0, 14)
-    .map((r) => ({
-      id: r.id,
-      date: r.date,
-      actualAmount: getEffectiveDayRevenue(r),
-      adjustedAmount: getAdjustedDayRevenue(r, activeCoefficient)
-    }));
+  // Column Chart 2: Dual-Series Daily Revenue (Actual vs. Adjusted)
+  $: dailyDualColumnItems = filterRevenueRecords($revenues, dateFrom, dateTo, onlyReal)
+    .slice(0, 10)
+    .reverse()
+    .map(
+      (r): ColumnChartItem => ({
+        id: r.id,
+        label: getPersianWeekdayName(r.date),
+        subLabel: toJalaliNumeric(r.date).slice(5),
+        value: getEffectiveDayRevenue(r),
+        secondaryValue: getAdjustedDayRevenue(r, activeCoefficient)
+      })
+    );
 
-  $: maxDailyDualRev =
-    periodDailyDualSeries.length > 0
-      ? Math.max(
-          1,
-          ...periodDailyDualSeries.map((d) =>
-            Math.max(d.actualAmount, d.adjustedAmount)
-          )
-        )
-      : 1;
-
-  // Dual-Series Monthly Revenue (Both Actual and Adjusted series)
-  $: monthlyDualSeries = (() => {
+  // Column Chart 3: Dual-Series Monthly Revenue (Actual vs. Adjusted)
+  $: monthlyDualColumnItems = (() => {
     const map = new Map<
       string,
       { ym: string; actualTotal: number; adjustedTotal: number; days: number }
@@ -174,31 +199,26 @@
     for (const r of list) {
       const ym = getJalaliYearMonthKey(r.date);
       if (!ym) continue;
-      const prev = map.get(ym) || {
-        ym,
-        actualTotal: 0,
-        adjustedTotal: 0,
-        days: 0
-      };
+      const prev = map.get(ym) || { ym, actualTotal: 0, adjustedTotal: 0, days: 0 };
       prev.actualTotal += getEffectiveDayRevenue(r);
       prev.adjustedTotal += getAdjustedDayRevenue(r, activeCoefficient);
       prev.days += 1;
       map.set(ym, prev);
     }
-    return Array.from(map.values()).sort((a, b) => b.ym.localeCompare(a.ym));
+    return Array.from(map.values())
+      .sort((a, b) => a.ym.localeCompare(b.ym))
+      .map(
+        (m): ColumnChartItem => ({
+          id: m.ym,
+          label: formatJalaliYearMonthLabel(m.ym),
+          subLabel: `${m.days} روز`,
+          value: m.actualTotal,
+          secondaryValue: m.adjustedTotal
+        })
+      );
   })();
 
-  $: maxMonthlyDualRev =
-    monthlyDualSeries.length > 0
-      ? Math.max(
-          1,
-          ...monthlyDualSeries.map((m) =>
-            Math.max(m.actualTotal, m.adjustedTotal)
-          )
-        )
-      : 1;
-
-  // Employee Purchase, Timesheet & Performance Coefficient Overview
+  // Employee Purchase, Timesheet & Salary/Share Coefficient Table
   $: employeePurchaseComparisons = compareEmployeePurchaseTotals(
     $purchases.filter((p) => !onlyReal || !p.isDemo),
     $employees,
@@ -221,6 +241,9 @@
     const weightedUnits = Number(
       (tsSummary.totalWorkingHoursDecimal * emp.performanceCoefficient).toFixed(2)
     );
+    const salaryCoeffUnits = Number(
+      (weightedUnits * activeCoefficient).toFixed(2)
+    );
 
     return {
       employee: emp,
@@ -230,27 +253,43 @@
       workingMinutes: tsSummary.totalWorkingMinutes,
       workingHoursDecimal: tsSummary.totalWorkingHoursDecimal,
       overtimeMinutes: tsSummary.totalOvertimeMinutes,
-      lateMinutes: tsSummary.totalLateMinutes,
-      weightedUnits
+      weightedUnits,
+      salaryCoeffUnits
     };
   });
 
-  async function handleSaveGlobalCoefficient() {
+  $: employeeSpendColumns = employeePurchaseComparisons
+    .filter((c) => c.totalAmount > 0)
+    .map(
+      (c): ColumnChartItem => ({
+        id: c.employeeId,
+        label: c.employeeName,
+        subLabel: `${c.count} خرید`,
+        value: c.totalAmount,
+        tone: 'primary'
+      })
+    );
+
+  async function applyCoefficientValue(val: number) {
     coeffError = '';
-    const parsed = parseNumericInput(coefficientInput);
-    if (isNaN(parsed) || parsed <= 0 || parsed > 10) {
-      coeffError = 'لطفاً ضریب معتبری بزرگ‌تر از صفر (مثلاً ۰.۷) وارد کنید.';
+    if (isNaN(val) || val <= 0 || val > 100) {
+      coeffError = 'لطفاً عددی بزرگ‌تر از صفر وارد کنید.';
       return;
     }
     try {
-      const saved = await updateGlobalRevenueCoefficient(parsed);
+      const saved = await updateGlobalRevenueCoefficient(val);
       coefficientInput = String(saved.globalRevenueCoefficient);
       showToast(
-        'ضریب سراسری درآمد بروزرسانی شد و نمودارهای عمومی به‌طور خودکار هماهنگ شدند.'
+        `ضریب به ${formatNumber(saved.globalRevenueCoefficient)} تغییر یافت و در کل برنامه اعمال شد.`
       );
     } catch (err) {
-      coeffError = err instanceof Error ? err.message : 'خطا در ذخیره ضریب درآمد.';
+      coeffError = err instanceof Error ? err.message : 'خطا در ذخیره ضریب.';
     }
+  }
+
+  async function handleSaveGlobalCoefficient() {
+    const parsed = parseNumericInput(coefficientInput);
+    await applyCoefficientValue(parsed);
   }
 
   async function handleInitialSetup() {
@@ -299,7 +338,7 @@
     currentPassInput = '';
     newPassInput = '';
     showPasswordChange = false;
-    showToast('رمز عبور مدیر با موفقیت تغییر یافت.');
+    showToast('رمز عبور مدیر تغییر یافت.');
   }
 
   function handleLockPanel() {
@@ -309,42 +348,12 @@
 </script>
 
 <section class="page active" aria-labelledby="managerTitle">
-  <div class="page-heading">
-    <div>
-      <p class="eyebrow">بخش خصوصی مدیریت مالی، ضریب درآمد و عملکرد پرسنل</p>
-      <h1 id="managerTitle">پنل مدیریت</h1>
-      <p class="subheading">
-        مشاهده درآمد واقعی، درآمد تعدیل‌شده، ضریب سراسری درآمد، مانده عملیاتی تخمینی و تحلیل عملکرد کارکنان.
-      </p>
-    </div>
-
-    {#if $isManagerUnlocked}
-      <div class="setting-actions">
-        <button
-          type="button"
-          class="quiet-btn"
-          on:click={() => (showPasswordChange = !showPasswordChange)}
-        >
-          ⚙ تغییر رمز عبور مدیر
-        </button>
-        <button
-          id="adminLogout"
-          type="button"
-          class="secondary-btn"
-          on:click={handleLockPanel}
-        >
-          ⌑ قفل کردن پنل مدیریت
-        </button>
-      </div>
-    {/if}
-  </div>
-
   {#if !$isManagerConfigured}
     <div class="panel login-panel">
       <div class="lock-mark">⌑</div>
-      <h2>راه‌اندازی اولیه دسترسی مدیر</h2>
+      <h1 id="managerTitle" style="font-size: 19px; margin: 0;">راه‌اندازی رمز پنل مدیریت</h1>
       <p>
-        برای محافظت از اطلاعات درآمد واقعی و تنظیمات ضریب درآمد در برابر دید عمومی، یک نام کاربری و رمز عبور محلی تعیین کنید.
+        بخش‌های مدیریتی (تنظیم ضریب ۰.۷، کارکنان، انبار، تأمین‌کنندگان، گزارش‌ها و پشتیبان‌گیری) فقط با نام کاربری و رمز عبور شما قابل مشاهده هستند.
       </p>
 
       <form on:submit|preventDefault={handleInitialSetup} novalidate>
@@ -365,7 +374,7 @@
             id="setupManagerPass"
             type="password"
             bind:value={passwordInput}
-            placeholder="رمز عبور دلخواه را وارد کنید"
+            placeholder="رمز عبور دلخواه"
             autocomplete="new-password"
             required
           />
@@ -387,10 +396,6 @@
           <div class="form-error" role="alert">{authError}</div>
         {/if}
 
-        <p class="demo-hint">
-          توجه امنیتی شفاف: این قفل یک «محافظ رابط کاربری محلی» در مرورگر است. احراز هویت رمزنگاری‌شده سروری نیازمند بک‌اند Go در فاز بعدی است.
-        </p>
-
         <button type="submit" class="primary-btn">
           <span>ایجاد حساب و ورود به پنل مدیریت</span>
           <span class="btn-arrow">←</span>
@@ -400,8 +405,10 @@
   {:else if !$isManagerUnlocked}
     <div id="settingsLogin" class="panel login-panel">
       <div class="lock-mark">⌑</div>
-      <h2>ورود به پنل مدیریت</h2>
-      <p>برای مشاهده درآمد واقعی، ضریب سراسری درآمد و تحلیل‌های مدیریتی وارد شوید.</p>
+      <h1 id="managerTitle" style="font-size: 19px; margin: 0;">ورود به پنل مدیریت</h1>
+      <p>
+        برای دسترسی به تنظیم ضریب درآمد و حقوق، کارکنان، انبار، تأمین‌کنندگان، گزارش‌ها و پشتیبان‌گیری وارد شوید.
+      </p>
 
       <form id="loginForm" on:submit|preventDefault={handleLogin} novalidate>
         <div class="field">
@@ -430,258 +437,233 @@
           <div class="form-error" role="alert">{authError}</div>
         {/if}
 
-        <p class="demo-hint">
-          این قفل محلی جهت جداسازی صفحات عمومی از گزارش‌های مدیریتی است. امنیت کامل سروری در فاز بک‌اند Go پیاده‌سازی می‌شود.
-        </p>
-
         <button type="submit" class="primary-btn">
-          <span>باز کردن پنل مدیریت</span>
+          <span>ورود به پنل مدیریت</span>
           <span class="btn-arrow">←</span>
         </button>
       </form>
     </div>
   {:else}
+    <!-- Unlocked Manager Header & Mobile-First Segmented Navigation -->
+    <div class="manager-top-bar panel">
+      <div class="manager-top-info">
+        <span class="badge-real">مدیر: {$activeManagerUsername}</span>
+        <strong>پنل اختصاصی مدیریت گیله‌کُرد</strong>
+      </div>
+      <div class="setting-actions">
+        <button
+          type="button"
+          class="quiet-btn"
+          on:click={() => (showPasswordChange = !showPasswordChange)}
+        >
+          ⚙ تغییر رمز
+        </button>
+        <button
+          id="adminLogout"
+          type="button"
+          class="secondary-btn"
+          on:click={handleLockPanel}
+        >
+          ⌑ قفل پنل
+        </button>
+      </div>
+    </div>
+
     {#if showPasswordChange}
-      <div class="panel card-pad" style="margin-bottom: 18px; max-width: 520px;">
+      <div class="panel card-pad" style="margin-bottom: 16px; max-width: 480px;">
         <div class="section-heading">
-          <div>
-            <h2>تغییر رمز عبور پنل مدیریت</h2>
-            <p>کاربر فعلی: {$activeManagerUsername}</p>
-          </div>
-          <button
-            type="button"
-            class="quiet-btn"
-            on:click={() => (showPasswordChange = false)}
-          >
+          <h2>تغییر رمز عبور مدیر</h2>
+          <button type="button" class="quiet-btn" on:click={() => (showPasswordChange = false)}>
             بستن
           </button>
         </div>
-
         <form on:submit|preventDefault={handleChangePassword} novalidate>
           <div class="field">
-            <label for="mgrCurrentPass">رمز عبور فعلی</label>
-            <input
-              id="mgrCurrentPass"
-              type="password"
-              bind:value={currentPassInput}
-              required
-            />
+            <label for="mgrCurrentPass">رمز فعلی</label>
+            <input id="mgrCurrentPass" type="password" bind:value={currentPassInput} required />
           </div>
           <div class="field">
-            <label for="mgrNewPass">رمز عبور جدید (حداقل ۴ کاراکتر)</label>
-            <input
-              id="mgrNewPass"
-              type="password"
-              bind:value={newPassInput}
-              required
-            />
+            <label for="mgrNewPass">رمز جدید (حداقل ۴ کاراکتر)</label>
+            <input id="mgrNewPass" type="password" bind:value={newPassInput} required />
           </div>
           {#if changePassError}
             <div class="form-error" role="alert">{changePassError}</div>
           {/if}
           <button type="submit" class="primary-btn">
-            <span>ذخیره رمز عبور جدید</span>
+            <span>ذخیره رمز جدید</span>
             <span class="btn-arrow">←</span>
           </button>
         </form>
       </div>
     {/if}
 
-    <!-- Global Revenue Coefficient Control & Date Filter Bar -->
-    <section class="panel card-pad" style="margin-bottom: 18px;">
-      <div class="two-col-grid" style="align-items: center;">
-        <div>
-          <span class="eyebrow">تنظیم محرمانه مدیر</span>
-          <h2 style="font-size: 16px; margin: 0 0 4px;">
-            ضریب سراسری درآمد: <strong>{formatNumber(activeCoefficient)}</strong>
-          </h2>
-          <p style="margin: 0; font-size: 11px; color: var(--muted);">
-            نمودارهای عمومی برنامه فقط حاصل‌ضرب درآمد در این ضریب را با عنوان ساده «درآمد» نمایش می‌دهند، بدون آنکه رکوردهای اصلی تغییر کنند.
-          </p>
-        </div>
-
-        <form
-          on:submit|preventDefault={handleSaveGlobalCoefficient}
-          style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;"
-          novalidate
-        >
-          <label for="globalRevCoeff" style="font-size: 11px; font-weight: 700;">
-            ضریب سراسری:
-          </label>
-          <input
-            id="globalRevCoeff"
-            inputmode="decimal"
-            dir="ltr"
-            bind:value={coefficientInput}
-            style="width: 110px; height: 40px; text-align: center; font-weight: 700;"
-            aria-label="ضریب سراسری درآمد"
-          />
-          <button type="submit" class="secondary-btn" style="height: 40px;">
-            ذخیره ضریب
-          </button>
-        </form>
-      </div>
-      {#if coeffError}
-        <div class="form-error" role="alert" style="margin-top: 8px; margin-bottom: 0;">
-          {coeffError}
-        </div>
-      {/if}
-
-      <div class="stat-divider" style="margin: 14px 0;"></div>
-
-      <div class="filters">
-        <div class="date-filter">
-          <span>از تاریخ (شمسی)</span>
-          <div class="date-picker-filter-wrap">
-            <JalaliDatePicker
-              id="mgrDateFrom"
-              bind:value={dateFrom}
-              placeholder="ابتدای دوره"
-              allowEmpty={true}
-              ariaLabel="از تاریخ شمسی"
-            />
-          </div>
-        </div>
-
-        <div class="date-filter">
-          <span>تا تاریخ (شمسی)</span>
-          <div class="date-picker-filter-wrap">
-            <JalaliDatePicker
-              id="mgrDateTo"
-              bind:value={dateTo}
-              placeholder="انتهای دوره"
-              allowEmpty={true}
-              ariaLabel="تا تاریخ شمسی"
-            />
-          </div>
-        </div>
-
+    <!-- Segmented Sub-Navigation for All Manager-Protected Sections -->
+    <nav class="manager-subnav" aria-label="بخش‌های پنل مدیریت">
+      {#each MANAGER_TABS as tab (tab.id)}
         <button
           type="button"
-          class={onlyReal ? 'secondary-btn' : 'quiet-btn'}
-          on:click={() => (onlyReal = !onlyReal)}
+          class="manager-tab-pill"
+          class:active={$activeManagerTab === tab.id}
+          on:click={() => activeManagerTab.set(tab.id)}
         >
-          {onlyReal ? '✓ فقط داده‌های واقعی' : 'همه داده‌ها (شامل نمونه)'}
+          <span>{tab.icon}</span>
+          <span>{tab.label}</span>
         </button>
+      {/each}
+    </nav>
 
-        {#if dateFrom || dateTo || onlyReal}
-          <button
-            type="button"
-            class="quiet-btn"
-            on:click={() => {
-              dateFrom = '';
-              dateTo = '';
-              onlyReal = false;
-            }}
-          >
-            پاک کردن فیلترها
-          </button>
+    {#if $activeManagerTab === 'overview'}
+      <!-- Editable 0.7 Salary / Revenue Coefficient Card -->
+      <section class="panel card-pad coeff-editor-card" style="margin-bottom: 16px;">
+        <div class="two-col-grid" style="align-items: center;">
+          <div>
+            <span class="eyebrow">تنظیم ضریب محاسبه درآمد و حقوق (پیش‌فرض ۰.۷)</span>
+            <h2 style="font-size: 17px; margin: 0 0 5px;">
+              ضریب فعلی: <strong style="color: var(--green); font-size: 20px;">{formatNumber(activeCoefficient)}</strong>
+            </h2>
+            <p style="margin: 0; font-size: 11px; color: var(--muted); line-height: 1.7;">
+              می‌توانید عدد <strong>۰.۷</strong> را به هر عدد دلخواه (مثلاً ۰.۵، ۰.۶۵، ۰.۸، ۱.۲ و غیره) تغییر دهید. نمودار عمومی «درآمد» و محاسبه سهم/حقوق کارکنان بلافاصله با این عدد جدید محاسبه می‌شوند.
+            </p>
+          </div>
+
+          <div>
+            <form
+              on:submit|preventDefault={handleSaveGlobalCoefficient}
+              class="coeff-form-row"
+              novalidate
+            >
+              <input
+                id="globalRevCoeff"
+                inputmode="decimal"
+                dir="ltr"
+                bind:value={coefficientInput}
+                placeholder="0.7"
+                class="coeff-input"
+                aria-label="ضریب درآمد و حقوق"
+              />
+              <button type="submit" class="primary-btn" style="width: auto; min-height: 44px; gap: 10px;">
+                <span>اعمال ضریب جدید</span>
+                <span>✓</span>
+              </button>
+            </form>
+
+            <div class="coeff-presets">
+              <span>انتخاب سریع:</span>
+              {#each COEFF_PRESETS as preset}
+                <button
+                  type="button"
+                  class="preset-chip"
+                  class:active={activeCoefficient === preset}
+                  on:click={() => {
+                    coefficientInput = String(preset);
+                    applyCoefficientValue(preset);
+                  }}
+                >
+                  {formatNumber(preset)}
+                </button>
+              {/each}
+            </div>
+          </div>
+        </div>
+
+        {#if coeffError}
+          <div class="form-error" role="alert" style="margin-top: 10px; margin-bottom: 0;">
+            {coeffError}
+          </div>
         {/if}
 
-        <div style="margin-right: auto; display: flex; gap: 8px;">
-          <button type="button" class="secondary-btn" on:click={() => navigateTo('revenue')}>
-            ＋ ثبت درآمد جدید
+        <div class="stat-divider" style="margin: 14px 0;"></div>
+
+        <div class="filters">
+          <div class="date-filter">
+            <span>از تاریخ (شمسی)</span>
+            <div class="date-picker-filter-wrap">
+              <JalaliDatePicker
+                id="mgrDateFrom"
+                bind:value={dateFrom}
+                placeholder="ابتدای دوره"
+                allowEmpty={true}
+                ariaLabel="از تاریخ شمسی"
+              />
+            </div>
+          </div>
+
+          <div class="date-filter">
+            <span>تا تاریخ (شمسی)</span>
+            <div class="date-picker-filter-wrap">
+              <JalaliDatePicker
+                id="mgrDateTo"
+                bind:value={dateTo}
+                placeholder="انتهای دوره"
+                allowEmpty={true}
+                ariaLabel="تا تاریخ شمسی"
+              />
+            </div>
+          </div>
+
+          <button
+            type="button"
+            class={onlyReal ? 'secondary-btn' : 'quiet-btn'}
+            on:click={() => (onlyReal = !onlyReal)}
+          >
+            {onlyReal ? '✓ فقط داده‌های واقعی' : 'همه (شامل نمونه)'}
           </button>
-        </div>
-      </div>
-    </section>
 
-    <!-- Actual vs. Adjusted Revenue KPIs -->
-    <div class="kpi-grid">
-      <section class="panel kpi-card">
-        <div class="card-topline">
-          <span class="mini-icon">₿</span>
-          <span>درآمد امروز ({toJalaliDate(todayISO)})</span>
-        </div>
-        <div class="kpi-value">{formatMoney(todayActualRevenue)} <small>تومان (واقعی)</small></div>
-        <div class="kpi-sub">
-          درآمد تعدیل‌شده: <strong>{formatMoney(todayAdjustedRevenue)} تومان</strong>
+          {#if dateFrom || dateTo || onlyReal}
+            <button
+              type="button"
+              class="quiet-btn"
+              on:click={() => {
+                dateFrom = '';
+                dateTo = '';
+                onlyReal = false;
+              }}
+            >
+              پاک کردن فیلتر
+            </button>
+          {/if}
         </div>
       </section>
 
-      <section class="panel kpi-card">
-        <div class="card-topline">
-          <span class="mini-icon">↗</span>
-          <span>درآمد ۷ روز اخیر</span>
-        </div>
-        <div class="kpi-value">{formatMoney(weekActualRevenue)} <small>تومان (واقعی)</small></div>
-        <div class="kpi-sub">
-          درآمد تعدیل‌شده: <strong>{formatMoney(weekAdjustedRevenue)} تومان</strong>
-        </div>
-      </section>
-
-      <section class="panel kpi-card">
-        <div class="card-topline">
-          <span class="mini-icon">▦</span>
-          <span>درآمد ماه جاری شمسی</span>
-        </div>
-        <div class="kpi-value">{formatMoney(monthActualRevenue)} <small>تومان (واقعی)</small></div>
-        <div class="kpi-sub">
-          درآمد تعدیل‌شده: <strong>{formatMoney(monthAdjustedRevenue)} تومان</strong>
-        </div>
-      </section>
-
-      <section class="panel kpi-card">
-        <div class="card-topline">
-          <span class="mini-icon">⚙</span>
-          <span>ضریب سراسری و کل دوره</span>
-        </div>
-        <div class="kpi-value">
-          ضریب {formatNumber(activeCoefficient)}
-        </div>
-        <div class="kpi-sub">
-          کل واقعی: {formatMoney(financialOverview.totalRevenue)} | تعدیل‌شده: {formatMoney(financialOverview.totalAdjustedRevenue)}
-        </div>
-      </section>
-    </div>
-
-    <!-- Estimated Net Operating Balance & Financial Comparison -->
-    <section class="panel card-pad" style="margin-bottom: 18px;">
-      <div class="section-heading">
-        <div>
-          <h2>تراز عملیاتی: درآمد واقعی، درآمد تعدیل‌شده، خریدها، هزینه‌ها و مانده عملیاتی تخمینی</h2>
-          <p>
-            فرمول محاسبه: مانده عملیاتی تخمینی = کل درآمد واقعی ثبت‌شده − کل خریدهای ثبت‌شده − کل هزینه‌های جاری ثبت‌شده
-          </p>
-        </div>
-      </div>
-
-      <div class="kpi-grid" style="margin-bottom: 14px;">
-        <div class="panel kpi-card">
+      <!-- KPI Cards: Actual vs. Adjusted Revenue -->
+      <div class="kpi-grid">
+        <section class="panel kpi-card">
           <div class="card-topline">
-            <span class="mini-icon">＋</span>
-            <span>کل درآمد واقعی (A)</span>
+            <span class="mini-icon">₿</span>
+            <span>درآمد امروز</span>
           </div>
-          <div class="kpi-value">{formatMoney(financialOverview.totalRevenue)} <small>تومان</small></div>
+          <div class="kpi-value">{formatMoney(todayActualRevenue)} <small>واقعی</small></div>
           <div class="kpi-sub">
-            درآمد تعدیل‌شده: {formatMoney(financialOverview.totalAdjustedRevenue)} تومان
+            با ضریب {formatNumber(activeCoefficient)}: <strong>{formatMoney(todayAdjustedRevenue)} تومان</strong>
           </div>
-        </div>
+        </section>
 
-        <div class="panel kpi-card">
+        <section class="panel kpi-card">
           <div class="card-topline">
-            <span class="mini-icon">−</span>
-            <span>کل خریدهای مواد اولیه (B)</span>
+            <span class="mini-icon">↗</span>
+            <span>درآمد ۷ روز اخیر</span>
           </div>
-          <div class="kpi-value">{formatMoney(financialOverview.totalPurchases)} <small>تومان</small></div>
-          <div class="kpi-sub">{formatNumber(financialOverview.purchasesCount)} فاکتور خرید</div>
-        </div>
+          <div class="kpi-value">{formatMoney(weekActualRevenue)} <small>واقعی</small></div>
+          <div class="kpi-sub">
+            با ضریب {formatNumber(activeCoefficient)}: <strong>{formatMoney(weekAdjustedRevenue)} تومان</strong>
+          </div>
+        </section>
 
-        <div class="panel kpi-card">
+        <section class="panel kpi-card">
           <div class="card-topline">
-            <span class="mini-icon">−</span>
-            <span>کل هزینه‌های جاری (C)</span>
+            <span class="mini-icon">▦</span>
+            <span>درآمد ماه جاری</span>
           </div>
-          <div class="kpi-value">
-            {formatMoney(financialOverview.totalOperationalExpenses)} <small>تومان</small>
+          <div class="kpi-value">{formatMoney(monthActualRevenue)} <small>واقعی</small></div>
+          <div class="kpi-sub">
+            با ضریب {formatNumber(activeCoefficient)}: <strong>{formatMoney(monthAdjustedRevenue)} تومان</strong>
           </div>
-          <div class="kpi-sub">{formatNumber(financialOverview.expensesCount)} ردیف هزینه عملیاتی</div>
-        </div>
+        </section>
 
-        <div class="panel kpi-card" style="border-color: #bfd2c5; background: #f8fbf8;">
+        <section class="panel kpi-card" style="border-color: #bfd2c5; background: #f8fbf8;">
           <div class="card-topline">
             <span class="mini-icon">＝</span>
-            <span>مانده عملیاتی تخمینی (A − B − C)</span>
+            <span>مانده عملیاتی تخمینی</span>
           </div>
           <div
             class="kpi-value"
@@ -691,270 +673,142 @@
           >
             {formatMoney(financialOverview.estimatedNetOperatingBalance)} <small>تومان</small>
           </div>
-          <div class="kpi-sub">
-            {financialOverview.estimatedNetOperatingBalance >= 0
-              ? 'مازاد جریان نقدی ثبت‌شده'
-              : 'کسری جریان نقدی ثبت‌شده'}
-          </div>
-        </div>
+          <div class="kpi-sub">درآمد واقعی − خریدها − هزینه‌ها</div>
+        </section>
       </div>
 
-      <!-- Visual Comparison Chart -->
-      <div style="margin-top: 12px;">
-        <div class="bar-row">
-          <div class="bar-labels">
-            <strong>درآمد واقعی (Actual Revenue)</strong>
-            <span>{formatMoney(financialOverview.totalRevenue)} تومان</span>
-          </div>
-          <div class="bar-track">
-            <div
-              class="bar-fill"
-              style="width: {Math.max(
-                4,
-                Math.round((financialOverview.totalRevenue / maxFinancialBar) * 100)
-              )}%; background: var(--green);"
-            ></div>
-          </div>
-        </div>
-
-        <div class="bar-row">
-          <div class="bar-labels">
-            <strong>درآمد تعدیل‌شده با ضریب {formatNumber(activeCoefficient)} (Adjusted Revenue)</strong>
-            <span>{formatMoney(financialOverview.totalAdjustedRevenue)} تومان</span>
-          </div>
-          <div class="bar-track">
-            <div
-              class="bar-fill"
-              style="width: {Math.max(
-                4,
-                Math.round(
-                  (financialOverview.totalAdjustedRevenue / maxFinancialBar) * 100
-                )
-              )}%; background: #4f8a6d;"
-            ></div>
-          </div>
-        </div>
-
-        <div class="bar-row">
-          <div class="bar-labels">
-            <strong>کل خریدهای ثبت‌شده (مواد اولیه و تدارکات)</strong>
-            <span>{formatMoney(financialOverview.totalPurchases)} تومان</span>
-          </div>
-          <div class="bar-track">
-            <div
-              class="bar-fill"
-              style="width: {Math.max(
-                4,
-                Math.round((financialOverview.totalPurchases / maxFinancialBar) * 100)
-              )}%; background: var(--gold);"
-            ></div>
-          </div>
-        </div>
-
-        <div class="bar-row">
-          <div class="bar-labels">
-            <strong>کل هزینه‌های عملیاتی و جاری (غیرکالایی)</strong>
-            <span>{formatMoney(financialOverview.totalOperationalExpenses)} تومان</span>
-          </div>
-          <div class="bar-track">
-            <div
-              class="bar-fill"
-              style="width: {Math.max(
-                4,
-                Math.round(
-                  (financialOverview.totalOperationalExpenses / maxFinancialBar) * 100
-                )
-              )}%; background: #8c6d46;"
-            ></div>
-          </div>
-        </div>
-
-        <div class="bar-row">
-          <div class="bar-labels">
-            <strong>مانده عملیاتی تخمینی</strong>
-            <span>{formatMoney(financialOverview.estimatedNetOperatingBalance)} تومان</span>
-          </div>
-          <div class="bar-track">
-            <div
-              class="bar-fill"
-              style="width: {Math.max(
-                4,
-                Math.round(
-                  (Math.abs(financialOverview.estimatedNetOperatingBalance) /
-                    maxFinancialBar) *
-                    100
-                )
-              )}%; background: {financialOverview.estimatedNetOperatingBalance >= 0
-                ? 'var(--green-2)'
-                : 'var(--danger)'};"
-            ></div>
-          </div>
-        </div>
-      </div>
-
-      <div class="demo-banner-box" style="margin-top: 14px;">
-        <span>
-          <strong>توضیح مهم حسابداری درباره «مانده عملیاتی تخمینی»:</strong>
-          این عدد بر پایه کل درآمدها، خریدها و هزینه‌های ثبت‌شده محاسبه شده است و «سود خالص حسابداری قطعی» محسوب نمی‌شود؛ زیرا بخشی از اقلام خریداری‌شده ممکن است هنوز به عنوان موجودی در انبار باقی مانده باشند و بهای تمام‌شده کالای مصرف‌شده (COGS) تنها هنگام مصرف واقعی در آشپزخانه شناسایی می‌گردد.
-        </span>
-      </div>
-    </section>
-
-    <!-- Dual-Series Daily & Monthly Revenue Charts (Actual + Adjusted Series) -->
-    <div class="two-col-grid" style="margin-bottom: 18px;">
-      <section class="panel card-pad">
+      <!-- Vertical Column Chart: Financial Balance Comparison -->
+      <section class="panel card-pad" style="margin-bottom: 16px;">
         <div class="section-heading">
           <div>
-            <h2>نمودار دوگانه درآمد روزانه (واقعی و تعدیل‌شده)</h2>
-            <p>مقایسه سری درآمد واقعی و سری درآمد تعدیل‌شده با ضریب {formatNumber(activeCoefficient)}</p>
+            <h2>نمودار ستونی تراز مالی و مانده عملیاتی تخمینی</h2>
+            <p>مقایسه ستونی درآمد واقعی، درآمد با ضریب {formatNumber(activeCoefficient)}، خریدها، هزینه‌ها و مانده عملیاتی</p>
           </div>
         </div>
-
-        {#if periodDailyDualSeries.length > 0}
-          {#each periodDailyDualSeries as item (item.id)}
-            <div class="bar-row" style="margin-bottom: 14px;">
-              <div class="bar-labels">
-                <strong>
-                  {getPersianWeekdayName(item.date)} {toJalaliDate(item.date)} ({toJalaliNumeric(item.date)})
-                </strong>
-                <span>
-                  واقعی: <strong>{formatMoney(item.actualAmount)}</strong> | تعدیل‌شده: <strong>{formatMoney(item.adjustedAmount)}</strong> تومان
-                </span>
-              </div>
-              <div class="bar-track" style="margin-bottom: 4px;" title="سری اول: درآمد واقعی">
-                <div
-                  class="bar-fill"
-                  style="width: {Math.max(
-                    6,
-                    Math.round((item.actualAmount / maxDailyDualRev) * 100)
-                  )}%; background: var(--green);"
-                ></div>
-              </div>
-              <div class="bar-track" title="سری دوم: درآمد تعدیل‌شده">
-                <div
-                  class="bar-fill"
-                  style="width: {Math.max(
-                    6,
-                    Math.round((item.adjustedAmount / maxDailyDualRev) * 100)
-                  )}%; background: var(--gold);"
-                ></div>
-              </div>
-            </div>
-          {/each}
-        {:else}
-          <EmptyState
-            title="درآمدی در این بازه ثبت نشده است"
-            message="از بخش درآمد، فروش روزانه رستوران را ثبت کنید."
-          />
-        {/if}
+        <ColumnChart items={financialBalanceColumns} height={195} />
       </section>
 
-      <section class="panel card-pad">
-        <div class="section-heading">
-          <div>
-            <h2>نمودار دوگانه درآمد ماهانه (واقعی و تعدیل‌شده)</h2>
-            <p>مقایسه ماهانه درآمد واقعی و درآمد تعدیل‌شده در تقویم جلالی</p>
+      <!-- Dual-Series Vertical Column Charts: Daily & Monthly Revenue -->
+      <div class="two-col-grid" style="margin-bottom: 16px;">
+        <section class="panel card-pad">
+          <div class="section-heading">
+            <div>
+              <h2>نمودار ستونی دوگانه درآمد روزانه</h2>
+              <p>مقایسه ستون درآمد واقعی و ستون تعدیل‌شده با ضریب {formatNumber(activeCoefficient)}</p>
+            </div>
           </div>
-        </div>
 
-        {#if monthlyDualSeries.length > 0}
-          {#each monthlyDualSeries as item (item.ym)}
-            <div class="bar-row" style="margin-bottom: 14px;">
-              <div class="bar-labels">
-                <strong>
-                  {formatJalaliYearMonthLabel(item.ym)} ({formatNumber(item.days)} روز)
-                </strong>
-                <span>
-                  واقعی: <strong>{formatMoney(item.actualTotal)}</strong> | تعدیل‌شده: <strong>{formatMoney(item.adjustedTotal)}</strong> تومان
-                </span>
-              </div>
-              <div class="bar-track" style="margin-bottom: 4px;" title="سری اول: درآمد واقعی ماهانه">
-                <div
-                  class="bar-fill"
-                  style="width: {Math.max(
-                    6,
-                    Math.round((item.actualTotal / maxMonthlyDualRev) * 100)
-                  )}%; background: var(--green);"
-                ></div>
-              </div>
-              <div class="bar-track" title="سری دوم: درآمد تعدیل‌شده ماهانه">
-                <div
-                  class="bar-fill"
-                  style="width: {Math.max(
-                    6,
-                    Math.round((item.adjustedTotal / maxMonthlyDualRev) * 100)
-                  )}%; background: var(--gold);"
-                ></div>
-              </div>
+          {#if dailyDualColumnItems.length > 0}
+            <ColumnChart
+              items={dailyDualColumnItems}
+              height={200}
+              showSecondary={true}
+              primaryLegend="درآمد واقعی"
+              secondaryLegend="با ضریب {formatNumber(activeCoefficient)}"
+            />
+          {:else}
+            <EmptyState title="درآمدی ثبت نشده است" message="از تب درآمد فروش روزانه را ثبت کنید." />
+          {/if}
+        </section>
+
+        <section class="panel card-pad">
+          <div class="section-heading">
+            <div>
+              <h2>نمودار ستونی دوگانه درآمد ماهانه</h2>
+              <p>مقایسه ماهانه درآمد واقعی و تعدیل‌شده (شمسی)</p>
             </div>
-          {/each}
-        {:else}
-          <EmptyState
-            title="داده ماهانه‌ای وجود ندارد"
-            message="پس از ثبت درآمد، جمع ماهانه در این قسمت نمایش داده می‌شود."
-          />
-        {/if}
-      </section>
-    </div>
+          </div>
 
-    <!-- Employee Purchase, Timesheet & Performance Coefficient Table -->
-    <section class="panel card-pad">
-      <div class="section-heading">
-        <div>
-          <h2>جدول جامع عملکرد کارکنان (خرید، ساعت کار و ضریب عملکرد آتی)</h2>
-          <p>
-            شاخص «ساعت کار × ضریب عملکرد» صرفاً جهت آماده‌سازی زیرساخت ماژول مشارکت در سود آتی است و به معنای محاسبه حقوق فعلی نیست.
-          </p>
-        </div>
-        <button type="button" class="quiet-btn" on:click={() => navigateTo('employees')}>
-          ویرایش ضرایب در بخش کارکنان ←
-        </button>
+          {#if monthlyDualColumnItems.length > 0}
+            <ColumnChart
+              items={monthlyDualColumnItems}
+              height={200}
+              showSecondary={true}
+              primaryLegend="درآمد واقعی ماه"
+              secondaryLegend="با ضریب {formatNumber(activeCoefficient)}"
+            />
+          {:else}
+            <EmptyState title="داده ماهانه‌ای وجود ندارد" message="پس از ثبت درآمد، نمودار ماهانه تکمیل می‌شود." />
+          {/if}
+        </section>
       </div>
 
-      {#if employeeWorkAndCoeffTable.length > 0}
-        <div class="table-scroll">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>نام کارمند</th>
-                <th>سمت</th>
-                <th>تعداد خرید</th>
-                <th>مجموع مبلغ خرید (تومان)</th>
-                <th>روز کاری</th>
-                <th>مجموع ساعت کار</th>
-                <th>اضافه‌کاری</th>
-                <th>ضریب عملکرد</th>
-                <th>شاخص وزنی آتی (ساعت × ضریب)</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each employeeWorkAndCoeffTable as row (row.employee.id)}
-                <tr>
-                  <td>
-                    <strong>{row.employee.name}</strong>
-                    {#if !row.employee.isActive}
-                      <span class="badge-low">غیرفعال</span>
-                    {/if}
-                  </td>
-                  <td>{row.employee.role}</td>
-                  <td>{formatNumber(row.purchasesCount)}</td>
-                  <td><strong>{formatMoney(row.purchasesAmount)}</strong></td>
-                  <td>{formatNumber(row.workingDays)} روز</td>
-                  <td>{formatMinutesToPersianHours(row.workingMinutes)}</td>
-                  <td>{formatMinutesToPersianHours(row.overtimeMinutes)}</td>
-                  <td><strong>{formatNumber(row.employee.performanceCoefficient)}</strong></td>
-                  <td>{formatNumber(row.weightedUnits)} واحد وزنی</td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
-      {:else}
-        <EmptyState
-          title="کارمندی ثبت نشده است"
-          message="از بخش کارکنان پرسنل رستوران را تعریف کنید."
-        />
+      {#if employeeSpendColumns.length > 0}
+        <section class="panel card-pad" style="margin-bottom: 16px;">
+          <div class="section-heading">
+            <div>
+              <h2>نمودار ستونی مقایسه خرید کارکنان</h2>
+              <p>حجم ریالی خرید انجام‌شده توسط هر یک از کارکنان</p>
+            </div>
+          </div>
+          <ColumnChart items={employeeSpendColumns} height={180} />
+        </section>
       {/if}
-    </section>
+
+      <!-- Employee Performance & Salary Coefficient Table -->
+      <section class="panel card-pad">
+        <div class="section-heading">
+          <div>
+            <h2>جدول عملکرد، ساعت کار و ضریب حقوق کارکنان (ضریب فعال: {formatNumber(activeCoefficient)})</h2>
+            <p>بررسی یکپارچه خریدها، ساعات کاری و شاخص ضریب حقوق و عملکرد هر کارمند</p>
+          </div>
+          <button
+            type="button"
+            class="secondary-btn"
+            on:click={() => activeManagerTab.set('employees')}
+          >
+            مدیریت کامل کارکنان ←
+          </button>
+        </div>
+
+        {#if employeeWorkAndCoeffTable.length > 0}
+          <div class="table-scroll">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>نام کارمند</th>
+                  <th>سمت</th>
+                  <th>تعداد خرید</th>
+                  <th>مجموع خرید (تومان)</th>
+                  <th>مجموع ساعت کار</th>
+                  <th>ضریب فردی</th>
+                  <th>شاخص با ضریب {formatNumber(activeCoefficient)}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each employeeWorkAndCoeffTable as row (row.employee.id)}
+                  <tr>
+                    <td>
+                      <strong>{row.employee.name}</strong>
+                      {#if !row.employee.isActive}
+                        <span class="badge-low">غیرفعال</span>
+                      {/if}
+                    </td>
+                    <td>{row.employee.role}</td>
+                    <td>{formatNumber(row.purchasesCount)}</td>
+                    <td><strong>{formatMoney(row.purchasesAmount)}</strong></td>
+                    <td>{formatMinutesToPersianHours(row.workingMinutes)}</td>
+                    <td>{formatNumber(row.employee.performanceCoefficient)}</td>
+                    <td><strong>{formatNumber(row.salaryCoeffUnits)} واحد</strong></td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {:else}
+          <EmptyState title="کارمندی ثبت نشده است" message="از تب کارکنان در بالای همین پنل، پرسنل را اضافه کنید." />
+        {/if}
+      </section>
+    {:else if $activeManagerTab === 'employees'}
+      <EmployeesPage />
+    {:else if $activeManagerTab === 'suppliers'}
+      <SuppliersPage />
+    {:else if $activeManagerTab === 'inventory'}
+      <InventoryPage />
+    {:else if $activeManagerTab === 'reports'}
+      <ReportsPage />
+    {:else if $activeManagerTab === 'backup'}
+      <BackupPage />
+    {/if}
   {/if}
 </section>
