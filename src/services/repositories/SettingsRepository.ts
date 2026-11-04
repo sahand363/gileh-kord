@@ -10,6 +10,7 @@ export const DEFAULT_SETTINGS: ApplicationSettings = {
   defaultUnit: 'کیلوگرم',
   currency: 'IRT',
   lastSelectedEmployeeId: '',
+  globalRevenueCoefficient: 0.7,
   showDemoBadges: true,
   demoSeedInitialized: false,
   lastSyncAt: null
@@ -24,7 +25,15 @@ export class SettingsRepository {
         async (stores) => {
           const record = await requestToPromise(stores['settings'].get(SETTINGS_KEY));
           if (record && record.value) {
-            return { ...DEFAULT_SETTINGS, ...record.value };
+            const rawCoeff = Number(record.value.globalRevenueCoefficient);
+            return {
+              ...DEFAULT_SETTINGS,
+              ...record.value,
+              globalRevenueCoefficient:
+                Number.isFinite(rawCoeff) && rawCoeff > 0 && rawCoeff <= 10
+                  ? rawCoeff
+                  : DEFAULT_SETTINGS.globalRevenueCoefficient
+            };
           }
           return { ...DEFAULT_SETTINGS };
         }
