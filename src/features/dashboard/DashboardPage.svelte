@@ -1,9 +1,9 @@
 <script lang="ts">
   import {
+    purchases,
     todayPurchasesStats,
     dashboardSummary,
-    recentPurchases,
-    publicRevenueStore
+    recentPurchases
   } from '../../stores/purchaseStore';
   import { navigateTo, NAV_SECTIONS } from '../../stores/navigationStore';
   import {
@@ -21,18 +21,33 @@
   const todayISO = getTodayISODate();
   const todayJalali = `${getPersianWeekdayName(todayISO)} ${toJalaliDate(todayISO)}`;
 
-  $: publicChartItems = $publicRevenueStore.dailySeries
-    .slice(0, 7)
-    .reverse()
-    .map(
-      (d): ColumnChartItem => ({
-        id: d.id,
-        label: getPersianWeekdayName(d.date),
-        subLabel: toJalaliNumeric(d.date).slice(5),
-        value: d.amount,
-        tone: 'primary'
-      })
-    );
+  // Build a 7-day purchase activity column chart (Zero revenue mentioned on public dashboard)
+  $: purchaseByDateColumns = (() => {
+    const map = new Map<string, { date: string; total: number; count: number }>();
+    for (const p of $purchases) {
+      const existing = map.get(p.purchaseDate) || {
+        date: p.purchaseDate,
+        total: 0,
+        count: 0
+      };
+      existing.total += p.totalAmount;
+      existing.count += 1;
+      map.set(p.purchaseDate, existing);
+    }
+    return Array.from(map.values())
+      .sort((a, b) => b.date.localeCompare(a.date))
+      .slice(0, 7)
+      .reverse()
+      .map(
+        (d): ColumnChartItem => ({
+          id: `purch_day_${d.date}`,
+          label: getPersianWeekdayName(d.date),
+          subLabel: toJalaliNumeric(d.date).slice(5),
+          value: d.total,
+          tone: 'primary'
+        })
+      );
+  })();
 </script>
 
 <section class="page active" aria-labelledby="dashboardTitle">
@@ -40,7 +55,7 @@
     <div>
       <p class="eyebrow">نمای سریع موبایل و دسکتاپ</p>
       <h1 id="dashboardTitle">پیشخوان گیله‌کُرد</h1>
-      <p class="subheading">خلاصه خرید امروز، درآمد و وضعیت عملیاتی رستوران.</p>
+      <p class="subheading">خلاصه وضعیت خریدهای روزانه، کالاها و هشدارهای موجودی انبار.</p>
     </div>
     <div class="heading-date">
       <span class="calendar-icon">▦</span>
@@ -60,59 +75,54 @@
 
     <section class="panel kpi-card">
       <div class="card-topline">
-        <span class="mini-icon">₿</span>
-        <span>درآمد امروز</span>
-      </div>
-      <div class="kpi-value">{formatMoney($publicRevenueStore.todayAmount)} <small>تومان</small></div>
-      <div class="kpi-sub">کل دوره: {formatMoney($publicRevenueStore.totalAmount)} تومان</div>
-    </section>
-
-    <section class="panel kpi-card">
-      <div class="card-topline">
         <span class="mini-icon">▤</span>
-        <span>کل خریدها</span>
+        <span>کل فاکتورهای خرید</span>
       </div>
       <div class="kpi-value">{formatNumber($dashboardSummary.totalPurchasesCount)} <small>فاکتور</small></div>
-      <div class="kpi-sub">{formatNumber($dashboardSummary.productsCount)} قلم کالای ثبت‌شده</div>
+      <div class="kpi-sub">مجموع کل: {formatMoney($dashboardSummary.totalPurchasesAmount)} تومان</div>
     </section>
 
     <section class="panel kpi-card">
       <div class="card-topline">
-        <span class="mini-icon">⌑</span>
-        <span>پنل مدیریت</span>
+        <span class="mini-icon">❖</span>
+        <span>کالاهای ثبت‌شده</span>
       </div>
-      <div class="kpi-value" style="font-size: 15px;">محافظت‌شده 🔒</div>
-      <div class="kpi-sub">
-        <button
-          type="button"
-          class="text-btn"
-          style="padding: 0; font-size: 10px;"
-          on:click={() => navigateTo('manager')}
-        >
-          ورود با رمز مدیر ←
-        </button>
+      <div class="kpi-value">
+        {formatNumber($dashboardSummary.productsCount)} <small>قلم کالا</small>
       </div>
+      <div class="kpi-sub">آماده پیشنهاد خودکار در فرم خرید</div>
+    </section>
+
+    <section class="panel kpi-card">
+      <div class="card-topline">
+        <span class="mini-icon">◫</span>
+        <span>هشدار کسری انبار</span>
+      </div>
+      <div class="kpi-value">
+        {formatNumber($dashboardSummary.lowStockItems.length)} <small>قلم کالا</small>
+      </div>
+      <div class="kpi-sub">نیازمند تأمین و سفارش مجدد</div>
     </section>
   </div>
 
-  <!-- Public Vertical Column Chart: Labeled simply "درآمد" -->
+  <!-- Operational Purchases Column Chart (No revenue displayed) -->
   <section class="panel card-pad" style="margin-bottom: 16px;">
     <div class="section-heading">
       <div>
-        <h2>درآمد</h2>
-        <p>نمودار ستونی درآمد روزهای اخیر (شمسی)</p>
+        <h2>نمودار ستونی خریدهای اخیر</h2>
+        <p>مجموع مبالغ خرید روزهای اخیر به تاریخ شمسی</p>
       </div>
-      <button type="button" class="text-btn" on:click={() => navigateTo('revenue')}>
-        ثبت درآمد <span>←</span>
+      <button type="button" class="text-btn" on:click={() => navigateTo('history')}>
+        تاریخچه خریدها <span>←</span>
       </button>
     </div>
 
-    {#if publicChartItems.length > 0}
-      <ColumnChart items={publicChartItems} height={180} />
+    {#if purchaseByDateColumns.length > 0}
+      <ColumnChart items={purchaseByDateColumns} height={180} />
     {:else}
       <EmptyState
-        title="درآمدی ثبت نشده است"
-        message="پس از ثبت درآمد، نمودار ستونی در این قسمت نمایش داده می‌شود."
+        title="خریدی ثبت نشده است"
+        message="پس از ثبت خرید، نمودار ستونی خریدهای روزانه در این قسمت نمایش داده می‌شود."
       />
     {/if}
   </section>
