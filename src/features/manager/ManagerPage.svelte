@@ -11,7 +11,9 @@
     expenses,
     revenues,
     employees,
-    timesheets
+    timesheets,
+    appSettings,
+    updateGlobalRevenueCoefficient
   } from '../../stores/purchaseStore';
   import { navigateTo } from '../../stores/navigationStore';
   import { showToast } from '../../stores/toastStore';
@@ -19,6 +21,7 @@
     formatMoney,
     formatNumber,
     getTodayISODate,
+    parseNumericInput,
     toJalaliDate,
     toJalaliNumeric
   } from '../../utils/formatters';
@@ -28,10 +31,12 @@
     getPersianWeekdayName
   } from '../../utils/jalali';
   import {
+    calculateAdjustedRevenueTotal,
     calculateFinancialOverview,
     calculateRevenueTotal,
     compareEmployeePurchaseTotals,
     filterRevenueRecords,
+    getAdjustedDayRevenue,
     getEffectiveDayRevenue
   } from '../../utils/calculations';
   import {
@@ -53,6 +58,10 @@
   let newPassInput = '';
   let changePassError = '';
 
+  // Global Revenue Coefficient Editor state (Exclusive to Manager Area)
+  let coefficientInput = '0.7';
+  let coeffError = '';
+
   // Date filters for Manager Financial Analytics
   let dateFrom = '';
   let dateTo = '';
@@ -69,35 +78,53 @@
 
   const sevenDaysAgoISO = getDaysAgoISO(6);
 
+  $: activeCoefficient = $appSettings.globalRevenueCoefficient ?? 0.7;
+
   onMount(async () => {
     await managerAuthService.checkInitialized();
     if ($activeManagerUsername) {
       usernameInput = $activeManagerUsername;
     }
+    coefficientInput = String($appSettings.globalRevenueCoefficient ?? 0.7);
   });
 
-  // Revenue KPIs (Today, This Week / 7 Days, This Jalali Month)
-  $: todayRevenue = calculateRevenueTotal(
-    filterRevenueRecords($revenues, todayISO, todayISO, onlyReal)
+  // Actual vs. Adjusted Revenue KPIs (Today, 7-Day, Month)
+  $: todayRecords = filterRevenueRecords($revenues, todayISO, todayISO, onlyReal);
+  $: todayActualRevenue = calculateRevenueTotal(todayRecords);
+  $: todayAdjustedRevenue = calculateAdjustedRevenueTotal(
+    todayRecords,
+    activeCoefficient
   );
 
-  $: weekRevenue = calculateRevenueTotal(
-    filterRevenueRecords($revenues, sevenDaysAgoISO, todayISO, onlyReal)
+  $: weekRecords = filterRevenueRecords(
+    $revenues,
+    sevenDaysAgoISO,
+    todayISO,
+    onlyReal
+  );
+  $: weekActualRevenue = calculateRevenueTotal(weekRecords);
+  $: weekAdjustedRevenue = calculateAdjustedRevenueTotal(
+    weekRecords,
+    activeCoefficient
   );
 
-  $: monthRevenue = calculateRevenueTotal(
-    $revenues.filter(
-      (r) =>
-        (!onlyReal || !r.isDemo) &&
-        getJalaliYearMonthKey(r.date) === currentJalaliMonthKey
-    )
+  $: monthRecords = $revenues.filter(
+    (r) =>
+      (!onlyReal || !r.isDemo) &&
+      getJalaliYearMonthKey(r.date) === currentJalaliMonthKey
+  );
+  $: monthActualRevenue = calculateRevenueTotal(monthRecords);
+  $: monthAdjustedRevenue = calculateAdjustedRevenueTotal(
+    monthRecords,
+    activeCoefficient
   );
 
-  // Selected Period Financial Overview (Revenue - Purchases - Operational Expenses)
+  // Selected Period Financial Overview
   $: financialOverview = calculateFinancialOverview({
     revenues: $revenues,
     purchases: $purchases,
     expenses: $expenses,
+    coefficient: activeCoefficient,
     dateFrom,
     dateTo,
     onlyReal
@@ -106,45 +133,72 @@
   $: maxFinancialBar = Math.max(
     1,
     financialOverview.totalRevenue,
+    financialOverview.totalAdjustedRevenue,
     financialOverview.totalPurchases,
     financialOverview.totalOperationalExpenses,
     Math.abs(financialOverview.estimatedNetOperatingBalance)
   );
 
-  // Filtered daily revenues for daily chart
-  $: periodRevenueList = filterRevenueRecords(
+  // Dual-Series Daily Revenue (Both Actual and Adjusted series)
+  $: periodDailyDualSeries = filterRevenueRecords(
     $revenues,
     dateFrom,
     dateTo,
     onlyReal
-  ).slice(0, 14);
+  )
+    .slice(0, 14)
+    .map((r) => ({
+      id: r.id,
+      date: r.date,
+      actualAmount: getEffectiveDayRevenue(r),
+      adjustedAmount: getAdjustedDayRevenue(r, activeCoefficient)
+    }));
 
-  $: maxDailyRev =
-    periodRevenueList.length > 0
-      ? Math.max(1, ...periodRevenueList.map((r) => getEffectiveDayRevenue(r)))
+  $: maxDailyDualRev =
+    periodDailyDualSeries.length > 0
+      ? Math.max(
+          1,
+          ...periodDailyDualSeries.map((d) =>
+            Math.max(d.actualAmount, d.adjustedAmount)
+          )
+        )
       : 1;
 
-  // Monthly revenue aggregation
-  $: monthlyRevenueList = (() => {
-    const map = new Map<string, { ym: string; total: number; days: number }>();
+  // Dual-Series Monthly Revenue (Both Actual and Adjusted series)
+  $: monthlyDualSeries = (() => {
+    const map = new Map<
+      string,
+      { ym: string; actualTotal: number; adjustedTotal: number; days: number }
+    >();
     const list = filterRevenueRecords($revenues, dateFrom, dateTo, onlyReal);
     for (const r of list) {
       const ym = getJalaliYearMonthKey(r.date);
       if (!ym) continue;
-      const prev = map.get(ym) || { ym, total: 0, days: 0 };
-      prev.total += getEffectiveDayRevenue(r);
+      const prev = map.get(ym) || {
+        ym,
+        actualTotal: 0,
+        adjustedTotal: 0,
+        days: 0
+      };
+      prev.actualTotal += getEffectiveDayRevenue(r);
+      prev.adjustedTotal += getAdjustedDayRevenue(r, activeCoefficient);
       prev.days += 1;
       map.set(ym, prev);
     }
     return Array.from(map.values()).sort((a, b) => b.ym.localeCompare(a.ym));
   })();
 
-  $: maxMonthlyRev =
-    monthlyRevenueList.length > 0
-      ? Math.max(1, ...monthlyRevenueList.map((m) => m.total))
+  $: maxMonthlyDualRev =
+    monthlyDualSeries.length > 0
+      ? Math.max(
+          1,
+          ...monthlyDualSeries.map((m) =>
+            Math.max(m.actualTotal, m.adjustedTotal)
+          )
+        )
       : 1;
 
-  // Employee Purchase & Timesheet + Performance Coefficient Overview
+  // Employee Purchase, Timesheet & Performance Coefficient Overview
   $: employeePurchaseComparisons = compareEmployeePurchaseTotals(
     $purchases.filter((p) => !onlyReal || !p.isDemo),
     $employees,
@@ -181,6 +235,24 @@
     };
   });
 
+  async function handleSaveGlobalCoefficient() {
+    coeffError = '';
+    const parsed = parseNumericInput(coefficientInput);
+    if (isNaN(parsed) || parsed <= 0 || parsed > 10) {
+      coeffError = 'لطفاً ضریب معتبری بزرگ‌تر از صفر (مثلاً ۰.۷) وارد کنید.';
+      return;
+    }
+    try {
+      const saved = await updateGlobalRevenueCoefficient(parsed);
+      coefficientInput = String(saved.globalRevenueCoefficient);
+      showToast(
+        'ضریب سراسری درآمد بروزرسانی شد و نمودارهای عمومی به‌طور خودکار هماهنگ شدند.'
+      );
+    } catch (err) {
+      coeffError = err instanceof Error ? err.message : 'خطا در ذخیره ضریب درآمد.';
+    }
+  }
+
   async function handleInitialSetup() {
     authError = '';
     if (passwordInput !== confirmPasswordInput) {
@@ -197,6 +269,7 @@
     }
     passwordInput = '';
     confirmPasswordInput = '';
+    coefficientInput = String($appSettings.globalRevenueCoefficient ?? 0.7);
     showToast('حساب مدیر ایجاد شد و پنل مدیریت باز گردید.');
   }
 
@@ -208,6 +281,7 @@
       return;
     }
     passwordInput = '';
+    coefficientInput = String($appSettings.globalRevenueCoefficient ?? 0.7);
     showToast('ورود به پنل مدیریت انجام شد.');
   }
 
@@ -237,10 +311,10 @@
 <section class="page active" aria-labelledby="managerTitle">
   <div class="page-heading">
     <div>
-      <p class="eyebrow">بخش خصوصی مدیریت مالی، سود عملیاتی و عملکرد پرسنل</p>
+      <p class="eyebrow">بخش خصوصی مدیریت مالی، ضریب درآمد و عملکرد پرسنل</p>
       <h1 id="managerTitle">پنل مدیریت</h1>
       <p class="subheading">
-        دسترسی به گزارش‌های حساس درآمد، مانده عملیاتی تخمینی، مقایسه خریدها و ضریب عملکرد کارکنان.
+        مشاهده درآمد واقعی، درآمد تعدیل‌شده، ضریب سراسری درآمد، مانده عملیاتی تخمینی و تحلیل عملکرد کارکنان.
       </p>
     </div>
 
@@ -266,12 +340,11 @@
   </div>
 
   {#if !$isManagerConfigured}
-    <!-- Initial Manager Account Setup (No hardcoded password) -->
     <div class="panel login-panel">
       <div class="lock-mark">⌑</div>
       <h2>راه‌اندازی اولیه دسترسی مدیر</h2>
       <p>
-        برای محافظت از اطلاعات مالی و گزارش‌های درآمد در برابر دید عمومی در محیط رستوران، یک نام کاربری و رمز عبور محلی تعیین کنید.
+        برای محافظت از اطلاعات درآمد واقعی و تنظیمات ضریب درآمد در برابر دید عمومی، یک نام کاربری و رمز عبور محلی تعیین کنید.
       </p>
 
       <form on:submit|preventDefault={handleInitialSetup} novalidate>
@@ -315,7 +388,7 @@
         {/if}
 
         <p class="demo-hint">
-          توجه امنیتی شفاف: این قفل یک «محافظ رابط کاربری محلی» در مرورگر است تا ارقام مالی در صفحه عمومی ثبت خرید دیده نشوند. احراز هویت رمزنگاری‌شده سروری نیازمند بک‌اند Go در فاز بعدی است.
+          توجه امنیتی شفاف: این قفل یک «محافظ رابط کاربری محلی» در مرورگر است. احراز هویت رمزنگاری‌شده سروری نیازمند بک‌اند Go در فاز بعدی است.
         </p>
 
         <button type="submit" class="primary-btn">
@@ -325,11 +398,10 @@
       </form>
     </div>
   {:else if !$isManagerUnlocked}
-    <!-- Manager Login Gate -->
     <div id="settingsLogin" class="panel login-panel">
       <div class="lock-mark">⌑</div>
       <h2>ورود به پنل مدیریت</h2>
-      <p>برای مشاهده گزارش‌های درآمد، مانده عملیاتی و تحلیل عملکرد کارکنان وارد شوید.</p>
+      <p>برای مشاهده درآمد واقعی، ضریب سراسری درآمد و تحلیل‌های مدیریتی وارد شوید.</p>
 
       <form id="loginForm" on:submit|preventDefault={handleLogin} novalidate>
         <div class="field">
@@ -359,7 +431,7 @@
         {/if}
 
         <p class="demo-hint">
-          این قفل محلی جهت جداسازی صفحه روزمره ثبت خرید از گزارش‌های مدیریتی است. امنیت کامل سروری در فاز بک‌اند Go پیاده‌سازی می‌شود.
+          این قفل محلی جهت جداسازی صفحات عمومی از گزارش‌های مدیریتی است. امنیت کامل سروری در فاز بک‌اند Go پیاده‌سازی می‌شود.
         </p>
 
         <button type="submit" class="primary-btn">
@@ -369,7 +441,6 @@
       </form>
     </div>
   {:else}
-    <!-- Unlocked Private Manager Dashboard -->
     {#if showPasswordChange}
       <div class="panel card-pad" style="margin-bottom: 18px; max-width: 520px;">
         <div class="section-heading">
@@ -416,8 +487,48 @@
       </div>
     {/if}
 
-    <!-- Filter Bar -->
+    <!-- Global Revenue Coefficient Control & Date Filter Bar -->
     <section class="panel card-pad" style="margin-bottom: 18px;">
+      <div class="two-col-grid" style="align-items: center;">
+        <div>
+          <span class="eyebrow">تنظیم محرمانه مدیر</span>
+          <h2 style="font-size: 16px; margin: 0 0 4px;">
+            ضریب سراسری درآمد: <strong>{formatNumber(activeCoefficient)}</strong>
+          </h2>
+          <p style="margin: 0; font-size: 11px; color: var(--muted);">
+            نمودارهای عمومی برنامه فقط حاصل‌ضرب درآمد در این ضریب را با عنوان ساده «درآمد» نمایش می‌دهند، بدون آنکه رکوردهای اصلی تغییر کنند.
+          </p>
+        </div>
+
+        <form
+          on:submit|preventDefault={handleSaveGlobalCoefficient}
+          style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;"
+          novalidate
+        >
+          <label for="globalRevCoeff" style="font-size: 11px; font-weight: 700;">
+            ضریب سراسری:
+          </label>
+          <input
+            id="globalRevCoeff"
+            inputmode="decimal"
+            dir="ltr"
+            bind:value={coefficientInput}
+            style="width: 110px; height: 40px; text-align: center; font-weight: 700;"
+            aria-label="ضریب سراسری درآمد"
+          />
+          <button type="submit" class="secondary-btn" style="height: 40px;">
+            ذخیره ضریب
+          </button>
+        </form>
+      </div>
+      {#if coeffError}
+        <div class="form-error" role="alert" style="margin-top: 8px; margin-bottom: 0;">
+          {coeffError}
+        </div>
+      {/if}
+
+      <div class="stat-divider" style="margin: 14px 0;"></div>
+
       <div class="filters">
         <div class="date-filter">
           <span>از تاریخ (شمسی)</span>
@@ -471,22 +582,21 @@
           <button type="button" class="secondary-btn" on:click={() => navigateTo('revenue')}>
             ＋ ثبت درآمد جدید
           </button>
-          <button type="button" class="quiet-btn" on:click={() => navigateTo('settings')}>
-            تنظیمات سامانه
-          </button>
         </div>
       </div>
     </section>
 
-    <!-- Revenue Period KPIs -->
+    <!-- Actual vs. Adjusted Revenue KPIs -->
     <div class="kpi-grid">
       <section class="panel kpi-card">
         <div class="card-topline">
           <span class="mini-icon">₿</span>
           <span>درآمد امروز ({toJalaliDate(todayISO)})</span>
         </div>
-        <div class="kpi-value">{formatMoney(todayRevenue)} <small>تومان</small></div>
-        <div class="kpi-sub">فروش ثبت‌شده روز جاری</div>
+        <div class="kpi-value">{formatMoney(todayActualRevenue)} <small>تومان (واقعی)</small></div>
+        <div class="kpi-sub">
+          درآمد تعدیل‌شده: <strong>{formatMoney(todayAdjustedRevenue)} تومان</strong>
+        </div>
       </section>
 
       <section class="panel kpi-card">
@@ -494,8 +604,10 @@
           <span class="mini-icon">↗</span>
           <span>درآمد ۷ روز اخیر</span>
         </div>
-        <div class="kpi-value">{formatMoney(weekRevenue)} <small>تومان</small></div>
-        <div class="kpi-sub">از {toJalaliDate(sevenDaysAgoISO)} تا امروز</div>
+        <div class="kpi-value">{formatMoney(weekActualRevenue)} <small>تومان (واقعی)</small></div>
+        <div class="kpi-sub">
+          درآمد تعدیل‌شده: <strong>{formatMoney(weekAdjustedRevenue)} تومان</strong>
+        </div>
       </section>
 
       <section class="panel kpi-card">
@@ -503,20 +615,22 @@
           <span class="mini-icon">▦</span>
           <span>درآمد ماه جاری شمسی</span>
         </div>
-        <div class="kpi-value">{formatMoney(monthRevenue)} <small>تومان</small></div>
-        <div class="kpi-sub">{formatJalaliYearMonthLabel(currentJalaliMonthKey)}</div>
+        <div class="kpi-value">{formatMoney(monthActualRevenue)} <small>تومان (واقعی)</small></div>
+        <div class="kpi-sub">
+          درآمد تعدیل‌شده: <strong>{formatMoney(monthAdjustedRevenue)} تومان</strong>
+        </div>
       </section>
 
       <section class="panel kpi-card">
         <div class="card-topline">
-          <span class="mini-icon">▤</span>
-          <span>درآمد کل دوره انتخابی</span>
+          <span class="mini-icon">⚙</span>
+          <span>ضریب سراسری و کل دوره</span>
         </div>
         <div class="kpi-value">
-          {formatMoney(financialOverview.totalRevenue)} <small>تومان</small>
+          ضریب {formatNumber(activeCoefficient)}
         </div>
         <div class="kpi-sub">
-          در {formatNumber(financialOverview.revenueDaysCount)} روز دارای ثبت فروش
+          کل واقعی: {formatMoney(financialOverview.totalRevenue)} | تعدیل‌شده: {formatMoney(financialOverview.totalAdjustedRevenue)}
         </div>
       </section>
     </div>
@@ -525,9 +639,9 @@
     <section class="panel card-pad" style="margin-bottom: 18px;">
       <div class="section-heading">
         <div>
-          <h2>تراز عملیاتی: درآمد، خریدها، هزینه‌ها و مانده عملیاتی تخمینی</h2>
+          <h2>تراز عملیاتی: درآمد واقعی، درآمد تعدیل‌شده، خریدها، هزینه‌ها و مانده عملیاتی تخمینی</h2>
           <p>
-            فرمول محاسبه: مانده عملیاتی تخمینی = کل درآمد ثبت‌شده − کل خریدهای ثبت‌شده − کل هزینه‌های جاری ثبت‌شده
+            فرمول محاسبه: مانده عملیاتی تخمینی = کل درآمد واقعی ثبت‌شده − کل خریدهای ثبت‌شده − کل هزینه‌های جاری ثبت‌شده
           </p>
         </div>
       </div>
@@ -536,10 +650,12 @@
         <div class="panel kpi-card">
           <div class="card-topline">
             <span class="mini-icon">＋</span>
-            <span>کل درآمد ثبت‌شده (A)</span>
+            <span>کل درآمد واقعی (A)</span>
           </div>
           <div class="kpi-value">{formatMoney(financialOverview.totalRevenue)} <small>تومان</small></div>
-          <div class="kpi-sub">{formatNumber(financialOverview.revenueDaysCount)} روز فروش</div>
+          <div class="kpi-sub">
+            درآمد تعدیل‌شده: {formatMoney(financialOverview.totalAdjustedRevenue)} تومان
+          </div>
         </div>
 
         <div class="panel kpi-card">
@@ -587,7 +703,7 @@
       <div style="margin-top: 12px;">
         <div class="bar-row">
           <div class="bar-labels">
-            <strong>کل درآمد ثبت‌شده</strong>
+            <strong>درآمد واقعی (Actual Revenue)</strong>
             <span>{formatMoney(financialOverview.totalRevenue)} تومان</span>
           </div>
           <div class="bar-track">
@@ -597,6 +713,24 @@
                 4,
                 Math.round((financialOverview.totalRevenue / maxFinancialBar) * 100)
               )}%; background: var(--green);"
+            ></div>
+          </div>
+        </div>
+
+        <div class="bar-row">
+          <div class="bar-labels">
+            <strong>درآمد تعدیل‌شده با ضریب {formatNumber(activeCoefficient)} (Adjusted Revenue)</strong>
+            <span>{formatMoney(financialOverview.totalAdjustedRevenue)} تومان</span>
+          </div>
+          <div class="bar-track">
+            <div
+              class="bar-fill"
+              style="width: {Math.max(
+                4,
+                Math.round(
+                  (financialOverview.totalAdjustedRevenue / maxFinancialBar) * 100
+                )
+              )}%; background: #4f8a6d;"
             ></div>
           </div>
         </div>
@@ -666,30 +800,43 @@
       </div>
     </section>
 
-    <!-- Daily & Monthly Revenue Charts -->
+    <!-- Dual-Series Daily & Monthly Revenue Charts (Actual + Adjusted Series) -->
     <div class="two-col-grid" style="margin-bottom: 18px;">
       <section class="panel card-pad">
         <div class="section-heading">
           <div>
-            <h2>نمودار درآمد روزانه (شمسی)</h2>
-            <p>درآمد مؤثر روزهای اخیر به همراه نام روز هفته</p>
+            <h2>نمودار دوگانه درآمد روزانه (واقعی و تعدیل‌شده)</h2>
+            <p>مقایسه سری درآمد واقعی و سری درآمد تعدیل‌شده با ضریب {formatNumber(activeCoefficient)}</p>
           </div>
         </div>
 
-        {#if periodRevenueList.length > 0}
-          {#each periodRevenueList as rev (rev.id)}
-            {@const dayRev = getEffectiveDayRevenue(rev)}
-            <div class="bar-row">
+        {#if periodDailyDualSeries.length > 0}
+          {#each periodDailyDualSeries as item (item.id)}
+            <div class="bar-row" style="margin-bottom: 14px;">
               <div class="bar-labels">
                 <strong>
-                  {getPersianWeekdayName(rev.date)} {toJalaliDate(rev.date)} ({toJalaliNumeric(rev.date)})
+                  {getPersianWeekdayName(item.date)} {toJalaliDate(item.date)} ({toJalaliNumeric(item.date)})
                 </strong>
-                <span>{formatMoney(dayRev)} تومان</span>
+                <span>
+                  واقعی: <strong>{formatMoney(item.actualAmount)}</strong> | تعدیل‌شده: <strong>{formatMoney(item.adjustedAmount)}</strong> تومان
+                </span>
               </div>
-              <div class="bar-track">
+              <div class="bar-track" style="margin-bottom: 4px;" title="سری اول: درآمد واقعی">
                 <div
                   class="bar-fill"
-                  style="width: {Math.max(6, Math.round((dayRev / maxDailyRev) * 100))}%;"
+                  style="width: {Math.max(
+                    6,
+                    Math.round((item.actualAmount / maxDailyDualRev) * 100)
+                  )}%; background: var(--green);"
+                ></div>
+              </div>
+              <div class="bar-track" title="سری دوم: درآمد تعدیل‌شده">
+                <div
+                  class="bar-fill"
+                  style="width: {Math.max(
+                    6,
+                    Math.round((item.adjustedAmount / maxDailyDualRev) * 100)
+                  )}%; background: var(--gold);"
                 ></div>
               </div>
             </div>
@@ -705,24 +852,38 @@
       <section class="panel card-pad">
         <div class="section-heading">
           <div>
-            <h2>نمودار درآمد ماهانه (شمسی)</h2>
-            <p>مجموع درآمد به تفکیک ماه‌های تقویم جلالی</p>
+            <h2>نمودار دوگانه درآمد ماهانه (واقعی و تعدیل‌شده)</h2>
+            <p>مقایسه ماهانه درآمد واقعی و درآمد تعدیل‌شده در تقویم جلالی</p>
           </div>
         </div>
 
-        {#if monthlyRevenueList.length > 0}
-          {#each monthlyRevenueList as item (item.ym)}
-            <div class="bar-row">
+        {#if monthlyDualSeries.length > 0}
+          {#each monthlyDualSeries as item (item.ym)}
+            <div class="bar-row" style="margin-bottom: 14px;">
               <div class="bar-labels">
                 <strong>
-                  {formatJalaliYearMonthLabel(item.ym)} ({formatNumber(item.days)} روز کاری)
+                  {formatJalaliYearMonthLabel(item.ym)} ({formatNumber(item.days)} روز)
                 </strong>
-                <span>{formatMoney(item.total)} تومان</span>
+                <span>
+                  واقعی: <strong>{formatMoney(item.actualTotal)}</strong> | تعدیل‌شده: <strong>{formatMoney(item.adjustedTotal)}</strong> تومان
+                </span>
               </div>
-              <div class="bar-track">
+              <div class="bar-track" style="margin-bottom: 4px;" title="سری اول: درآمد واقعی ماهانه">
                 <div
                   class="bar-fill"
-                  style="width: {Math.max(6, Math.round((item.total / maxMonthlyRev) * 100))}%;"
+                  style="width: {Math.max(
+                    6,
+                    Math.round((item.actualTotal / maxMonthlyDualRev) * 100)
+                  )}%; background: var(--green);"
+                ></div>
+              </div>
+              <div class="bar-track" title="سری دوم: درآمد تعدیل‌شده ماهانه">
+                <div
+                  class="bar-fill"
+                  style="width: {Math.max(
+                    6,
+                    Math.round((item.adjustedTotal / maxMonthlyDualRev) * 100)
+                  )}%; background: var(--gold);"
                 ></div>
               </div>
             </div>
