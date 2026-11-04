@@ -8,7 +8,7 @@
 
   let isMoreOpen = false;
 
-  const primaryIds: AppPage[] = ['entry', 'history', 'employees', 'timesheets'];
+  const primaryIds: AppPage[] = ['entry', 'history', 'timesheets', 'revenue'];
   $: isSecondaryActive = !primaryIds.includes($currentPage);
 
   function selectPage(page: AppPage) {
@@ -24,10 +24,10 @@
     on:click={() => (isMoreOpen = false)}
   ></div>
   <div class="more-sheet" role="dialog" aria-label="سایر بخش‌های گیله‌کُرد">
-    <div class="section-heading" style="margin-bottom: 10px;">
-      <h2>همه بخش‌های سامانه</h2>
+    <div class="section-heading" style="margin-bottom: 12px;">
+      <h2>بخش‌های سامانه</h2>
       <button type="button" class="quiet-btn" on:click={() => (isMoreOpen = false)}>
-        بستن
+        بستن ✕
       </button>
     </div>
     <div class="more-sheet-grid">
@@ -35,11 +35,12 @@
         <button
           type="button"
           class="quick-nav-btn"
+          class:active-sheet-btn={$currentPage === sec.id}
           on:click={() => selectPage(sec.id)}
         >
           <span class="quick-nav-icon">{sec.icon}</span>
           <div>
-            <strong style="font-size: 11px; display: block;">{sec.label}</strong>
+            <strong style="font-size: 11.5px; display: block;">{sec.label}</strong>
           </div>
         </button>
       {/each}
@@ -71,16 +72,6 @@
   <button
     type="button"
     class="nav-item"
-    class:active={$currentPage === 'employees'}
-    on:click={() => selectPage('employees')}
-  >
-    <span class="nav-icon">♟</span>
-    <span>کارکنان</span>
-  </button>
-
-  <button
-    type="button"
-    class="nav-item"
     class:active={$currentPage === 'timesheets'}
     on:click={() => selectPage('timesheets')}
   >
@@ -91,10 +82,20 @@
   <button
     type="button"
     class="nav-item"
+    class:active={$currentPage === 'revenue'}
+    on:click={() => selectPage('revenue')}
+  >
+    <span class="nav-icon">₿</span>
+    <span>درآمد</span>
+  </button>
+
+  <button
+    type="button"
+    class="nav-item"
     class:active={isSecondaryActive || isMoreOpen}
     on:click={() => (isMoreOpen = !isMoreOpen)}
   >
     <span class="nav-icon">☰</span>
-    <span>سایر بخش‌ها</span>
+    <span>سایر</span>
   </button>
 </nav>
