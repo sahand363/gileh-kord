@@ -3,9 +3,11 @@
     purchases,
     suppliers,
     expenses,
-    dashboardSummary
+    dashboardSummary,
+    publicRevenueStore
   } from '../../stores/purchaseStore';
-  import { formatMoney, formatNumber } from '../../utils/formatters';
+  import { formatMoney, formatNumber, toJalaliDate, toJalaliNumeric } from '../../utils/formatters';
+  import { getPersianWeekdayName } from '../../utils/jalali';
   import { getTopPurchasedProducts } from '../../utils/calculations';
   import EmptyState from '../../components/common/EmptyState.svelte';
 
@@ -20,30 +22,38 @@
       ? sortedSuppliers[0].totalPurchasesAmount
       : 1;
 
-  $: purchaseSharePercent =
-    $dashboardSummary.combinedOutflow > 0
-      ? Math.round(
-          ($dashboardSummary.totalPurchasesAmount /
-            $dashboardSummary.combinedOutflow) *
-            100
-        )
-      : 0;
-  $: expenseSharePercent =
-    $dashboardSummary.combinedOutflow > 0 ? 100 - purchaseSharePercent : 0;
+  $: publicDailyRevenue = $publicRevenueStore.dailySeries.slice(0, 7);
+  $: maxPublicRev =
+    publicDailyRevenue.length > 0
+      ? Math.max(1, ...publicDailyRevenue.map((r) => r.amount))
+      : 1;
 </script>
 
 <section class="page active" aria-labelledby="reportsTitle">
   <div class="page-heading">
     <div>
-      <p class="eyebrow">تحلیل مالی و تدارکات</p>
-      <h1 id="reportsTitle">گزارش‌های مدیریتی</h1>
+      <p class="eyebrow">گزارش‌های عمومی تدارکات و فروش</p>
+      <h1 id="reportsTitle">گزارش‌ها</h1>
       <p class="subheading">
-        خلاصه هزینه‌کرد رستوران به تفکیک اقلام پرمصرف، تأمین‌کنندگان اصلی و نسبت خرید مواد اولیه به هزینه‌های جاری.
+        خلاصه وضعیت درآمد، خریدهای مواد اولیه، هزینه‌های جاری و تأمین‌کنندگان برتر.
       </p>
     </div>
   </div>
 
   <div class="three-col-grid" style="margin-bottom: 20px;">
+    <section class="panel kpi-card">
+      <div class="card-topline">
+        <span class="mini-icon">₿</span>
+        <span>درآمد</span>
+      </div>
+      <div class="kpi-value">
+        {formatMoney($publicRevenueStore.totalAmount)} <small>تومان</small>
+      </div>
+      <div class="kpi-sub">
+        در {formatNumber($publicRevenueStore.daysCount)} روز ثبت‌شده
+      </div>
+    </section>
+
     <section class="panel kpi-card">
       <div class="card-topline">
         <span class="mini-icon">▤</span>
@@ -53,7 +63,7 @@
         {formatMoney($dashboardSummary.totalPurchasesAmount)} <small>تومان</small>
       </div>
       <div class="kpi-sub">
-        {formatNumber(purchaseSharePercent)}٪ از کل خروجی مالی ثبت‌شده
+        در {formatNumber($dashboardSummary.totalPurchasesCount)} فاکتور خرید
       </div>
     </section>
 
@@ -66,23 +76,44 @@
         {formatMoney($dashboardSummary.totalExpenses)} <small>تومان</small>
       </div>
       <div class="kpi-sub">
-        {formatNumber(expenseSharePercent)}٪ از کل خروجی مالی ثبت‌شده ({formatNumber($expenses.length)} مورد)
-      </div>
-    </section>
-
-    <section class="panel kpi-card">
-      <div class="card-topline">
-        <span class="mini-icon">↗</span>
-        <span>جمع کل خروجی دوره</span>
-      </div>
-      <div class="kpi-value">
-        {formatMoney($dashboardSummary.combinedOutflow)} <small>تومان</small>
-      </div>
-      <div class="kpi-sub">
-        میانگین هر فاکتور خرید: {formatMoney($dashboardSummary.averagePurchaseAmount)} تومان
+        ثبت‌شده در {formatNumber($expenses.length)} ردیف هزینه
       </div>
     </section>
   </div>
+
+  <!-- Public Revenue Chart: Labeled simply "درآمد" -->
+  <section class="panel card-pad" style="margin-bottom: 18px;">
+    <div class="section-heading">
+      <div>
+        <h2>درآمد</h2>
+        <p>نمودار درآمد روزانه به تاریخ شمسی</p>
+      </div>
+    </div>
+
+    {#if publicDailyRevenue.length > 0}
+      {#each publicDailyRevenue as rev (rev.id)}
+        <div class="bar-row">
+          <div class="bar-labels">
+            <strong>
+              {getPersianWeekdayName(rev.date)} {toJalaliDate(rev.date)} ({toJalaliNumeric(rev.date)})
+            </strong>
+            <span>{formatMoney(rev.amount)} تومان</span>
+          </div>
+          <div class="bar-track">
+            <div
+              class="bar-fill"
+              style="width: {Math.max(6, Math.round((rev.amount / maxPublicRev) * 100))}%;"
+            ></div>
+          </div>
+        </div>
+      {/each}
+    {:else}
+      <EmptyState
+        title="درآمدی ثبت نشده است"
+        message="پس از ثبت درآمد، نمودار در این بخش نمایش داده می‌شود."
+      />
+    {/if}
+  </section>
 
   <div class="two-col-grid">
     <section class="panel card-pad">
