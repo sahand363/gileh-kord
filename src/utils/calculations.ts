@@ -7,6 +7,7 @@ import type {
   PurchaseSummaryStats,
   RevenueDayRecord
 } from '../models/types';
+import { getTodayISODate } from './formatters';
 import { getJalaliYearMonthKey } from './jalali';
 
 export function sortPurchasesDescending(items: Purchase[]): Purchase[] {
@@ -237,10 +238,8 @@ export function compareEmployeePurchaseTotals(
 }
 
 /**
- * Returns the effective single-source revenue amount for a given day record.
- * Prevents double-counting:
- * - If mode === 'daily_total', returns `dailyTotalAmount`.
- * - If mode === 'detailed', returns the sum of `entries`.
+ * Returns the raw actual single-source revenue amount for a given day record.
+ * Never modifies the stored record.
  */
 export function getEffectiveDayRevenue(record: RevenueDayRecord): number {
   if (!record) return 0;
@@ -251,6 +250,18 @@ export function getEffectiveDayRevenue(record: RevenueDayRecord): number {
     );
   }
   return Number(record.dailyTotalAmount) || 0;
+}
+
+/**
+ * Returns the coefficient-adjusted revenue for a given day record without mutating the record.
+ */
+export function getAdjustedDayRevenue(
+  record: RevenueDayRecord,
+  coefficient: number
+): number {
+  const safeCoeff =
+    Number.isFinite(coefficient) && coefficient > 0 ? coefficient : 0.7;
+  return Math.round(getEffectiveDayRevenue(record) * safeCoeff);
 }
 
 export function filterRevenueRecords(
@@ -275,8 +286,99 @@ export function calculateRevenueTotal(records: RevenueDayRecord[]): number {
   return records.reduce((sum, r) => sum + getEffectiveDayRevenue(r), 0);
 }
 
+export function calculateAdjustedRevenueTotal(
+  records: RevenueDayRecord[],
+  coefficient: number
+): number {
+  return records.reduce((sum, r) => sum + getAdjustedDayRevenue(r, coefficient), 0);
+}
+
+export interface PublicRevenueViewData {
+  todayAmount: number;
+  weekAmount: number;
+  monthAmount: number;
+  totalAmount: number;
+  daysCount: number;
+  dailySeries: Array<{
+    id: string;
+    date: string;
+    amount: number;
+    isDemo?: boolean;
+  }>;
+  monthlySeries: Array<{
+    ym: string;
+    amount: number;
+    days: number;
+  }>;
+}
+
+/**
+ * Builds the sanitized public revenue dataset containing ONLY coefficient-adjusted values
+ * labeled simply as `amount`. Never exposes raw revenue or the coefficient value.
+ */
+export function buildPublicRevenueView(
+  records: RevenueDayRecord[],
+  coefficient: number,
+  dateFrom?: string,
+  dateTo?: string
+): PublicRevenueViewData {
+  const todayISO = getTodayISODate();
+  const sevenDaysAgoDate = new Date();
+  sevenDaysAgoDate.setDate(sevenDaysAgoDate.getDate() - 6);
+  const sevenDaysAgoISO = getTodayISODate(sevenDaysAgoDate);
+  const currentMonthKey = getJalaliYearMonthKey(todayISO);
+
+  const filtered = filterRevenueRecords(records, dateFrom, dateTo);
+
+  const todayAmount = calculateAdjustedRevenueTotal(
+    filterRevenueRecords(records, todayISO, todayISO),
+    coefficient
+  );
+  const weekAmount = calculateAdjustedRevenueTotal(
+    filterRevenueRecords(records, sevenDaysAgoISO, todayISO),
+    coefficient
+  );
+  const monthAmount = calculateAdjustedRevenueTotal(
+    records.filter((r) => getJalaliYearMonthKey(r.date) === currentMonthKey),
+    coefficient
+  );
+  const totalAmount = calculateAdjustedRevenueTotal(filtered, coefficient);
+
+  const dailySeries = filtered.slice(0, 14).map((r) => ({
+    id: r.id,
+    date: r.date,
+    amount: getAdjustedDayRevenue(r, coefficient),
+    isDemo: r.isDemo
+  }));
+
+  const monthMap = new Map<string, { ym: string; amount: number; days: number }>();
+  for (const r of filtered) {
+    const ym = getJalaliYearMonthKey(r.date);
+    if (!ym) continue;
+    const prev = monthMap.get(ym) || { ym, amount: 0, days: 0 };
+    prev.amount += getAdjustedDayRevenue(r, coefficient);
+    prev.days += 1;
+    monthMap.set(ym, prev);
+  }
+
+  const monthlySeries = Array.from(monthMap.values()).sort((a, b) =>
+    b.ym.localeCompare(a.ym)
+  );
+
+  return {
+    todayAmount,
+    weekAmount,
+    monthAmount,
+    totalAmount,
+    daysCount: filtered.length,
+    dailySeries,
+    monthlySeries
+  };
+}
+
 export interface FinancialOverviewResult {
   totalRevenue: number;
+  totalAdjustedRevenue: number;
   totalPurchases: number;
   totalOperationalExpenses: number;
   estimatedNetOperatingBalance: number;
@@ -285,20 +387,21 @@ export interface FinancialOverviewResult {
   expensesCount: number;
 }
 
-/**
- * Calculates the transparent financial summary for a given date range:
- * Estimated Net Operating Balance = Total Recorded Revenue - Total Recorded Purchases - Total Recorded Operational Expenses
- */
 export function calculateFinancialOverview(params: {
   revenues: RevenueDayRecord[];
   purchases: Purchase[];
   expenses: Expense[];
+  coefficient?: number;
   dateFrom?: string;
   dateTo?: string;
   onlyReal?: boolean;
 }): FinancialOverviewResult {
   const from = params.dateFrom?.trim() || '';
   const to = params.dateTo?.trim() || '';
+  const coeff =
+    params.coefficient !== undefined && params.coefficient > 0
+      ? params.coefficient
+      : 0.7;
 
   const filteredRevenues = filterRevenueRecords(
     params.revenues,
@@ -319,6 +422,10 @@ export function calculateFinancialOverview(params: {
   });
 
   const totalRevenue = calculateRevenueTotal(filteredRevenues);
+  const totalAdjustedRevenue = calculateAdjustedRevenueTotal(
+    filteredRevenues,
+    coeff
+  );
   const totalPurchases = calculatePurchaseStats(filteredPurchases).total;
   const totalOperationalExpenses = calculateExpensesTotal(filteredExpenses);
   const estimatedNetOperatingBalance =
@@ -326,6 +433,7 @@ export function calculateFinancialOverview(params: {
 
   return {
     totalRevenue,
+    totalAdjustedRevenue,
     totalPurchases,
     totalOperationalExpenses,
     estimatedNetOperatingBalance,
