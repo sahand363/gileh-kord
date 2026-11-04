@@ -9,17 +9,12 @@
   import DashboardPage from './features/dashboard/DashboardPage.svelte';
   import PurchaseEntryPage from './features/purchases/PurchaseEntryPage.svelte';
   import PurchaseHistoryPage from './features/history/PurchaseHistoryPage.svelte';
-  import EmployeesPage from './features/employees/EmployeesPage.svelte';
   import TimesheetsPage from './features/timesheets/TimesheetsPage.svelte';
   import RevenuePage from './features/revenue/RevenuePage.svelte';
-  import ManagerPage from './features/manager/ManagerPage.svelte';
   import ProductsPage from './features/products/ProductsPage.svelte';
-  import SuppliersPage from './features/suppliers/SuppliersPage.svelte';
-  import InventoryPage from './features/inventory/InventoryPage.svelte';
   import ExpensesPage from './features/expenses/ExpensesPage.svelte';
-  import ReportsPage from './features/reports/ReportsPage.svelte';
   import SettingsPage from './features/settings/SettingsPage.svelte';
-  import BackupPage from './features/backup/BackupPage.svelte';
+  import ManagerPage from './features/manager/ManagerPage.svelte';
 
   onMount(async () => {
     await loadPurchases(true);
@@ -30,34 +25,24 @@
   <Topbar />
 
   <main class="main-wrap">
-    {#if $currentPage === 'dashboard'}
-      <DashboardPage />
-    {:else if $currentPage === 'entry'}
+    {#if $currentPage === 'entry'}
       <PurchaseEntryPage />
     {:else if $currentPage === 'history'}
       <PurchaseHistoryPage />
-    {:else if $currentPage === 'employees'}
-      <EmployeesPage />
     {:else if $currentPage === 'timesheets'}
       <TimesheetsPage />
     {:else if $currentPage === 'revenue'}
       <RevenuePage />
-    {:else if $currentPage === 'manager'}
-      <ManagerPage />
+    {:else if $currentPage === 'dashboard'}
+      <DashboardPage />
     {:else if $currentPage === 'products'}
       <ProductsPage />
-    {:else if $currentPage === 'suppliers'}
-      <SuppliersPage />
-    {:else if $currentPage === 'inventory'}
-      <InventoryPage />
     {:else if $currentPage === 'expenses'}
       <ExpensesPage />
-    {:else if $currentPage === 'reports'}
-      <ReportsPage />
-    {:else if $currentPage === 'backup'}
-      <BackupPage />
     {:else if $currentPage === 'settings'}
       <SettingsPage />
+    {:else}
+      <ManagerPage />
     {/if}
   </main>
 
