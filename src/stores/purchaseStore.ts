@@ -27,8 +27,8 @@ import { ALL_STORES, dbClient, requestToPromise } from '../services/db';
 import { createInitialDemoDataset } from '../services/demoData';
 import { getTodayISODate, normalizeProductKey } from '../utils/formatters';
 import {
+  buildPublicRevenueView,
   calculateExpensesTotal,
-  calculateFinancialOverview,
   calculatePurchaseStats,
   getLowStockItems,
   sortPurchasesDescending
@@ -64,12 +64,6 @@ export const employeeByIdMap = derived(employees, ($employees) => {
   return map;
 });
 
-/**
- * Resolves the current display name for a purchase's employeeId.
- * - If employeeId matches an employee in the database, returns their latest name (even if renamed).
- * - Otherwise falls back to `employeeNameSnapshot`.
- * - For historical purchases with no employee, returns `'بدون ثبت مسئول خرید'`.
- */
 export function resolvePurchaseEmployeeName(
   purchase: Purchase,
   empMap: Map<string, Employee>
@@ -125,7 +119,6 @@ export async function loadPurchases(autoSeedDemoIfFirstRun = false): Promise<voi
       return;
     }
 
-    // Ensure sticky employee defaults to first active employee if unset
     if (!settings.lastSelectedEmployeeId && employeesList.length > 0) {
       const firstActive = employeesList.find((e) => e.isActive) || employeesList[0];
       settings.lastSelectedEmployeeId = firstActive.id;
@@ -255,15 +248,29 @@ export async function clearDemoDataset(): Promise<void> {
   await loadPurchases(false);
 }
 
-// ============================================================================
-// Employee Operations & Sticky Selection
-// ============================================================================
-
 export async function setStickyEmployeeId(employeeId: string): Promise<void> {
   const saved = await settingsRepository.saveSettings({
     lastSelectedEmployeeId: employeeId
   });
   appSettings.set(saved);
+}
+
+/**
+ * Updates the global revenue coefficient (exclusively called from the authenticated Management Area).
+ * Does not modify any stored RevenueDayRecord in IndexedDB.
+ */
+export async function updateGlobalRevenueCoefficient(
+  newCoefficient: number
+): Promise<ApplicationSettings> {
+  if (!Number.isFinite(newCoefficient) || newCoefficient <= 0 || newCoefficient > 10) {
+    throw new Error('ضریب درآمد باید عددی مثبت و معتبر (مثلاً ۰.۷) باشد.');
+  }
+  const cleanCoeff = Number(newCoefficient.toFixed(4));
+  const saved = await settingsRepository.saveSettings({
+    globalRevenueCoefficient: cleanCoeff
+  });
+  appSettings.set(saved);
+  return saved;
 }
 
 export async function addEmployee(input: {
@@ -384,10 +391,6 @@ export async function toggleEmployeeActive(id: string): Promise<Employee> {
   return updateEmployee(id, { isActive: !target.isActive });
 }
 
-// ============================================================================
-// Purchase Operations (With Sticky Employee Attribution)
-// ============================================================================
-
 export async function addPurchase(data: {
   productName: string;
   quantity: number;
@@ -415,7 +418,6 @@ export async function addPurchase(data: {
     notes: data.notes
   });
 
-  // Persist sticky employee selection
   if (data.employeeId) {
     await settingsRepository.saveSettings({
       lastSelectedEmployeeId: data.employeeId
@@ -505,10 +507,6 @@ export async function addPurchase(data: {
   await loadPurchases(false);
   return purchase;
 }
-
-// ============================================================================
-// Revenue Operations (Daily Total Mode vs. Detailed Entries Mode)
-// ============================================================================
 
 export async function saveDailyTotalRevenue(input: {
   date: string;
@@ -667,10 +665,6 @@ export async function deleteRevenueDayRecord(id: string): Promise<void> {
   await loadPurchases(false);
 }
 
-// ============================================================================
-// Timesheet Operations
-// ============================================================================
-
 export async function addTimesheetEntry(input: {
   employeeId: string;
   date: string;
@@ -794,10 +788,6 @@ export async function deleteTimesheetEntry(id: string): Promise<void> {
   await loadPurchases(false);
 }
 
-// ============================================================================
-// Suppliers, Inventory & Expenses Operations
-// ============================================================================
-
 export async function addSupplier(input: {
   name: string;
   category: string;
@@ -905,27 +895,28 @@ export const recentPurchases = derived(purchases, ($purchases) => {
   return sortPurchasesDescending($purchases).slice(0, 4);
 });
 
+/**
+ * Sanitized public revenue store.
+ * Exposes ONLY the calculated values (`amount`, `todayAmount`, `weekAmount`, `monthAmount`, `totalAmount`)
+ * without exposing actual revenue or the global coefficient.
+ * Automatically updates whenever the manager changes the coefficient or revenue data.
+ */
+export const publicRevenueStore = derived(
+  [revenues, appSettings],
+  ([$revenues, $appSettings]) => {
+    const coeff = $appSettings.globalRevenueCoefficient ?? 0.7;
+    return buildPublicRevenueView($revenues, coeff);
+  }
+);
+
 export const dashboardSummary = derived(
-  [purchases, products, suppliers, inventory, expenses, employees, revenues],
-  ([
-    $purchases,
-    $products,
-    $suppliers,
-    $inventory,
-    $expenses,
-    $employees,
-    $revenues
-  ]) => {
+  [purchases, products, suppliers, inventory, expenses, employees],
+  ([$purchases, $products, $suppliers, $inventory, $expenses, $employees]) => {
     const allPurchaseStats = calculatePurchaseStats($purchases);
     const demoCount = $purchases.filter((p) => p.isDemo).length;
     const realCount = $purchases.length - demoCount;
     const lowStock = getLowStockItems($inventory);
     const totalExpenses = calculateExpensesTotal($expenses);
-    const financial = calculateFinancialOverview({
-      revenues: $revenues,
-      purchases: $purchases,
-      expenses: $expenses
-    });
 
     return {
       totalPurchasesAmount: allPurchaseStats.total,
@@ -939,9 +930,7 @@ export const dashboardSummary = derived(
       activeEmployeesCount: $employees.filter((e) => e.isActive).length,
       lowStockItems: lowStock,
       totalExpenses,
-      combinedOutflow: allPurchaseStats.total + totalExpenses,
-      totalRevenue: financial.totalRevenue,
-      estimatedNetOperatingBalance: financial.estimatedNetOperatingBalance
+      combinedOutflow: allPurchaseStats.total + totalExpenses
     };
   }
 );
