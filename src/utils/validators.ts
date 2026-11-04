@@ -359,6 +359,8 @@ export function validateBackupPayload(raw: unknown): BackupValidationResult {
       ? (data.settings as Partial<ApplicationSettings>)
       : {};
 
+  const parsedGlobalCoeff = Number(rawSettings.globalRevenueCoefficient);
+
   const validatedSettings: ApplicationSettings = {
     ...DEFAULT_SETTINGS,
     ...rawSettings,
@@ -370,6 +372,12 @@ export function validateBackupPayload(raw: unknown): BackupValidationResult {
       typeof rawSettings.lastSelectedEmployeeId === 'string'
         ? rawSettings.lastSelectedEmployeeId
         : '',
+    globalRevenueCoefficient:
+      Number.isFinite(parsedGlobalCoeff) &&
+      parsedGlobalCoeff > 0 &&
+      parsedGlobalCoeff <= 10
+        ? parsedGlobalCoeff
+        : DEFAULT_SETTINGS.globalRevenueCoefficient,
     currency: 'IRT',
     demoSeedInitialized: true
   };
