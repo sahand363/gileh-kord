@@ -1,6 +1,4 @@
-<script lang="ts">
-  import { formatMoney } from '../../utils/formatters';
-
+<script context="module" lang="ts">
   export interface ColumnChartItem {
     id: string;
     label: string;
@@ -9,6 +7,10 @@
     secondaryValue?: number;
     tone?: 'primary' | 'gold' | 'danger';
   }
+</script>
+
+<script lang="ts">
+  import { formatMoney } from '../../utils/formatters';
 
   export let items: ColumnChartItem[] = [];
   export let height: number = 185;
