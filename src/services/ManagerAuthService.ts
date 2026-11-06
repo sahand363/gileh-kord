@@ -6,16 +6,9 @@ import { generateUUID } from '../utils/uuid';
 const MANAGER_AUTH_KEY = 'manager_credentials';
 
 export const isManagerUnlocked = writable<boolean>(false);
-export const isManagerConfigured = writable<boolean>(false);
-export const activeManagerUsername = writable<string>('');
+export const isManagerConfigured = writable<boolean>(true);
+export const activeManagerUsername = writable<string>('admin');
 
-/**
- * HTTP-safe and HTTPS-safe multi-round salted password derivation.
- * Note: Because `crypto.subtle` is disabled by browsers on plain HTTP IP addresses,
- * this deterministic 10,000-round 256-bit mixing function ensures password hashes
- * never store plaintext while working identically across HTTP IP and HTTPS Domain.
- * Real cryptographic protection against local DevTools access requires the future Go backend.
- */
 export function deriveLocalPasswordHash(password: string, salt: string): string {
   const input = `${salt}::gileh_kord_v1::${password}`;
   const state = new Uint32Array([
@@ -64,14 +57,31 @@ export class ManagerAuthService {
     }
   }
 
+  private async saveLocalCache(username: string, password: string): Promise<void> {
+    const salt = generateUUID();
+    const passwordHash = deriveLocalPasswordHash(password, salt);
+    const now = new Date().toISOString();
+    const record: ManagerAuthRecord = {
+      key: MANAGER_AUTH_KEY,
+      username: username.trim(),
+      passwordHash,
+      salt,
+      createdAt: now,
+      updatedAt: now
+    };
+    await dbClient.executeTransaction('manager_auth', 'readwrite', async (stores) => {
+      await requestToPromise(stores['manager_auth'].put(record));
+    });
+  }
+
   public async checkInitialized(): Promise<boolean> {
     const rec = await this.getRecord();
-    const configured = Boolean(rec && rec.username && rec.passwordHash);
-    isManagerConfigured.set(configured);
-    if (rec) {
+    if (rec && rec.username) {
       activeManagerUsername.set(rec.username);
     }
-    return configured;
+    // Master credentials are always available via SSH server config or local fallback
+    isManagerConfigured.set(true);
+    return true;
   }
 
   public async setupInitialAccount(
@@ -92,65 +102,76 @@ export class ManagerAuthService {
       };
     }
 
-    const existing = await this.getRecord();
-    if (existing) {
-      return {
-        success: false,
-        error: 'حساب مدیر قبلاً تنظیم شده است. لطفاً وارد شوید.'
-      };
-    }
-
-    const salt = generateUUID();
-    const passwordHash = deriveLocalPasswordHash(password, salt);
-    const now = new Date().toISOString();
-
-    const record: ManagerAuthRecord = {
-      key: MANAGER_AUTH_KEY,
-      username: cleanUser,
-      passwordHash,
-      salt,
-      createdAt: now,
-      updatedAt: now
-    };
-
-    await dbClient.executeTransaction('manager_auth', 'readwrite', async (stores) => {
-      await requestToPromise(stores['manager_auth'].put(record));
-    });
-
+    await this.saveLocalCache(cleanUser, password);
     isManagerConfigured.set(true);
     activeManagerUsername.set(cleanUser);
     isManagerUnlocked.set(true);
     return { success: true };
   }
 
+  /**
+   * Authenticates against the master username & password configured via SSH (`POST /api/auth/login`),
+   * and falls back to the local IndexedDB hash when offline.
+   */
   public async login(
     username: string,
     password: string
   ): Promise<{ success: boolean; error?: string }> {
+    const cleanUser = username.trim();
+    if (!cleanUser || !password) {
+      return {
+        success: false,
+        error: 'لطفاً نام کاربری و رمز عبور مستر (تنظیم‌شده در SSH) را وارد کنید.'
+      };
+    }
+
+    // 1. Try SSH-configured master credentials on the server first
+    if (typeof fetch !== 'undefined') {
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: cleanUser, password })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data && data.ok) {
+            await this.saveLocalCache(cleanUser, password);
+            activeManagerUsername.set(cleanUser);
+            isManagerUnlocked.set(true);
+            return { success: true };
+          }
+        } else if (res.status === 401) {
+          return {
+            success: false,
+            error: 'نام کاربری یا رمز عبور مستر نادرست است.'
+          };
+        }
+      } catch {
+        // Network offline or dev server: fall through to local IndexedDB verification
+      }
+    }
+
+    // 2. Offline / Local IndexedDB fallback
     const record = await this.getRecord();
-    if (!record) {
-      return {
-        success: false,
-        error: 'حساب مدیر هنوز ایجاد نشده است.'
-      };
-    }
-
-    if (username.trim().toLowerCase() !== record.username.toLowerCase()) {
-      return {
-        success: false,
-        error: 'نام کاربری یا رمز عبور نادرست است.'
-      };
-    }
-
-    const candidateHash = deriveLocalPasswordHash(password, record.salt);
-    if (candidateHash !== record.passwordHash) {
+    if (record) {
+      if (cleanUser.toLowerCase() === record.username.toLowerCase()) {
+        const candidateHash = deriveLocalPasswordHash(password, record.salt);
+        if (candidateHash === record.passwordHash) {
+          activeManagerUsername.set(record.username);
+          isManagerUnlocked.set(true);
+          return { success: true };
+        }
+      }
       return {
         success: false,
         error: 'نام کاربری یا رمز عبور نادرست است.'
       };
     }
 
-    activeManagerUsername.set(record.username);
+    // First-time local offline setup fallback if no server endpoint responded
+    await this.saveLocalCache(cleanUser, password);
+    activeManagerUsername.set(cleanUser);
     isManagerUnlocked.set(true);
     return { success: true };
   }
@@ -160,16 +181,6 @@ export class ManagerAuthService {
     newPassword: string,
     newUsername?: string
   ): Promise<{ success: boolean; error?: string }> {
-    const record = await this.getRecord();
-    if (!record) {
-      return { success: false, error: 'حساب مدیر یافت نشد.' };
-    }
-
-    const currentHash = deriveLocalPasswordHash(currentPassword, record.salt);
-    if (currentHash !== record.passwordHash) {
-      return { success: false, error: 'رمز عبور فعلی نادرست است.' };
-    }
-
     if (!newPassword || newPassword.length < 4) {
       return {
         success: false,
@@ -177,20 +188,17 @@ export class ManagerAuthService {
       };
     }
 
-    const newSalt = generateUUID();
-    const updated: ManagerAuthRecord = {
-      ...record,
-      username: newUsername?.trim() || record.username,
-      salt: newSalt,
-      passwordHash: deriveLocalPasswordHash(newPassword, newSalt),
-      updatedAt: new Date().toISOString()
-    };
+    const record = await this.getRecord();
+    if (record) {
+      const currentHash = deriveLocalPasswordHash(currentPassword, record.salt);
+      if (currentHash !== record.passwordHash) {
+        return { success: false, error: 'رمز عبور فعلی نادرست است.' };
+      }
+    }
 
-    await dbClient.executeTransaction('manager_auth', 'readwrite', async (stores) => {
-      await requestToPromise(stores['manager_auth'].put(updated));
-    });
-
-    activeManagerUsername.set(updated.username);
+    const finalUser = newUsername?.trim() || record?.username || 'admin';
+    await this.saveLocalCache(finalUser, newPassword);
+    activeManagerUsername.set(finalUser);
     return { success: true };
   }
 
