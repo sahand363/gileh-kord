@@ -97,13 +97,10 @@
     onlyReal
   });
 
-  // Manager's Revenue multiplied by 0.6 (displayed as manager's revenue in the frontend)
   $: managerFrontendRevenue = Math.round(
     financialOverview.totalRevenue * frontendMultiplier
   );
 
-  // Proportional Staff Revenue Allocation:
-  // Example: 10 hours worked * 0.6 multiplier = 6 effective hours -> proportional share of revenue
   $: staffAllocations = calculateStaffRevenueAllocations({
     employees: $employees,
     timesheets: $timesheets,
@@ -113,7 +110,6 @@
     onlyReal
   });
 
-  // Column Chart 1: Daily Revenue Column Chart
   $: dailyRevenueColumns = filteredDailyRevenues
     .slice(0, 12)
     .reverse()
@@ -127,7 +123,6 @@
       })
     );
 
-  // Column Chart 2: Each Person's Allocated Revenue in Column Chart Format
   $: staffRevenueColumns = staffAllocations.rows.map(
     (row): ColumnChartItem => ({
       id: row.employee.id,
@@ -162,7 +157,9 @@
     showToast('ضریب نمایش درآمد در فرانت‌اند بروزرسانی شد.');
   }
 
-  async function handleInlineMultiplierChange(empId: string, rawVal: string) {
+  async function handleInlineMultiplierChange(empId: string, event: Event) {
+    const target = event.currentTarget as HTMLInputElement;
+    const rawVal = target?.value || '';
     const val = parseNumericInput(rawVal);
     if (isNaN(val) || val <= 0 || val > 10) {
       showToast('ضریب کارمند باید عددی بزرگ‌تر از صفر باشد.');
@@ -247,7 +244,6 @@
       </div>
     </div>
 
-    <!-- All Hidden Tabs + Settings Nested Under Management -->
     <nav class="manager-subnav" aria-label="بخش‌های پنل مدیریت">
       {#each MANAGER_TABS as tab (tab.id)}
         <button
@@ -263,7 +259,6 @@
     </nav>
 
     {#if $activeManagerTab === 'overview'}
-      <!-- Date Filter Bar -->
       <section class="panel card-pad" style="margin-bottom: 16px;">
         <div class="filters">
           <div class="date-filter">
@@ -314,7 +309,6 @@
         </div>
       </section>
 
-      <!-- Section 1: Revenue Chart & Each Person's Allocated Revenue in Column Chart Format -->
       <div class="two-col-grid" style="margin-bottom: 16px;">
         <section class="panel card-pad">
           <div class="section-heading">
@@ -347,7 +341,6 @@
         </section>
       </div>
 
-      <!-- Staff Multipliers & Proportional Revenue Allocation Table -->
       <section class="panel card-pad" style="margin-bottom: 16px;">
         <div class="section-heading">
           <div>
@@ -392,11 +385,7 @@
                         value={row.multiplier}
                         style="width: 78px; height: 34px; text-align: center; font-weight: 800;"
                         aria-label={`ضریب ${row.employee.name}`}
-                        on:change={(e) =>
-                          handleInlineMultiplierChange(
-                            row.employee.id,
-                            (e.currentTarget as HTMLInputElement).value
-                          )}
+                        on:change={(e) => handleInlineMultiplierChange(row.employee.id, e)}
                       />
                     </td>
                     <td><strong>{formatNumber(row.effectiveHours)} ساعت</strong></td>
@@ -412,7 +401,6 @@
         {/if}
       </section>
 
-      <!-- Separate Section: Multiply Manager's Revenue by 0.6 and Display as Manager's Revenue in Frontend -->
       <section class="panel card-pad coeff-editor-card" style="margin-bottom: 16px;">
         <div class="two-col-grid" style="align-items: center;">
           <div>
@@ -454,7 +442,6 @@
         {/if}
       </section>
 
-      <!-- Full Recorded Revenue List (Inside Management Only) -->
       <section class="panel card-pad">
         <div class="section-heading">
           <h2>ریز درآمدهای ثبت‌شده ({formatNumber(filteredDailyRevenues.length)} روز)</h2>
