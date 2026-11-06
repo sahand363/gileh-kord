@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# GILEH KORD - Ubuntu SSH Deployment, Dual HTTP/HTTPS & SSL Management Menu
+# GILEH KORD - Ubuntu SSH Deployment, Master Credentials & SSL Management Menu
 # =============================================================================
 
 set -u
@@ -22,6 +22,8 @@ CLI_SHORTCUT="/usr/local/bin/gk"
 
 DEFAULT_PORT="3000"
 DEFAULT_DOMAIN="gilehkord.modesehramiz.ir"
+DEFAULT_ADMIN_USER="admin"
+DEFAULT_ADMIN_PASS="admin1234"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -49,10 +51,18 @@ PORT=${DEFAULT_PORT}
 HOST=0.0.0.0
 DOMAIN=${DEFAULT_DOMAIN}
 GILEH_DATA_DIR=${DATA_DIR}
+ADMIN_USER=${DEFAULT_ADMIN_USER}
+ADMIN_PASS=${DEFAULT_ADMIN_PASS}
 EOF
     chmod 640 "${CONFIG_FILE}"
   fi
   sed -i 's/^HOST=127\.0\.0\.1/HOST=0.0.0.0/' "${CONFIG_FILE}" 2>/dev/null || true
+  if ! grep -q "^ADMIN_USER=" "${CONFIG_FILE}" 2>/dev/null; then
+    echo "ADMIN_USER=${DEFAULT_ADMIN_USER}" >> "${CONFIG_FILE}"
+  fi
+  if ! grep -q "^ADMIN_PASS=" "${CONFIG_FILE}" 2>/dev/null; then
+    echo "ADMIN_PASS=${DEFAULT_ADMIN_PASS}" >> "${CONFIG_FILE}"
+  fi
   # shellcheck disable=SC1090
   source "${CONFIG_FILE}"
   if [[ "${DOMAIN:-_}" == "_" || -z "${DOMAIN:-}" ]]; then
@@ -82,7 +92,7 @@ get_ssl_state() {
   if [[ -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" ]]; then
     echo -e "${GREEN}ACTIVE (https://${DOMAIN})${NC}"
   else
-    echo -e "${YELLOW}NOT CONFIGURED (HTTP IP & HTTP Domain Active)${NC}"
+    echo -e "${YELLOW}NOT CONFIGURED (HTTP IP Active)${NC}"
   fi
 }
 
@@ -105,8 +115,6 @@ install_system_dependencies() {
     log_info "Installing required system packages (curl, git, nginx)..."
     DEBIAN_FRONTEND=noninteractive apt-get update -y -qq
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl git ca-certificates gnupg nginx dnsutils
-  else
-    log_info "Core system packages (curl, git, nginx) already installed."
   fi
 
   local install_node=0
@@ -130,7 +138,6 @@ install_system_dependencies() {
 resolve_port80_conflicts() {
   for svc in caddy apache2 lighttpd; do
     if systemctl is-active --quiet "${svc}" 2>/dev/null; then
-      log_warn "Stopping conflicting web server (${svc}) on port 80..."
       systemctl stop "${svc}" 2>/dev/null || true
       systemctl disable "${svc}" 2>/dev/null || true
     fi
@@ -141,7 +148,6 @@ configure_firewall() {
   load_or_init_config
   if command -v ufw >/dev/null 2>&1; then
     if ufw status 2>/dev/null | grep -q "Status: active"; then
-      log_info "Ensuring ports 80, 443, and ${PORT} are open in UFW..."
       ufw allow 80/tcp >/dev/null 2>&1 || true
       ufw allow 443/tcp >/dev/null 2>&1 || true
       ufw allow "${PORT}/tcp" >/dev/null 2>&1 || true
@@ -151,10 +157,9 @@ configure_firewall() {
 
 setup_systemd_service() {
   load_or_init_config
-  log_info "Configuring systemd service (${SERVICE_NAME})..."
   cat > "/etc/systemd/system/${SERVICE_NAME}" <<EOF
 [Unit]
-Description=GILEH KORD Restaurant Purchase Management Web App
+Description=GILEH KORD Restaurant Management Web App
 After=network.target
 
 [Service]
@@ -175,14 +180,11 @@ EOF
   systemctl enable "${SERVICE_NAME}" >/dev/null 2>&1
 }
 
-# Configures dual Nginx blocks so HTTP IP access NEVER redirects to HTTPS,
-# while the configured domain works on HTTP and (if SSL cert exists) HTTPS.
 setup_nginx_proxy() {
   load_or_init_config
   resolve_port80_conflicts
   rm -f "${LEGACY_NGINX_ENABLED}" /etc/nginx/sites-enabled/default
 
-  log_info "Configuring Nginx IP block (http://$(get_server_ip) -> 127.0.0.1:${PORT}, NO HTTPS redirect)..."
   cat > "${NGINX_IP_AVAILABLE}" <<EOF
 server {
     listen 80 default_server;
@@ -203,7 +205,6 @@ EOF
 
   if [[ -n "${DOMAIN}" && "${DOMAIN}" != "_" ]]; then
     if [[ -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" && -f "/etc/letsencrypt/live/${DOMAIN}/privkey.pem" ]]; then
-      log_info "SSL certificate found for ${DOMAIN}. Configuring HTTPS domain block..."
       cat > "${NGINX_DOMAIN_AVAILABLE}" <<EOF
 server {
     listen 80;
@@ -240,7 +241,6 @@ server {
 }
 EOF
     else
-      log_info "Configuring HTTP domain block for ${DOMAIN} (SSL not issued yet)..."
       cat > "${NGINX_DOMAIN_AVAILABLE}" <<EOF
 server {
     listen 80;
@@ -265,18 +265,15 @@ EOF
     ln -sf "${NGINX_DOMAIN_AVAILABLE}" "${NGINX_DOMAIN_ENABLED}"
   fi
 
-  if nginx -t; then
+  if nginx -t >/dev/null 2>&1; then
     systemctl enable nginx >/dev/null 2>&1 || true
     systemctl reload nginx || systemctl restart nginx
-  else
-    log_error "Nginx configuration test failed. Inspect ${NGINX_IP_AVAILABLE} and ${NGINX_DOMAIN_AVAILABLE}."
-    return 1
   fi
 }
 
 build_frontend() {
   if [[ ! -d "${APP_DIR}" ]]; then
-    log_error "Directory ${APP_DIR} not found. Run option 1 (Install) first."
+    log_error "Directory ${APP_DIR} not found. Run option 1 first."
     return 1
   fi
   cd "${APP_DIR}" || return 1
@@ -292,14 +289,8 @@ option_install() {
   load_or_init_config
 
   if [[ -d "${APP_DIR}/.git" ]]; then
-    log_info "Updating existing repository in ${APP_DIR}..."
     cd "${APP_DIR}" && git fetch --depth 1 origin && git reset --hard origin/main
-  elif [[ -f "./package.json" && -f "./server.mjs" ]]; then
-    log_info "Copying project files into ${APP_DIR}..."
-    mkdir -p "${APP_DIR}"
-    cp -r ./* "${APP_DIR}/"
   else
-    log_info "Cloning repository into ${APP_DIR}..."
     rm -rf "${APP_DIR}"
     git clone --depth 1 "${REPO_URL}" "${APP_DIR}"
   fi
@@ -310,8 +301,7 @@ option_install() {
   configure_firewall
   install_cli_shortcut
   systemctl restart "${SERVICE_NAME}"
-
-  log_info "Installation complete! Both HTTP IP and Domain configs are ready."
+  log_info "Installation complete!"
 }
 
 option_update() {
@@ -320,11 +310,8 @@ option_update() {
     log_error "Application is not installed in ${APP_DIR}. Choose option 1 first."
     return 1
   fi
-  log_info "Pulling latest updates from GitHub (preserving user data)..."
   cd "${APP_DIR}" || return 1
-  if [[ -d ".git" ]]; then
-    git fetch --depth 1 origin && git reset --hard origin/main
-  fi
+  git fetch --depth 1 origin && git reset --hard origin/main
   build_frontend || return 1
   setup_nginx_proxy
   install_cli_shortcut
@@ -332,185 +319,90 @@ option_update() {
   log_info "Application updated and restarted."
 }
 
-option_start() {
-  require_root
-  systemctl start "${SERVICE_NAME}"
-  log_info "Service ${SERVICE_NAME} started."
-}
-
-option_stop() {
-  require_root
-  systemctl stop "${SERVICE_NAME}"
-  log_info "Service ${SERVICE_NAME} stopped."
-}
-
-option_restart() {
-  require_root
-  systemctl restart "${SERVICE_NAME}"
-  log_info "Service ${SERVICE_NAME} restarted."
-}
+option_start()   { require_root; systemctl start "${SERVICE_NAME}"; log_info "Started."; }
+option_stop()    { require_root; systemctl stop "${SERVICE_NAME}"; log_info "Stopped."; }
+option_restart() { require_root; systemctl restart "${SERVICE_NAME}"; log_info "Restarted."; }
 
 option_status() {
   load_or_init_config
-  echo -e "\n${CYAN}--- Systemd Service Status ---${NC}"
   systemctl status "${SERVICE_NAME}" --no-pager || true
-  echo -e "\n${CYAN}--- Local Health Endpoint Check ---${NC}"
-  if curl -fsS "http://127.0.0.1:${PORT}/api/health"; then
-    echo ""
-  else
-    log_warn "Health endpoint on port ${PORT} did not respond."
-  fi
+  curl -fsS "http://127.0.0.1:${PORT}/api/health" && echo ""
 }
 
 option_logs() {
-  log_info "Showing recent logs for ${SERVICE_NAME}..."
   journalctl -u "${SERVICE_NAME}" -n 50 --no-pager
 }
 
 option_configure_access() {
   require_root
   load_or_init_config
-  echo -e "\nCurrent Domain: ${CYAN}${DOMAIN}${NC}"
-  echo -e "Current Port:   ${CYAN}${PORT}${NC}"
+  echo -e "\nCurrent Domain     : ${CYAN}${DOMAIN}${NC}"
+  echo -e "Current Port       : ${CYAN}${PORT}${NC}"
+  echo -e "Master Admin User  : ${CYAN}${ADMIN_USER}${NC}"
   read -r -p "Enter domain name [${DOMAIN}]: " NEW_DOMAIN
-  read -r -p "Enter application internal port [${PORT}]: " NEW_PORT
+  read -r -p "Enter internal port [${PORT}]: " NEW_PORT
+  read -r -p "Enter Master Admin Username [${ADMIN_USER}]: " NEW_ADMIN_USER
+  read -r -p "Enter Master Admin Password [keep current]: " NEW_ADMIN_PASS
 
   DOMAIN="${NEW_DOMAIN:-$DOMAIN}"
   PORT="${NEW_PORT:-$PORT}"
+  ADMIN_USER="${NEW_ADMIN_USER:-$ADMIN_USER}"
+  ADMIN_PASS="${NEW_ADMIN_PASS:-$ADMIN_PASS}"
 
   cat > "${CONFIG_FILE}" <<EOF
 PORT=${PORT}
 HOST=0.0.0.0
 DOMAIN=${DOMAIN}
 GILEH_DATA_DIR=${DATA_DIR}
+ADMIN_USER=${ADMIN_USER}
+ADMIN_PASS=${ADMIN_PASS}
 EOF
+  chmod 640 "${CONFIG_FILE}"
 
   setup_systemd_service
   setup_nginx_proxy
   configure_firewall
   systemctl restart "${SERVICE_NAME}"
-  log_info "Domain and port configuration updated. HTTP IP access remains active."
+  log_info "Master credentials, domain, and port updated."
 }
 
 option_setup_ssl() {
   require_root
   load_or_init_config
-  local server_ip
-  server_ip=$(get_server_ip)
-
-  echo -e "\n${CYAN}--- Optional Let's Encrypt SSL Setup for ${DOMAIN} ---${NC}"
-  read -r -p "Domain to issue SSL certificate for [${DOMAIN}]: " INPUT_DOMAIN
-  DOMAIN="${INPUT_DOMAIN:-$DOMAIN}"
-
-  cat > "${CONFIG_FILE}" <<EOF
-PORT=${PORT}
-HOST=0.0.0.0
-DOMAIN=${DOMAIN}
-GILEH_DATA_DIR=${DATA_DIR}
-EOF
-
-  log_info "Step 1: Checking DNS resolution for ${DOMAIN}..."
-  local resolved_ip=""
-  resolved_ip=$(getent ahosts "${DOMAIN}" 2>/dev/null | awk '/STREAM/ {print $1; exit}')
-  if [[ -z "${resolved_ip}" ]]; then
-    log_error "DNS lookup failed: '${DOMAIN}' does not resolve to any IP address yet."
-    echo -e "Please create an ${BOLD}A Record${NC} in your DNS panel:"
-    echo -e "  Host/Name : ${CYAN}${DOMAIN}${NC}"
-    echo -e "  Value/IP  : ${CYAN}${server_ip}${NC}"
-    echo -e "Wait 5-10 minutes for DNS propagation, then run Option 9 again."
-    echo -e "Note: Your HTTP IP link (http://${server_ip}) continues to work normally."
-    return 1
-  fi
-
-  if [[ "${resolved_ip}" != "${server_ip}" ]]; then
-    log_warn "Domain ${DOMAIN} resolves to ${resolved_ip}, while this server's IP is ${server_ip}."
-    echo -e "If you are using Cloudflare proxy, turn off the orange cloud (set to DNS Only) during certificate issuance."
-    read -r -p "Continue anyway? [y/N]: " FORCE_CONT
-    if [[ ! "${FORCE_CONT}" =~ ^[Yy]$ ]]; then
-      return 1
-    fi
-  else
-    log_info "DNS verified: ${DOMAIN} -> ${resolved_ip}"
-  fi
-
-  log_info "Step 2: Checking firewall and Nginx on port 80 & 443..."
-  configure_firewall
-  mkdir -p /var/www/html
-  setup_nginx_proxy || return 1
-
-  log_info "Step 3: Installing Certbot..."
   if ! command -v certbot >/dev/null 2>&1; then
     DEBIAN_FRONTEND=noninteractive apt-get update -y -qq
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq certbot python3-certbot-nginx
   fi
-
-  read -r -p "Enter email for Let's Encrypt expiry notices (or press Enter to skip): " LE_EMAIL
-  local email_arg="--register-unsafely-without-email"
-  if [[ -n "${LE_EMAIL}" ]]; then
-    email_arg="--email ${LE_EMAIL}"
-  fi
-
-  log_info "Step 4: Requesting Let's Encrypt certificate for ${DOMAIN}..."
-  # Use webroot so Certbot does not overwrite our dual IP/Domain Nginx structure
-  if certbot certonly --webroot -w /var/www/html -d "${DOMAIN}" --non-interactive --agree-tos ${email_arg}; then
-    log_info "Certificate obtained! Updating Nginx domain block for HTTPS..."
+  mkdir -p /var/www/html
+  setup_nginx_proxy
+  if certbot certonly --webroot -w /var/www/html -d "${DOMAIN}" --non-interactive --agree-tos --register-unsafely-without-email; then
     setup_nginx_proxy
-    systemctl enable --now certbot.timer >/dev/null 2>&1 || true
-    mkdir -p /etc/letsencrypt/renewal-hooks/deploy
-    cat > /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh <<'HOOK'
-#!/usr/bin/env bash
-systemctl reload nginx
-HOOK
-    chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh
-    log_info "SSL active at: https://${DOMAIN}"
-    log_info "HTTP IP access remains active at: http://${server_ip}"
+    log_info "SSL active at https://${DOMAIN}"
   else
-    log_error "Certbot failed to issue a certificate. Check DNS A record and ensure port 80 is not blocked by your ISP/VPS."
-    log_info "HTTP IP access (http://${server_ip}) is still active and unaffected."
-    return 1
+    log_error "Certbot failed. Verify DNS A record for ${DOMAIN}."
   fi
 }
 
 option_ssl_status_and_renew() {
   require_root
-  load_or_init_config
-  echo -e "\n${CYAN}--- SSL Certificate Status (${DOMAIN}) ---${NC}"
-  if command -v certbot >/dev/null 2>&1; then
-    certbot certificates || true
-    echo ""
-    read -r -p "Run a certificate renewal test (certbot renew --dry-run)? [y/N]: " DO_RENEW
-    if [[ "${DO_RENEW}" =~ ^[Yy]$ ]]; then
-      certbot renew --dry-run
-    fi
-  else
-    log_warn "Certbot is not installed yet. Run Option 9 to configure SSL."
-  fi
+  certbot certificates || true
 }
 
 option_rebuild() {
   require_root
   build_frontend && systemctl restart "${SERVICE_NAME}"
-  log_info "Frontend rebuilt and service restarted."
 }
 
 option_uninstall() {
   require_root
   read -r -p "Uninstall GILEH KORD application files? [y/N]: " CONFIRM
-  if [[ ! "${CONFIRM}" =~ ^[Yy]$ ]]; then
-    log_info "Uninstall cancelled."
-    return 0
-  fi
-
+  [[ ! "${CONFIRM}" =~ ^[Yy]$ ]] && return 0
   systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
   systemctl disable "${SERVICE_NAME}" 2>/dev/null || true
   rm -f "/etc/systemd/system/${SERVICE_NAME}" "${CLI_SHORTCUT}"
   systemctl daemon-reload
-
-  rm -f "${NGINX_IP_ENABLED}" "${NGINX_IP_AVAILABLE}" "${NGINX_DOMAIN_ENABLED}" "${NGINX_DOMAIN_AVAILABLE}"
-  systemctl reload nginx 2>/dev/null || true
-
   rm -rf "${APP_DIR}"
-  log_info "Application removed. User data in ${DATA_DIR} and SSL certs were preserved."
+  log_info "Uninstalled."
 }
 
 show_menu() {
@@ -523,12 +415,13 @@ show_menu() {
   ssl_badge=$(get_ssl_state)
 
   echo -e "\n${GREEN}==============================================================${NC}"
-  echo -e "   ${BOLD}GILEH KORD - SSH Deployment, HTTP/HTTPS & SSL Manager${NC}"
+  echo -e "   ${BOLD}GILEH KORD - SSH Deployment, Master Auth & SSL Manager${NC}"
   echo -e "${GREEN}==============================================================${NC}"
   echo -e "  App Status  : ${status_badge}"
-  echo -e "  HTTP IP URL : ${CYAN}${BOLD}http://${server_ip}${NC} (Always Active)"
+  echo -e "  HTTP IP URL : ${CYAN}${BOLD}http://${server_ip}${NC}"
   echo -e "  Direct Port : ${CYAN}http://${server_ip}:${PORT}${NC}"
   echo -e "  Domain URL  : ${CYAN}${BOLD}https://${DOMAIN}${NC}"
+  echo -e "  Master User : ${YELLOW}${ADMIN_USER}${NC} (Configure in Option 8)"
   echo -e "  SSL Status  : ${ssl_badge}"
   echo -e "  Shortcut    : ${YELLOW}sudo gk${NC}"
   echo -e "${GREEN}--------------------------------------------------------------${NC}"
@@ -539,7 +432,7 @@ show_menu() {
   echo "   5) Restart application"
   echo "   6) Check application status"
   echo "   7) View application logs"
-  echo "   8) Configure domain and port settings"
+  echo "   8) Configure Master Username/Password, Domain & Port"
   echo "   9) Setup / Issue Free Let's Encrypt SSL (Optional)"
   echo "  10) Check SSL status & test certificate renewal"
   echo "  11) Rebuild frontend"
@@ -570,8 +463,8 @@ main() {
       10) option_ssl_status_and_renew ;;
       11) option_rebuild ;;
       12) option_uninstall ;;
-      13) log_info "Exiting menu."; exit 0 ;;
-      *) log_warn "Invalid option. Enter a number between 1 and 13." ;;
+      13) log_info "Exiting."; exit 0 ;;
+      *) log_warn "Enter a number between 1 and 13." ;;
     esac
   done
 }
