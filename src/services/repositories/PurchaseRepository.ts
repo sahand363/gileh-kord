@@ -17,6 +17,19 @@ export interface CreatePurchaseInput {
   notes?: string;
 }
 
+export interface UpdatePurchaseInput {
+  productName: string;
+  quantity: number;
+  unit: string;
+  totalAmount: number;
+  purchaseDate: string;
+  employeeId?: string;
+  employeeNameSnapshot?: string;
+  supplierName?: string;
+  invoiceNumber?: string;
+  notes?: string;
+}
+
 export class PurchaseRepository {
   public async getAll(): Promise<Purchase[]> {
     return dbClient.executeTransaction('purchases', 'readonly', async (stores) => {
@@ -123,6 +136,94 @@ export class PurchaseRepository {
         await requestToPromise(purchaseStore.add(newPurchase));
 
         return { purchase: newPurchase, product: updatedProduct };
+      }
+    );
+  }
+
+  public async updatePurchase(
+    id: string,
+    updates: UpdatePurchaseInput
+  ): Promise<Purchase> {
+    const cleanName = updates.productName.trim().replace(/\s+/g, ' ');
+    const normalizedKey = normalizeProductKey(cleanName);
+    const now = new Date().toISOString();
+
+    return dbClient.executeTransaction(
+      ['purchases', 'products'],
+      'readwrite',
+      async (stores) => {
+        const purchaseStore = stores['purchases'];
+        const productStore = stores['products'];
+
+        const existing = (await requestToPromise(
+          purchaseStore.get(id)
+        )) as Purchase | undefined;
+        if (!existing) {
+          throw new Error('فاکتور خرید مورد نظر یافت نشد.');
+        }
+
+        const allProducts = (await requestToPromise(
+          productStore.getAll()
+        )) as Product[];
+        let targetProduct =
+          allProducts.find(
+            (p) => (p.normalizedName || normalizeProductKey(p.name)) === normalizedKey
+          ) || null;
+
+        if (targetProduct) {
+          const isNewerOrSame =
+            updates.purchaseDate >= targetProduct.lastPurchaseDate;
+          targetProduct = {
+            ...targetProduct,
+            lastUnit: isNewerOrSame ? updates.unit : targetProduct.lastUnit,
+            lastPrice: isNewerOrSame
+              ? Math.round(updates.totalAmount)
+              : targetProduct.lastPrice,
+            lastPurchaseDate: isNewerOrSame
+              ? updates.purchaseDate
+              : targetProduct.lastPurchaseDate,
+            isDemo: false
+          };
+          await requestToPromise(productStore.put(targetProduct));
+        } else {
+          targetProduct = {
+            id: generateId('prod'),
+            name: cleanName,
+            normalizedName: normalizedKey,
+            lastUnit: updates.unit,
+            lastPrice: Math.round(updates.totalAmount),
+            lastPurchaseDate: updates.purchaseDate,
+            totalPurchasesCount: 1,
+            isDemo: false
+          };
+          await requestToPromise(productStore.put(targetProduct));
+        }
+
+        const updatedPurchase: Purchase = {
+          ...existing,
+          productId: targetProduct.id,
+          productName: cleanName,
+          quantity: updates.quantity,
+          unit: updates.unit,
+          totalAmount: Math.round(updates.totalAmount),
+          purchaseDate: updates.purchaseDate,
+          employeeId:
+            updates.employeeId !== undefined
+              ? updates.employeeId.trim() || undefined
+              : existing.employeeId,
+          employeeNameSnapshot:
+            updates.employeeNameSnapshot !== undefined
+              ? updates.employeeNameSnapshot.trim() || undefined
+              : existing.employeeNameSnapshot,
+          supplierName: updates.supplierName?.trim() || undefined,
+          invoiceNumber: updates.invoiceNumber?.trim() || undefined,
+          notes: updates.notes?.trim() || undefined,
+          isDemo: false,
+          updatedAt: now
+        };
+
+        await requestToPromise(purchaseStore.put(updatedPurchase));
+        return updatedPurchase;
       }
     );
   }
