@@ -5,7 +5,8 @@ import type {
   Purchase,
   PurchaseFilterCriteria,
   PurchaseSummaryStats,
-  RevenueDayRecord
+  RevenueDayRecord,
+  TimesheetEntry
 } from '../models/types';
 import { getTodayISODate } from './formatters';
 import { getJalaliYearMonthKey } from './jalali';
@@ -62,8 +63,14 @@ export function calculatePurchaseStats(items: Purchase[]): PurchaseSummaryStats 
   return { count, total, average };
 }
 
+/**
+ * Only returns items where the user has explicitly checked `alertEnabled`
+ * and currentStock <= minStockThreshold.
+ */
 export function getLowStockItems(inventory: InventoryItem[]): InventoryItem[] {
-  return inventory.filter((item) => item.currentStock <= item.minStockThreshold);
+  return inventory.filter(
+    (item) => Boolean(item.alertEnabled) && item.currentStock <= item.minStockThreshold
+  );
 }
 
 export function calculateExpensesTotal(expenses: Expense[]): number {
@@ -237,10 +244,6 @@ export function compareEmployeePurchaseTotals(
   return result.sort((a, b) => b.totalAmount - a.totalAmount);
 }
 
-/**
- * Returns the raw actual single-source revenue amount for a given day record.
- * Never modifies the stored record.
- */
 export function getEffectiveDayRevenue(record: RevenueDayRecord): number {
   if (!record) return 0;
   if (record.mode === 'detailed') {
@@ -252,15 +255,12 @@ export function getEffectiveDayRevenue(record: RevenueDayRecord): number {
   return Number(record.dailyTotalAmount) || 0;
 }
 
-/**
- * Returns the coefficient-adjusted revenue for a given day record without mutating the record.
- */
 export function getAdjustedDayRevenue(
   record: RevenueDayRecord,
   coefficient: number
 ): number {
   const safeCoeff =
-    Number.isFinite(coefficient) && coefficient > 0 ? coefficient : 0.7;
+    Number.isFinite(coefficient) && coefficient > 0 ? coefficient : 0.6;
   return Math.round(getEffectiveDayRevenue(record) * safeCoeff);
 }
 
@@ -293,12 +293,99 @@ export function calculateAdjustedRevenueTotal(
   return records.reduce((sum, r) => sum + getAdjustedDayRevenue(r, coefficient), 0);
 }
 
+export interface StaffRevenueAllocationRow {
+  employee: Employee;
+  rawMinutes: number;
+  rawHours: number;
+  multiplier: number;
+  effectiveHours: number; // e.g., 10 hours * 0.6 = 6 hours
+  shareRatio: number;
+  allocatedRevenue: number;
+}
+
+/**
+ * Allocates total revenue to each staff member proportionally based on their
+ * individual multiplier: Effective Hours = Worked Hours * Multiplier.
+ * Example: 10 hours worked with 0.6 multiplier = 6 effective hours.
+ */
+export function calculateStaffRevenueAllocations(params: {
+  employees: Employee[];
+  timesheets: TimesheetEntry[];
+  totalRevenue: number;
+  dateFrom?: string;
+  dateTo?: string;
+  onlyReal?: boolean;
+}): {
+  totalRawHours: number;
+  totalEffectiveHours: number;
+  rows: StaffRevenueAllocationRow[];
+} {
+  const from = params.dateFrom?.trim() || '';
+  const to = params.dateTo?.trim() || '';
+
+  const draft = params.employees.map((emp) => {
+    const empShifts = params.timesheets.filter((t) => {
+      if (t.employeeId !== emp.id) return false;
+      if (params.onlyReal && t.isDemo) return false;
+      if (from && t.date < from) return false;
+      if (to && t.date > to) return false;
+      return true;
+    });
+
+    const rawMinutes = empShifts.reduce((s, t) => s + (Number(t.netMinutes) || 0), 0);
+    const rawHours = Number((rawMinutes / 60).toFixed(2));
+    const multiplier =
+      Number.isFinite(emp.performanceCoefficient) && emp.performanceCoefficient >= 0
+        ? emp.performanceCoefficient
+        : 1.0;
+    const effectiveHours = Number((rawHours * multiplier).toFixed(2));
+
+    return {
+      employee: emp,
+      rawMinutes,
+      rawHours,
+      multiplier,
+      effectiveHours
+    };
+  });
+
+  const totalRawHours = Number(
+    draft.reduce((s, r) => s + r.rawHours, 0).toFixed(2)
+  );
+  const totalEffectiveHours = Number(
+    draft.reduce((s, r) => s + r.effectiveHours, 0).toFixed(2)
+  );
+
+  const rows: StaffRevenueAllocationRow[] = draft.map((r) => {
+    const shareRatio =
+      totalEffectiveHours > 0 ? r.effectiveHours / totalEffectiveHours : 0;
+    const allocatedRevenue =
+      totalEffectiveHours > 0 ? Math.round(params.totalRevenue * shareRatio) : 0;
+    return {
+      ...r,
+      shareRatio,
+      allocatedRevenue
+    };
+  });
+
+  return {
+    totalRawHours,
+    totalEffectiveHours,
+    rows
+  };
+}
+
 export interface PublicRevenueViewData {
   todayAmount: number;
   weekAmount: number;
   monthAmount: number;
   totalAmount: number;
   daysCount: number;
+  recentDates: Array<{
+    id: string;
+    date: string;
+    isDemo?: boolean;
+  }>;
   dailySeries: Array<{
     id: string;
     date: string;
@@ -312,13 +399,9 @@ export interface PublicRevenueViewData {
   }>;
 }
 
-/**
- * Builds the sanitized public revenue dataset containing ONLY coefficient-adjusted values
- * labeled simply as `amount`. Never exposes raw revenue or the coefficient value.
- */
 export function buildPublicRevenueView(
   records: RevenueDayRecord[],
-  coefficient: number,
+  coefficient: number = 0.6,
   dateFrom?: string,
   dateTo?: string
 ): PublicRevenueViewData {
@@ -343,6 +426,12 @@ export function buildPublicRevenueView(
     coefficient
   );
   const totalAmount = calculateAdjustedRevenueTotal(filtered, coefficient);
+
+  const recentDates = filtered.slice(0, 14).map((r) => ({
+    id: r.id,
+    date: r.date,
+    isDemo: r.isDemo
+  }));
 
   const dailySeries = filtered.slice(0, 14).map((r) => ({
     id: r.id,
@@ -371,6 +460,7 @@ export function buildPublicRevenueView(
     monthAmount,
     totalAmount,
     daysCount: filtered.length,
+    recentDates,
     dailySeries,
     monthlySeries
   };
@@ -401,7 +491,7 @@ export function calculateFinancialOverview(params: {
   const coeff =
     params.coefficient !== undefined && params.coefficient > 0
       ? params.coefficient
-      : 0.7;
+      : 0.6;
 
   const filteredRevenues = filterRevenueRecords(
     params.revenues,
