@@ -255,15 +255,11 @@ export async function setStickyEmployeeId(employeeId: string): Promise<void> {
   appSettings.set(saved);
 }
 
-/**
- * Updates the global revenue coefficient (exclusively called from the authenticated Management Area).
- * Does not modify any stored RevenueDayRecord in IndexedDB.
- */
 export async function updateGlobalRevenueCoefficient(
   newCoefficient: number
 ): Promise<ApplicationSettings> {
   if (!Number.isFinite(newCoefficient) || newCoefficient <= 0 || newCoefficient > 10) {
-    throw new Error('ضریب درآمد باید عددی مثبت و معتبر (مثلاً ۰.۷) باشد.');
+    throw new Error('ضریب باید عددی مثبت و معتبر (مثلاً ۰.۶) باشد.');
   }
   const cleanCoeff = Number(newCoefficient.toFixed(4));
   const saved = await settingsRepository.saveSettings({
@@ -288,7 +284,7 @@ export async function addEmployee(input: {
   }
 
   const coeff = Number(input.performanceCoefficient);
-  const validCoeff = Number.isFinite(coeff) && coeff > 0 ? Number(coeff.toFixed(2)) : 1.0;
+  const validCoeff = Number.isFinite(coeff) && coeff > 0 ? Number(coeff.toFixed(2)) : 0.6;
   const now = new Date().toISOString();
 
   const emp: Employee = {
@@ -496,6 +492,7 @@ export async function addPurchase(data: {
             currentStock: data.quantity,
             minStockThreshold: Math.max(1, Math.round(data.quantity * 0.25)),
             unit: data.unit,
+            alertEnabled: false,
             lastUpdated: data.purchaseDate,
             isDemo: false
           })
@@ -506,6 +503,40 @@ export async function addPurchase(data: {
 
   await loadPurchases(false);
   return purchase;
+}
+
+export async function updatePurchase(
+  id: string,
+  data: {
+    productName: string;
+    quantity: number;
+    unit: string;
+    price: number;
+    purchaseDate: string;
+    employeeId?: string;
+    supplier?: string;
+    invoice?: string;
+    notes?: string;
+  }
+): Promise<Purchase> {
+  const empMap = get(employeeByIdMap);
+  const selectedEmp = data.employeeId ? empMap.get(data.employeeId) : undefined;
+
+  const updated = await purchaseRepository.updatePurchase(id, {
+    productName: data.productName,
+    quantity: data.quantity,
+    unit: data.unit,
+    totalAmount: data.price,
+    purchaseDate: data.purchaseDate,
+    employeeId: data.employeeId,
+    employeeNameSnapshot: selectedEmp?.name,
+    supplierName: data.supplier,
+    invoiceNumber: data.invoice,
+    notes: data.notes
+  });
+
+  await loadPurchases(false);
+  return updated;
 }
 
 export async function saveDailyTotalRevenue(input: {
@@ -835,12 +866,31 @@ export async function updateInventoryStock(
   await loadPurchases(false);
 }
 
+export async function toggleInventoryAlert(
+  id: string,
+  enabled: boolean
+): Promise<void> {
+  await dbClient.executeTransaction('inventory', 'readwrite', async (stores) => {
+    const existing = (await requestToPromise(
+      stores['inventory'].get(id)
+    )) as InventoryItem | undefined;
+    if (!existing) return;
+    const updated: InventoryItem = {
+      ...existing,
+      alertEnabled: enabled
+    };
+    await requestToPromise(stores['inventory'].put(updated));
+  });
+  await loadPurchases(false);
+}
+
 export async function addInventoryItem(input: {
   productName: string;
   category: string;
   currentStock: number;
   minStockThreshold: number;
   unit: string;
+  alertEnabled?: boolean;
 }): Promise<void> {
   const item: InventoryItem = {
     id: generateId('inv'),
@@ -849,6 +899,7 @@ export async function addInventoryItem(input: {
     currentStock: input.currentStock,
     minStockThreshold: input.minStockThreshold,
     unit: input.unit,
+    alertEnabled: Boolean(input.alertEnabled),
     lastUpdated: getTodayISODate(),
     isDemo: false
   };
@@ -895,16 +946,10 @@ export const recentPurchases = derived(purchases, ($purchases) => {
   return sortPurchasesDescending($purchases).slice(0, 4);
 });
 
-/**
- * Sanitized public revenue store.
- * Exposes ONLY the calculated values (`amount`, `todayAmount`, `weekAmount`, `monthAmount`, `totalAmount`)
- * without exposing actual revenue or the global coefficient.
- * Automatically updates whenever the manager changes the coefficient or revenue data.
- */
 export const publicRevenueStore = derived(
   [revenues, appSettings],
   ([$revenues, $appSettings]) => {
-    const coeff = $appSettings.globalRevenueCoefficient ?? 0.7;
+    const coeff = $appSettings.globalRevenueCoefficient ?? 0.6;
     return buildPublicRevenueView($revenues, coeff);
   }
 );
