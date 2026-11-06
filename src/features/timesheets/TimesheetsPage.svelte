@@ -20,7 +20,6 @@
   import {
     calculateEmployeeTimesheetSummary,
     calculateShiftDuration,
-    compareShiftWithExpectedSchedule,
     findOverlappingShift,
     formatMinutesToPersianHours
   } from '../../utils/timesheetUtils';
@@ -40,7 +39,6 @@
   let editReason = '';
   let formError = '';
 
-  // Filters for attendance list & analytics
   let filterEmployeeId = '';
   let filterDateFrom = '';
   let filterDateTo = '';
@@ -113,7 +111,7 @@
 
     if (overlapWarning) {
       const proceed = window.confirm(
-        `هشدار تداخل شیفت: برای این کارمند در تاریخ ${toJalaliDate(workDate)} شیفت دیگری (${overlapWarning.clockIn} تا ${overlapWarning.clockOut}) ثبت شده است. آیا مایل به ثبت این شیفت هستید؟`
+        `برای این کارمند در تاریخ ${toJalaliDate(workDate)} شیفت دیگری (${overlapWarning.clockIn} تا ${overlapWarning.clockOut}) ثبت شده است. ثبت شود؟`
       );
       if (!proceed) return;
     }
@@ -128,7 +126,7 @@
           notes,
           editReason
         });
-        showToast('ساعت کاری کارمند اصلاح شد و در تاریخچه ویرایش ثبت گردید.');
+        showToast('ساعت کاری اصلاح شد.');
         cancelEditShift();
       } else {
         await addTimesheetEntry({
@@ -141,7 +139,7 @@
           notes
         });
         notes = '';
-        showToast('ساعت ورود و خروج کارمند با موفقیت ثبت شد.');
+        showToast('ساعت کاری ثبت شد.');
       }
     } catch (err) {
       formError =
@@ -152,35 +150,26 @@
   async function handleDeleteShift(entry: TimesheetEntry) {
     const empName = $employeeByIdMap.get(entry.employeeId)?.name || 'کارمند';
     const confirmed = window.confirm(
-      `آیا از حذف رکورد ساعت کاری «${empName}» در تاریخ ${toJalaliDate(entry.date)} مطمئن هستید؟`
+      `حذف رکورد ساعت کاری «${empName}» در تاریخ ${toJalaliDate(entry.date)}؟`
     );
     if (!confirmed) return;
     await deleteTimesheetEntry(entry.id);
-    showToast('رکورد حضور و غیاب حذف شد.');
+    showToast('رکورد حذف شد.');
   }
 </script>
 
 <section class="page active" aria-labelledby="timesheetsTitle">
   <div class="page-heading">
-    <div>
-      <p class="eyebrow">حضور و غیاب، شیفت‌های کاری و مقایسه با برنامه مورد انتظار</p>
-      <h1 id="timesheetsTitle">تایم‌شیت و ساعت کار کارکنان</h1>
-      <p class="subheading">
-        ثبت ساعت ورود، خروج و استراحت روزانه کارکنان به تاریخ شمسی با پشتیبانی از شیفت‌های شبانه (عبوری از نیمه‌شب).
-      </p>
-    </div>
+    <h1 id="timesheetsTitle">تایم‌شیت</h1>
   </div>
 
   <div class="entry-layout">
     <section class="panel form-panel">
       <div class="section-heading">
-        <div>
-          <h2>{editingEntryId ? 'اصلاح رکورد ساعت کاری' : 'ثبت ورود و خروج جدید'}</h2>
-          <p>ساعت را به فرمت ۲۴ ساعته (مثلاً 08:00 تا 17:30) وارد کنید</p>
-        </div>
+        <h2>{editingEntryId ? 'اصلاح ساعت کاری' : 'ثبت ساعت کاری'}</h2>
         {#if editingEntryId}
           <button type="button" class="quiet-btn" on:click={cancelEditShift}>
-            انصراف از ویرایش
+            انصراف
           </button>
         {/if}
       </div>
@@ -188,7 +177,7 @@
       <form on:submit|preventDefault={handleSubmitTimesheet} novalidate>
         <div class="field-row">
           <div class="field">
-            <label for="tsEmployee">انتخاب کارمند <b class="required">*</b></label>
+            <label for="tsEmployee">کارمند <b class="required">*</b></label>
             <select
               id="tsEmployee"
               bind:value={employeeId}
@@ -197,14 +186,14 @@
             >
               {#each $employees as emp (emp.id)}
                 <option value={emp.id}>
-                  {emp.name} ({emp.role}) {!emp.isActive ? '— غیرفعال' : ''}
+                  {emp.name} {!emp.isActive ? '(غیرفعال)' : ''}
                 </option>
               {/each}
             </select>
           </div>
 
           <div class="field">
-            <label for="tsDate">تاریخ کاری (شمسی)</label>
+            <label for="tsDate">تاریخ</label>
             <JalaliDatePicker
               id="tsDate"
               bind:value={workDate}
@@ -240,12 +229,12 @@
 
         <div class="field-row">
           <div class="field">
-            <label for="tsBreak">مدت استراحت (دقیقه)</label>
+            <label for="tsBreak">استراحت (دقیقه)</label>
             <input
               id="tsBreak"
               inputmode="numeric"
               bind:value={breakMinutes}
-              placeholder="مثلاً ۶۰"
+              placeholder="۶۰"
             />
           </div>
           <div class="field" style="display: flex; align-items: center; padding-top: 22px;">
@@ -255,7 +244,7 @@
                 bind:checked={allowOvernight}
                 style="width: 18px; height: 18px;"
               />
-              <span>شیفت شبانه (خروج پس از نیمه‌شب)</span>
+              <span>شیفت شبانه</span>
             </label>
           </div>
         </div>
@@ -263,37 +252,22 @@
         {#if livePreview.isValid}
           <div class="demo-banner-box" style="margin-bottom: 14px; background: #eef5f0; border-color: #cfe0d4; color: #173d32;">
             <span>
-              <strong>محاسبه خودکار کارکرد خالص:</strong>
+              <strong>کارکرد خالص:</strong>
               {formatMinutesToPersianHours(livePreview.netMinutes)}
-              {livePreview.overnight ? '(شیفت عبوری از نیمه‌شب)' : ''}
             </span>
-          </div>
-        {/if}
-
-        {#if overlapWarning}
-          <div class="form-error" style="background: #fff8eb; color: #8a5a10;">
-            توجه: در این تاریخ یک شیفت دیگر ({overlapWarning.clockIn} تا {overlapWarning.clockOut}) برای این کارمند ثبت شده است که با ساعت واردشده تداخل دارد.
           </div>
         {/if}
 
         {#if editingEntryId}
           <div class="field">
-            <label for="tsEditReason">علت اصلاح ساعت کاری</label>
-            <input
-              id="tsEditReason"
-              bind:value={editReason}
-              placeholder="مثلاً فراموشی ثبت خروج یا اصلاح استراحت..."
-            />
+            <label for="tsEditReason">علت اصلاح</label>
+            <input id="tsEditReason" bind:value={editReason} />
           </div>
         {/if}
 
         <div class="field">
-          <label for="tsNotes">توضیحات شیفت</label>
-          <input
-            id="tsNotes"
-            bind:value={notes}
-            placeholder="توضیحات اختیاری درباره شیفت..."
-          />
+          <label for="tsNotes">توضیحات</label>
+          <input id="tsNotes" bind:value={notes} />
         </div>
 
         {#if formError}
@@ -301,7 +275,7 @@
         {/if}
 
         <button type="submit" class="primary-btn">
-          <span>{editingEntryId ? 'ذخیره اصلاحیه تایم‌شیت' : 'ثبت ساعت کاری'}</span>
+          <span>{editingEntryId ? 'ذخیره' : 'ثبت'}</span>
           <span class="btn-arrow">←</span>
         </button>
       </form>
@@ -310,61 +284,15 @@
     <aside class="side-column">
       <section class="panel insight-card">
         <div class="card-topline">
-          <span class="mini-icon">◫</span>
-          <span>
-            خلاصه کارکرد {selectedFilterEmployee ? selectedFilterEmployee.name : 'همه کارکنان'}
-          </span>
+          <span class="mini-icon">◷</span>
+          <span>مجموع کارکرد</span>
         </div>
         <div class="stat-number" style="font-size: 22px;">
           {formatMinutesToPersianHours(summaryStats.totalWorkingMinutes)}
         </div>
         <p class="stat-caption">
-          در <strong>{formatNumber(summaryStats.workingDaysCount)}</strong> روز کاری
-          ({formatNumber(summaryStats.shiftsCount)} شیفت)
+          <strong>{formatNumber(summaryStats.workingDaysCount)}</strong> روز کاری
         </p>
-        <div class="stat-divider"></div>
-        <div class="stat-foot">
-          <span>میانگین کارکرد روزانه</span>
-          <strong>{formatMinutesToPersianHours(summaryStats.averageDailyMinutes)}</strong>
-        </div>
-
-        {#if selectedFilterEmployee && summaryStats.expectedTotalMinutes > 0}
-          <div class="stat-divider" style="margin-top: 10px;"></div>
-          <div style="margin-top: 10px; font-size: 10px; color: var(--muted); display: grid; gap: 4px;">
-            <div>
-              ساعت مورد انتظار طبق برنامه:
-              <strong>{formatMinutesToPersianHours(summaryStats.expectedTotalMinutes)}</strong>
-            </div>
-            <div>
-              تأخیر ورود:
-              <strong>
-                {formatNumber(summaryStats.lateArrivalsCount)} مورد ({formatMinutesToPersianHours(summaryStats.totalLateMinutes)})
-              </strong>
-            </div>
-            <div>
-              تعجیل خروج:
-              <strong>
-                {formatNumber(summaryStats.earlyDeparturesCount)} مورد ({formatMinutesToPersianHours(summaryStats.totalEarlyMinutes)})
-              </strong>
-            </div>
-            <div>
-              اضافه‌کاری:
-              <strong style="color: var(--green);">
-                {formatMinutesToPersianHours(summaryStats.totalOvertimeMinutes)}
-              </strong>
-            </div>
-          </div>
-        {/if}
-      </section>
-
-      <section class="tip-card">
-        <span class="tip-icon">✳</span>
-        <div>
-          <strong>مقایسه برنامه کاری مورد انتظار با حضور واقعی</strong>
-          <p>
-            با انتخاب یک کارمند از فیلتر پایین، تأخیر ورود، تعجیل خروج و اضافه‌کاری او بر اساس برنامه کاری تعریف‌شده در بخش «کارکنان» محاسبه می‌شود.
-          </p>
-        </div>
       </section>
     </aside>
   </div>
@@ -374,37 +302,35 @@
       <div class="filters">
         <select
           bind:value={filterEmployeeId}
-          style="width: auto; min-width: 180px; height: 42px; font-size: 11px;"
-          aria-label="فیلتر کارمند در تایم‌شیت"
+          style="width: auto; min-width: 170px; height: 42px; font-size: 11px;"
+          aria-label="فیلتر کارمند"
         >
-          <option value="">همه کارکنان (نمای کلی)</option>
+          <option value="">همه کارکنان</option>
           {#each $employees as emp (emp.id)}
-            <option value={emp.id}>{emp.name} — {emp.role}</option>
+            <option value={emp.id}>{emp.name}</option>
           {/each}
         </select>
 
         <div class="date-filter">
-          <span>از تاریخ (شمسی)</span>
+          <span>از تاریخ</span>
           <div class="date-picker-filter-wrap">
             <JalaliDatePicker
               id="tsFilterFrom"
               bind:value={filterDateFrom}
               placeholder="همه تاریخ‌ها"
               allowEmpty={true}
-              ariaLabel="از تاریخ شمسی"
             />
           </div>
         </div>
 
         <div class="date-filter">
-          <span>تا تاریخ (شمسی)</span>
+          <span>تا تاریخ</span>
           <div class="date-picker-filter-wrap">
             <JalaliDatePicker
               id="tsFilterTo"
               bind:value={filterDateTo}
               placeholder="همه تاریخ‌ها"
               allowEmpty={true}
-              ariaLabel="تا تاریخ شمسی"
             />
           </div>
         </div>
@@ -419,62 +345,28 @@
               filterDateTo = '';
             }}
           >
-            پاک کردن فیلترها
+            پاک کردن
           </button>
         {/if}
       </div>
 
-      <div class="history-summary">
-        <span>{formatNumber(filteredTimesheets.length)} شیفت ثبت‌شده</span>
-        <span>
-          مجموع ساعت کاری: <strong>{formatMinutesToPersianHours(summaryStats.totalWorkingMinutes)}</strong>
-        </span>
-      </div>
-
-      <div class="purchase-list">
+      <div class="purchase-list" style="margin-top: 14px;">
         {#if filteredTimesheets.length > 0}
           {#each filteredTimesheets as entry (entry.id)}
             {@const emp = $employeeByIdMap.get(entry.employeeId)}
-            {@const cmp = compareShiftWithExpectedSchedule(entry, emp)}
             <article class="purchase-item" style="flex-wrap: wrap;">
               <div class="product-avatar">{emp ? emp.name.charAt(0) : '؟'}</div>
               <div class="purchase-main">
                 <div class="purchase-name">
-                  <span>{emp ? emp.name : 'کارمند نامشخص'}</span>
+                  <span>{emp ? emp.name : 'کارمند'}</span>
                   <span class="badge-employee">
                     {getPersianWeekdayName(entry.date)} {toJalaliDate(entry.date)} ({toJalaliNumeric(entry.date)})
                   </span>
-                  {#if entry.overnight}
-                    <span class="badge-demo">شیفت شبانه</span>
-                  {/if}
-                  {#if entry.isDemo}
-                    <span class="badge-demo">نمونه آزمایشی</span>
-                  {:else}
-                    <span class="badge-real">ثبت واقعی</span>
-                  {/if}
                 </div>
                 <div class="purchase-meta">
                   <span>ورود: <strong dir="ltr">{entry.clockIn}</strong></span>
                   <span>خروج: <strong dir="ltr">{entry.clockOut}</strong></span>
                   <span>استراحت: {formatNumber(entry.breakMinutes)} دقیقه</span>
-                  {#if cmp.hasExpectedSchedule}
-                    {#if cmp.lateArrivalMinutes > 0}
-                      <span style="color: var(--danger);">
-                        تأخیر ورود: {formatNumber(cmp.lateArrivalMinutes)} دقیقه
-                      </span>
-                    {/if}
-                    {#if cmp.overtimeMinutes > 0}
-                      <span style="color: var(--green);">
-                        اضافه‌کاری: {formatMinutesToPersianHours(cmp.overtimeMinutes)}
-                      </span>
-                    {/if}
-                  {/if}
-                  {#if entry.notes}
-                    <span>({entry.notes})</span>
-                  {/if}
-                  {#if entry.editHistory && entry.editHistory.length > 0}
-                    <span>(اصلاح‌شده: {formatNumber(entry.editHistory.length)} بار)</span>
-                  {/if}
                 </div>
               </div>
 
@@ -482,28 +374,17 @@
                 <div class="purchase-amount">
                   {formatMinutesToPersianHours(entry.netMinutes)}
                 </div>
-                <button
-                  type="button"
-                  class="quiet-btn"
-                  on:click={() => startEditShift(entry)}
-                >
-                  اصلاح
+                <button type="button" class="quiet-btn" on:click={() => startEditShift(entry)}>
+                  ویرایش
                 </button>
-                <button
-                  type="button"
-                  class="quiet-btn"
-                  on:click={() => handleDeleteShift(entry)}
-                >
+                <button type="button" class="quiet-btn" on:click={() => handleDeleteShift(entry)}>
                   حذف
                 </button>
               </div>
             </article>
           {/each}
         {:else}
-          <EmptyState
-            title="رکورد حضور و غیابی یافت نشد"
-            message="از فرم بالا ساعت ورود و خروج کارکنان را ثبت کنید."
-          />
+          <EmptyState title="رکوردی یافت نشد" message="هنوز ساعت کاری ثبت نشده است." />
         {/if}
       </div>
     </div>
