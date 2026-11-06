@@ -6,10 +6,12 @@ export type { AppPage };
 export type ManagerSubTab =
   | 'overview'
   | 'employees'
-  | 'suppliers'
+  | 'expenses'
   | 'inventory'
-  | 'reports'
-  | 'backup';
+  | 'products'
+  | 'suppliers'
+  | 'backup'
+  | 'settings';
 
 export interface NavSectionMeta {
   id: AppPage;
@@ -21,31 +23,31 @@ export interface NavSectionMeta {
 
 export const NAV_SECTIONS: NavSectionMeta[] = [
   { id: 'entry', label: 'ثبت خرید', shortLabel: 'ثبت خرید', icon: '＋', primary: true },
-  { id: 'history', label: 'تاریخچه خریدها', shortLabel: 'خریدها', icon: '▤', primary: true },
   { id: 'timesheets', label: 'تایم‌شیت', shortLabel: 'تایم‌شیت', icon: '◷', primary: true },
   { id: 'revenue', label: 'درآمد', shortLabel: 'درآمد', icon: '₿', primary: true },
-  { id: 'dashboard', label: 'پیشخوان', shortLabel: 'پیشخوان', icon: '⊞', primary: false },
-  { id: 'products', label: 'کالاها', shortLabel: 'کالاها', icon: '❖', primary: false },
-  { id: 'expenses', label: 'هزینه‌ها', shortLabel: 'هزینه‌ها', icon: '¤', primary: false },
-  { id: 'settings', label: 'تنظیمات', shortLabel: 'تنظیمات', icon: '⚙', primary: false },
-  { id: 'manager', label: 'پنل مدیریت', shortLabel: 'مدیریت', icon: '⌑', primary: false }
+  { id: 'manager', label: 'پنل مدیریت', shortLabel: 'مدیریت', icon: '⌑', primary: true }
 ];
 
-const PUBLIC_PAGES = new Set<AppPage>(NAV_SECTIONS.map((s) => s.id));
+const PUBLIC_PAGES = new Set<AppPage>(['entry', 'timesheets', 'revenue', 'manager']);
 
 const MANAGER_PROTECTED_SUBTABS = new Set<ManagerSubTab>([
   'overview',
   'employees',
-  'suppliers',
+  'expenses',
   'inventory',
-  'reports',
-  'backup'
+  'products',
+  'suppliers',
+  'backup',
+  'settings'
 ]);
 
 export const activeManagerTab = writable<ManagerSubTab>('overview');
 
 function resolveRoute(rawPage: string): AppPage {
   const clean = rawPage.replace('#', '').trim() as AppPage;
+  if (clean === 'history') {
+    return 'entry';
+  }
   if (MANAGER_PROTECTED_SUBTABS.has(clean as ManagerSubTab)) {
     activeManagerTab.set(clean as ManagerSubTab);
     return 'manager';
@@ -66,6 +68,17 @@ function getInitialPage(): AppPage {
 export const currentPage = writable<AppPage>(getInitialPage());
 
 export function navigateTo(page: AppPage | ManagerSubTab): void {
+  if (page === 'history') {
+    currentPage.set('entry');
+    if (typeof window !== 'undefined') {
+      const historyEl = document.getElementById('embeddedPurchaseHistory');
+      if (historyEl) {
+        historyEl.scrollIntoView({ behavior: 'smooth' });
+      }
+    }
+    return;
+  }
+
   if (MANAGER_PROTECTED_SUBTABS.has(page as ManagerSubTab)) {
     activeManagerTab.set(page as ManagerSubTab);
     currentPage.set('manager');
