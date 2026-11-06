@@ -10,7 +10,7 @@ export const DEFAULT_SETTINGS: ApplicationSettings = {
   defaultUnit: 'کیلوگرم',
   currency: 'IRT',
   lastSelectedEmployeeId: '',
-  globalRevenueCoefficient: 0.7,
+  globalRevenueCoefficient: 0.6,
   showDemoBadges: true,
   demoSeedInitialized: false,
   lastSyncAt: null
