@@ -41,8 +41,8 @@ export type PersianWeekdayIndex = 0 | 1 | 2 | 3 | 4 | 5 | 6;
 
 export interface ExpectedDaySchedule {
   enabled: boolean;
-  startTime: string; // HH:MM (e.g. "08:00")
-  endTime: string;   // HH:MM (e.g. "17:00")
+  startTime: string;
+  endTime: string;
 }
 
 export type WeeklyExpectedSchedule = Record<PersianWeekdayIndex, ExpectedDaySchedule>;
@@ -54,7 +54,7 @@ export interface Employee {
   phone?: string;
   notes?: string;
   isActive: boolean;
-  performanceCoefficient: number; // Default 1.0, prepared for future profit-sharing
+  performanceCoefficient: number; // Staff multiplier (e.g. 0.6, 1.0, 1.2)
   expectedSchedule?: WeeklyExpectedSchedule;
   isDemo?: boolean;
   createdAt: string;
@@ -113,6 +113,7 @@ export interface InventoryItem {
   currentStock: number;
   minStockThreshold: number;
   unit: string;
+  alertEnabled?: boolean; // Optional per-product shortage alert checkbox
   lastUpdated: string; // YYYY-MM-DD
   isDemo?: boolean;
 }
@@ -130,7 +131,7 @@ export interface Expense {
   title: string;
   category: ExpenseCategory | string;
   amount: number;
-  expenseDate: string; // YYYY-MM-DD
+  expenseDate: string;
   notes?: string;
   isDemo?: boolean;
   createdAt: string;
@@ -164,7 +165,7 @@ export interface RevenueItemEntry {
 
 export interface RevenueDayRecord {
   id: string;
-  date: string; // YYYY-MM-DD
+  date: string;
   mode: RevenueRecordingMode;
   dailyTotalAmount: number;
   cashAmount?: number;
@@ -188,9 +189,9 @@ export interface TimesheetEditLog {
 export interface TimesheetEntry {
   id: string;
   employeeId: string;
-  date: string; // YYYY-MM-DD
-  clockIn: string; // HH:MM
-  clockOut: string; // HH:MM
+  date: string;
+  clockIn: string;
+  clockOut: string;
   overnight: boolean;
   breakMinutes: number;
   netMinutes: number;
@@ -217,7 +218,7 @@ export interface ApplicationSettings {
   defaultUnit: string;
   currency: 'IRT';
   lastSelectedEmployeeId: string;
-  globalRevenueCoefficient: number; // Default 0.7; visible & editable only in Manager Area
+  globalRevenueCoefficient: number; // Default 0.6 for manager's frontend revenue display
   showDemoBadges: boolean;
   demoSeedInitialized: boolean;
   lastSyncAt: string | null;
