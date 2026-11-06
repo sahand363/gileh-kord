@@ -10,6 +10,8 @@ const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '0.0.0.0';
 const DIST_DIR = path.resolve(__dirname, 'dist');
 const DATA_DIR = process.env.GILEH_DATA_DIR || path.resolve(__dirname, 'data');
+const ADMIN_USER = (process.env.ADMIN_USER || 'admin').trim();
+const ADMIN_PASS = (process.env.ADMIN_PASS || 'admin1234').trim();
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -27,14 +29,12 @@ const server = http.createServer((req, res) => {
   const reqUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
   const pathname = decodeURIComponent(reqUrl.pathname);
 
-  // Lightweight integration health endpoint
   if (pathname === '/api/health' || pathname === '/api/status') {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(
       JSON.stringify({
-        app: 'GILEH KORD (گیله‌کُرد)',
+        app: 'GILEH KORD',
         status: 'ok',
-        mode: 'local-first-test-integration',
         dataDir: DATA_DIR,
         timestamp: new Date().toISOString()
       })
@@ -42,9 +42,38 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // Verify Master Username & Password configured via SSH
+  if (pathname === '/api/auth/login' && req.method === 'POST') {
+    let body = '';
+    req.on('data', (chunk) => {
+      body += chunk;
+      if (body.length > 4096) req.destroy();
+    });
+    req.on('end', () => {
+      try {
+        const parsed = JSON.parse(body || '{}');
+        const user = String(parsed.username || '').trim();
+        const pass = String(parsed.password || '').trim();
+        if (
+          user.toLowerCase() === ADMIN_USER.toLowerCase() &&
+          pass === ADMIN_PASS
+        ) {
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: true, username: ADMIN_USER }));
+        } else {
+          res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, error: 'Invalid credentials' }));
+        }
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, error: 'Bad request' }));
+      }
+    });
+    return;
+  }
+
   let filePath = path.join(DIST_DIR, pathname === '/' ? 'index.html' : pathname);
 
-  // Prevent directory traversal
   if (!filePath.startsWith(DIST_DIR)) {
     res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('Forbidden');
@@ -53,7 +82,6 @@ const server = http.createServer((req, res) => {
 
   fs.stat(filePath, (err, stats) => {
     if (err || !stats.isFile()) {
-      // SPA fallback to index.html for navigation routes
       const indexFile = path.join(DIST_DIR, 'index.html');
       fs.readFile(indexFile, (indexErr, content) => {
         if (indexErr) {
