@@ -45,7 +45,9 @@
     );
   }
 
-  async function handleToggleAlert(id: string, checked: boolean, name: string) {
+  async function handleToggleAlert(id: string, event: Event, name: string) {
+    const target = event.currentTarget as HTMLInputElement;
+    const checked = Boolean(target?.checked);
     await toggleInventoryAlert(id, checked);
     showToast(
       checked
@@ -141,12 +143,7 @@
                     <input
                       type="checkbox"
                       checked={Boolean(item.alertEnabled)}
-                      on:change={(e) =>
-                        handleToggleAlert(
-                          item.id,
-                          (e.currentTarget as HTMLInputElement).checked,
-                          item.productName
-                        )}
+                      on:change={(e) => handleToggleAlert(item.id, e, item.productName)}
                       style="width: 15px; height: 15px;"
                     />
                     <span>هشدار کسری موجودی</span>
