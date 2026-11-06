@@ -3,9 +3,8 @@
   import { productRepository } from '../../services/repositories/ProductRepository';
   import { settingsRepository } from '../../services/repositories/SettingsRepository';
   import {
+    purchases,
     addPurchase,
-    todayPurchasesStats,
-    recentPurchases,
     suppliers,
     employees,
     activeEmployees,
@@ -13,18 +12,19 @@
     setStickyEmployeeId,
     dbError
   } from '../../stores/purchaseStore';
-  import { navigateTo } from '../../stores/navigationStore';
   import { showToast } from '../../stores/toastStore';
   import {
     formatMoney,
     formatNumber,
     toJalaliDate,
-    toJalaliNumeric,
     getTodayISODate,
     parseNumericInput
   } from '../../utils/formatters';
-  import { getPersianWeekdayName } from '../../utils/jalali';
   import { validatePurchaseInput } from '../../utils/validators';
+  import {
+    calculatePurchaseStats,
+    filterPurchases
+  } from '../../utils/calculations';
   import { MEASUREMENT_UNITS, type Product } from '../../models/types';
   import PurchaseCard from '../../components/purchases/PurchaseCard.svelte';
   import EmptyState from '../../components/common/EmptyState.svelte';
@@ -51,8 +51,13 @@
   let lastPriceHint = '';
   let optionalOpen = false;
 
-  const todayISO = getTodayISODate();
-  const todayFullJalali = `${getPersianWeekdayName(todayISO)} ${toJalaliDate(todayISO)} (${toJalaliNumeric(todayISO)})`;
+  // Embedded Purchase History Filter State
+  let searchQuery = '';
+  let dateFrom = '';
+  let dateTo = '';
+  let historyEmployeeId = '';
+  let historySupplier = '';
+  let onlyReal = false;
 
   $: parsedLivePrice = parseNumericInput(price);
   $: liveFormattedPrice =
@@ -60,12 +65,22 @@
       ? `${formatMoney(parsedLivePrice)} تومان`
       : '';
 
-  // Keep selectedEmployeeId synced with sticky setting if not yet set locally
   $: if (!selectedEmployeeId && $appSettings.lastSelectedEmployeeId) {
     selectedEmployeeId = $appSettings.lastSelectedEmployeeId;
   } else if (!selectedEmployeeId && $activeEmployees.length > 0) {
     selectedEmployeeId = $activeEmployees[0].id;
   }
+
+  $: filteredPurchases = filterPurchases($purchases, {
+    query: searchQuery,
+    dateFrom,
+    dateTo,
+    employeeId: historyEmployeeId,
+    supplierName: historySupplier,
+    onlyReal
+  });
+
+  $: filteredStats = calculatePurchaseStats(filteredPurchases);
 
   onMount(async () => {
     const settings = await settingsRepository.getSettings();
@@ -124,6 +139,15 @@
     }
   }
 
+  function clearHistoryFilters() {
+    searchQuery = '';
+    dateFrom = '';
+    dateTo = '';
+    historyEmployeeId = '';
+    historySupplier = '';
+    onlyReal = false;
+  }
+
   async function handleSubmit() {
     if (isSubmitting) return;
     errorMessage = '';
@@ -159,7 +183,6 @@
         notes
       });
 
-      // Reset product fields while keeping `selectedEmployeeId` sticky
       productName = '';
       quantity = '';
       unit = defaultUnit;
@@ -189,294 +212,286 @@
 
 <section class="page active" aria-labelledby="entryTitle">
   <div class="page-heading">
-    <div>
-      <p class="eyebrow">ثبت سریع و آسان (تقویم شمسی)</p>
-      <h1 id="entryTitle">ثبت خرید جدید</h1>
-      <p class="subheading">خریدهای روزانه را به نام کارمند مسئول ثبت کنید؛ انتخاب مسئول خرید برای ثبت‌های بعدی حفظ می‌شود.</p>
-    </div>
-    <div class="heading-date">
-      <span class="calendar-icon">▦</span>
-      <span>{todayFullJalali}</span>
-    </div>
+    <h1 id="entryTitle">ثبت خرید</h1>
   </div>
 
   {#if $dbError}
     <div class="form-error" role="alert">{$dbError}</div>
   {/if}
 
-  <div class="entry-layout">
-    <section class="panel form-panel">
-      <form on:submit|preventDefault={handleSubmit} autocomplete="off" novalidate>
-        <div class="field">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-            <label for="purchasedBy" style="margin-bottom: 0;">
-              خرید توسط (مسئول خرید) <b class="required">*</b>
-            </label>
-            <button
-              type="button"
-              class="text-btn"
-              style="padding: 0; font-size: 10px;"
-              on:click={() => navigateTo('employees')}
-            >
-              مدیریت کارکنان ←
-            </button>
-          </div>
+  <section class="panel form-panel" style="max-width: 720px; margin: 0 auto 28px;">
+    <form on:submit|preventDefault={handleSubmit} autocomplete="off" novalidate>
+      <div class="field">
+        <label for="purchasedBy">
+          خرید توسط <b class="required">*</b>
+        </label>
 
-          {#if $employees.length > 0}
-            <select
-              id="purchasedBy"
-              name="purchasedBy"
-              bind:value={selectedEmployeeId}
-              on:change={handleEmployeeChange}
-              required
-            >
-              {#each $activeEmployees as emp (emp.id)}
-                <option value={emp.id}>
-                  {emp.name} — {emp.role}
+        {#if $employees.length > 0}
+          <select
+            id="purchasedBy"
+            name="purchasedBy"
+            bind:value={selectedEmployeeId}
+            on:change={handleEmployeeChange}
+            required
+          >
+            {#each $activeEmployees as emp (emp.id)}
+              <option value={emp.id}>
+                {emp.name} — {emp.role}
+              </option>
+            {/each}
+            {#each $employees.filter((e) => !e.isActive) as inactiveEmp (inactiveEmp.id)}
+              {#if inactiveEmp.id === selectedEmployeeId}
+                <option value={inactiveEmp.id}>
+                  {inactiveEmp.name} — {inactiveEmp.role} (غیرفعال)
                 </option>
-              {/each}
-              {#each $employees.filter((e) => !e.isActive) as inactiveEmp (inactiveEmp.id)}
-                {#if inactiveEmp.id === selectedEmployeeId}
-                  <option value={inactiveEmp.id}>
-                    {inactiveEmp.name} — {inactiveEmp.role} (غیرفعال)
-                  </option>
-                {/if}
-              {/each}
-            </select>
-            <small class="field-hint">
-              کارمند انتخاب‌شده برای خریدهای بعدی نیز ثابت می‌ماند تا زمانی که آن را تغییر دهید.
-            </small>
-          {:else}
-            <div class="form-error" style="margin-bottom: 6px;">
-              هنوز کارمندی ثبت نشده است. لطفاً ابتدا از بخش «کارکنان» حداقل یک کارمند تعریف کنید.
-            </div>
-            <button
-              type="button"
-              class="secondary-btn"
-              on:click={() => navigateTo('employees')}
-            >
-              ＋ افزودن اولین کارمند
-            </button>
-          {/if}
-        </div>
-
-        <div class="field product-field">
-          <label for="productName">نام محصول <b class="required">*</b></label>
-          <div class="input-wrap">
-            <input
-              id="productName"
-              name="productName"
-              type="text"
-              role="combobox"
-              bind:this={productInputEl}
-              bind:value={productName}
-              on:input={handleProductInput}
-              on:focus={handleProductInput}
-              on:keydown={handleProductKeydown}
-              placeholder="مثلاً برنج هاشمی"
-              required
-              aria-autocomplete="list"
-              aria-controls="suggestions"
-              aria-expanded={isSuggestionsVisible}
-            />
-            <span class="field-symbol">⌕</span>
-          </div>
-
-          {#if isSuggestionsVisible}
-            <div class="suggestions" id="suggestions" role="listbox">
-              {#if suggestions.length > 0}
-                {#each suggestions as prod (prod.id)}
-                  <button
-                    type="button"
-                    class="suggestion-item"
-                    role="option"
-                    aria-selected="false"
-                    on:click={() => selectProduct(prod)}
-                  >
-                    <span>
-                      <span class="suggestion-name">{prod.name}</span>
-                      <span class="suggestion-meta">
-                        <span>واحد: {prod.lastUnit}</span>
-                        <span>آخرین تاریخ: {toJalaliDate(prod.lastPurchaseDate)}</span>
-                      </span>
-                    </span>
-                    <span class="suggestion-price">
-                      آخرین خرید: {formatMoney(prod.lastPrice)} تومان
-                    </span>
-                  </button>
-                {/each}
-              {:else}
-                <div class="suggestion-empty">محصول جدیدی با این نام ثبت می‌شود.</div>
               {/if}
-            </div>
-          {/if}
+            {/each}
+          </select>
+        {:else}
+          <div class="form-error" style="margin-bottom: 6px;">
+            لطفاً از بخش مدیریت حداقل یک کارمند تعریف کنید.
+          </div>
+        {/if}
+      </div>
 
-          <small class="field-hint">نام محصول را بنویسید یا از موارد قبلی انتخاب کنید.</small>
+      <div class="field product-field">
+        <label for="productName">نام محصول <b class="required">*</b></label>
+        <div class="input-wrap">
+          <input
+            id="productName"
+            name="productName"
+            type="text"
+            role="combobox"
+            bind:this={productInputEl}
+            bind:value={productName}
+            on:input={handleProductInput}
+            on:focus={handleProductInput}
+            on:keydown={handleProductKeydown}
+            placeholder="مثلاً برنج هاشمی"
+            required
+            aria-autocomplete="list"
+            aria-controls="suggestions"
+            aria-expanded={isSuggestionsVisible}
+          />
+          <span class="field-symbol">⌕</span>
         </div>
 
-        <div class="field-row quantity-row">
-          <div class="field">
-            <label for="quantity">مقدار <b class="required">*</b></label>
-            <input
-              id="quantity"
-              name="quantity"
-              inputmode="decimal"
-              bind:this={quantityInputEl}
-              bind:value={quantity}
-              placeholder="مثلاً ۵ یا ۲٫۵"
-              required
-            />
-          </div>
-          <div class="field">
-            <label for="unit">واحد</label>
-            <select id="unit" name="unit" bind:value={unit}>
-              {#each MEASUREMENT_UNITS as itemUnit}
-                <option value={itemUnit}>{itemUnit}</option>
+        {#if isSuggestionsVisible}
+          <div class="suggestions" id="suggestions" role="listbox">
+            {#if suggestions.length > 0}
+              {#each suggestions as prod (prod.id)}
+                <button
+                  type="button"
+                  class="suggestion-item"
+                  role="option"
+                  aria-selected="false"
+                  on:click={() => selectProduct(prod)}
+                >
+                  <span>
+                    <span class="suggestion-name">{prod.name}</span>
+                    <span class="suggestion-meta">
+                      <span>واحد: {prod.lastUnit}</span>
+                      <span>آخرین تاریخ: {toJalaliDate(prod.lastPurchaseDate)}</span>
+                    </span>
+                  </span>
+                  <span class="suggestion-price">
+                    آخرین خرید: {formatMoney(prod.lastPrice)} تومان
+                  </span>
+                </button>
               {/each}
-            </select>
+            {:else}
+              <div class="suggestion-empty">محصول جدیدی با این نام ثبت می‌شود.</div>
+            {/if}
           </div>
-        </div>
+        {/if}
+      </div>
 
+      <div class="field-row quantity-row">
         <div class="field">
-          <label for="price">
-            مبلغ کل <span class="label-unit">تومان</span> <b class="required">*</b>
-          </label>
-          <div class="input-wrap price-wrap">
-            <input
-              id="price"
-              name="price"
-              inputmode="numeric"
-              bind:value={price}
-              placeholder="مثلاً ۲٬۵۰۰٬۰۰۰"
-              required
-            />
-            <span class="currency">تومان</span>
-          </div>
-          {#if lastPriceHint}
-            <small id="priceHint" class="field-hint">{lastPriceHint}</small>
-          {:else if liveFormattedPrice}
-            <small class="field-hint">مبلغ به حروف عددی: {liveFormattedPrice}</small>
-          {/if}
-        </div>
-
-        <div class="field">
-          <label for="purchaseDate">تاریخ خرید (شمسی)</label>
-          <JalaliDatePicker
-            id="purchaseDate"
-            bind:value={purchaseDate}
-            ariaLabel="تاریخ خرید شمسی"
+          <label for="quantity">مقدار <b class="required">*</b></label>
+          <input
+            id="quantity"
+            name="quantity"
+            inputmode="decimal"
+            bind:this={quantityInputEl}
+            bind:value={quantity}
+            placeholder="مثلاً ۵ یا ۲٫۵"
+            required
           />
         </div>
-
-        <details class="optional-fields" bind:open={optionalOpen}>
-          <summary>
-            <span>اطلاعات تکمیلی</span>
-            <span class="optional-tag">اختیاری</span>
-            <span class="chevron">⌄</span>
-          </summary>
-          <div class="optional-grid">
-            <div class="field">
-              <label for="supplier">نام فروشنده</label>
-              <input
-                id="supplier"
-                name="supplier"
-                list="suppliersDatalist"
-                bind:value={supplier}
-                placeholder="نام فروشگاه یا تأمین‌کننده"
-              />
-              <datalist id="suppliersDatalist">
-                {#each $suppliers as sup (sup.id)}
-                  <option value={sup.name}></option>
-                {/each}
-              </datalist>
-            </div>
-            <div class="field">
-              <label for="invoice">شماره فاکتور</label>
-              <input
-                id="invoice"
-                name="invoice"
-                bind:value={invoice}
-                placeholder="مثلاً ۱۲۴۸"
-              />
-            </div>
-            <div class="field full">
-              <label for="notes">توضیحات</label>
-              <textarea
-                id="notes"
-                name="notes"
-                rows="2"
-                bind:value={notes}
-                placeholder="توضیحات تکمیلی درباره خرید..."
-              ></textarea>
-            </div>
-          </div>
-        </details>
-
-        {#if errorMessage}
-          <div class="form-error" id="formError" role="alert">{errorMessage}</div>
-        {/if}
-
-        <button class="primary-btn" type="submit" disabled={isSubmitting}>
-          <span>{isSubmitting ? 'در حال ثبت...' : 'ثبت خرید'}</span>
-          <span class="btn-arrow">←</span>
-        </button>
-        <p class="secure-note">
-          <span>✓</span> ذخیره‌سازی آنی در حافظه محلی دستگاه (IndexedDB) — بدون وابستگی به اینترنت یا HTTPS.
-        </p>
-      </form>
-    </section>
-
-    <aside class="side-column">
-      <section class="panel insight-card">
-        <div class="card-topline">
-          <span class="mini-icon">↗</span>
-          <span>خلاصه خرید امروز ({toJalaliDate(todayISO)})</span>
+        <div class="field">
+          <label for="unit">واحد</label>
+          <select id="unit" name="unit" bind:value={unit}>
+            {#each MEASUREMENT_UNITS as itemUnit}
+              <option value={itemUnit}>{itemUnit}</option>
+            {/each}
+          </select>
         </div>
-        <div class="stat-number" id="todayTotal">
-          {formatMoney($todayPurchasesStats.total)} <small>تومان</small>
-        </div>
-        <p class="stat-caption">
-          <strong id="todayCount">{formatNumber($todayPurchasesStats.count)}</strong> خرید ثبت‌شده امروز
-        </p>
-        <div class="stat-divider"></div>
-        <div class="stat-foot">
-          <span>میانگین هر خرید</span>
-          <strong id="todayAverage">{formatMoney($todayPurchasesStats.average)} تومان</strong>
-        </div>
-      </section>
-
-      <section class="tip-card">
-        <span class="tip-icon">✳</span>
-        <div>
-          <strong>ثبت سریع‌تر خریدها</strong>
-          <p>
-            مسئول خرید انتخابی شما برای فاکتورهای بعدی ثابت می‌ماند و با انتخاب کالاهای تکراری، واحد اندازه‌گیری خودکار پر می‌شود.
-          </p>
-        </div>
-      </section>
-    </aside>
-  </div>
-
-  <section class="recent-section">
-    <div class="section-heading">
-      <div>
-        <h2>آخرین خریدها</h2>
-        <p>نگاهی سریع به خریدهای اخیر به همراه نام مسئول خرید</p>
       </div>
-      <button class="text-btn" type="button" on:click={() => navigateTo('history')}>
-        مشاهده همه <span>←</span>
+
+      <div class="field">
+        <label for="price">
+          مبلغ کل <span class="label-unit">تومان</span> <b class="required">*</b>
+        </label>
+        <div class="input-wrap price-wrap">
+          <input
+            id="price"
+            name="price"
+            inputmode="numeric"
+            bind:value={price}
+            placeholder="مثلاً ۲٬۵۰۰٬۰۰۰"
+            required
+          />
+          <span class="currency">تومان</span>
+        </div>
+        {#if lastPriceHint}
+          <small id="priceHint" class="field-hint">{lastPriceHint}</small>
+        {:else if liveFormattedPrice}
+          <small class="field-hint">{liveFormattedPrice}</small>
+        {/if}
+      </div>
+
+      <div class="field">
+        <label for="purchaseDate">تاریخ خرید</label>
+        <JalaliDatePicker
+          id="purchaseDate"
+          bind:value={purchaseDate}
+          ariaLabel="تاریخ خرید شمسی"
+        />
+      </div>
+
+      <details class="optional-fields" bind:open={optionalOpen}>
+        <summary>
+          <span>اطلاعات تکمیلی</span>
+          <span class="optional-tag">اختیاری</span>
+          <span class="chevron">⌄</span>
+        </summary>
+        <div class="optional-grid">
+          <div class="field">
+            <label for="supplier">نام فروشنده</label>
+            <input
+              id="supplier"
+              name="supplier"
+              list="suppliersDatalist"
+              bind:value={supplier}
+              placeholder="نام فروشگاه یا تأمین‌کننده"
+            />
+            <datalist id="suppliersDatalist">
+              {#each $suppliers as sup (sup.id)}
+                <option value={sup.name}></option>
+              {/each}
+            </datalist>
+          </div>
+          <div class="field">
+            <label for="invoice">شماره فاکتور</label>
+            <input
+              id="invoice"
+              name="invoice"
+              bind:value={invoice}
+              placeholder="مثلاً ۱۲۴۸"
+            />
+          </div>
+          <div class="field full">
+            <label for="notes">توضیحات</label>
+            <textarea
+              id="notes"
+              name="notes"
+              rows="2"
+              bind:value={notes}
+              placeholder="توضیحات تکمیلی درباره خرید..."
+            ></textarea>
+          </div>
+        </div>
+      </details>
+
+      {#if errorMessage}
+        <div class="form-error" id="formError" role="alert">{errorMessage}</div>
+      {/if}
+
+      <button class="primary-btn" type="submit" disabled={isSubmitting}>
+        <span>{isSubmitting ? 'در حال ثبت...' : 'ثبت خرید'}</span>
+        <span class="btn-arrow">←</span>
+      </button>
+    </form>
+  </section>
+
+  <!-- Embedded Purchase History at the bottom of Purchase Registration -->
+  <section id="embeddedPurchaseHistory" class="panel history-panel">
+    <div class="section-heading">
+      <h2>تاریخچه خریدها</h2>
+    </div>
+
+    <div class="filters">
+      <div class="search-box">
+        <span>⌕</span>
+        <input
+          id="historySearch"
+          bind:value={searchQuery}
+          placeholder="جست‌وجوی نام محصول یا شماره فاکتور..."
+          aria-label="جست‌وجوی نام محصول"
+        />
+      </div>
+
+      <select
+        id="historyEmployeeFilter"
+        bind:value={historyEmployeeId}
+        style="width: auto; min-width: 155px; height: 42px; font-size: 11px;"
+        aria-label="فیلتر بر اساس کارمند"
+      >
+        <option value="">همه کارکنان</option>
+        <option value="__unassigned__">بدون ثبت مسئول خرید</option>
+        {#each $employees as emp (emp.id)}
+          <option value={emp.id}>{emp.name}</option>
+        {/each}
+      </select>
+
+      <div class="date-filter">
+        <span>از تاریخ</span>
+        <div class="date-picker-filter-wrap">
+          <JalaliDatePicker
+            id="dateFrom"
+            bind:value={dateFrom}
+            placeholder="همه تاریخ‌ها"
+            allowEmpty={true}
+            ariaLabel="از تاریخ شمسی"
+          />
+        </div>
+      </div>
+
+      <div class="date-filter">
+        <span>تا تاریخ</span>
+        <div class="date-picker-filter-wrap">
+          <JalaliDatePicker
+            id="dateTo"
+            bind:value={dateTo}
+            placeholder="همه تاریخ‌ها"
+            allowEmpty={true}
+            ariaLabel="تا تاریخ شمسی"
+          />
+        </div>
+      </div>
+
+      <button id="clearFilters" class="quiet-btn" type="button" on:click={clearHistoryFilters}>
+        پاک کردن فیلترها
       </button>
     </div>
 
-    <div id="recentList" class="purchase-list">
-      {#if $recentPurchases.length > 0}
-        {#each $recentPurchases as purchase (purchase.id)}
+    <div class="history-summary">
+      <span id="historyCount">{formatNumber(filteredStats.count)} خرید</span>
+      <span>
+        مجموع مبلغ: <strong id="historyTotal">{formatMoney(filteredStats.total)} تومان</strong>
+      </span>
+    </div>
+
+    <div id="historyList" class="purchase-list">
+      {#if filteredPurchases.length > 0}
+        {#each filteredPurchases as purchase (purchase.id)}
           <PurchaseCard {purchase} />
         {/each}
       {:else}
         <EmptyState
-          title="هنوز خریدی ثبت نشده است"
-          message="اولین خرید خود را از فرم بالا ثبت کنید."
+          title="موردی پیدا نشد"
+          message="هنوز خریدی ثبت نشده یا فیلترها نتیجه‌ای ندارند."
         />
       {/if}
     </div>
