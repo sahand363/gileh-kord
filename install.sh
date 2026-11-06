@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# GILEH KORD - Ubuntu SSH Deployment, Master Credentials & SSL Management Menu
+# GILEH KORD - Clean Top-Pinned SSH Manager & Credentials Utility
 # =============================================================================
 
 set -u
@@ -12,6 +12,7 @@ APP_DIR="/opt/gileh-kord"
 DATA_DIR="/var/lib/gileh-kord"
 CONFIG_DIR="/etc/gileh-kord"
 CONFIG_FILE="${CONFIG_DIR}/config.env"
+MANAGERS_FILE="${CONFIG_DIR}/managers.conf"
 
 NGINX_IP_AVAILABLE="/etc/nginx/sites-available/${APP_NAME}-ip"
 NGINX_IP_ENABLED="/etc/nginx/sites-enabled/${APP_NAME}-ip"
@@ -29,6 +30,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
 CYAN='\033[0;36m'
+DIM='\033[2m'
 BOLD='\033[1m'
 NC='\033[0m'
 
@@ -36,9 +38,14 @@ log_info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+pause_return() {
+  echo ""
+  read -r -p "Press [Enter] to return to the menu..." _
+}
+
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
-    log_error "Please run this script as root or with sudo: sudo bash install.sh"
+    log_error "Please run as root: sudo bash install.sh"
     exit 1
   fi
 }
@@ -53,21 +60,39 @@ DOMAIN=${DEFAULT_DOMAIN}
 GILEH_DATA_DIR=${DATA_DIR}
 ADMIN_USER=${DEFAULT_ADMIN_USER}
 ADMIN_PASS=${DEFAULT_ADMIN_PASS}
+MANAGERS_FILE=${MANAGERS_FILE}
 EOF
     chmod 640 "${CONFIG_FILE}"
   fi
+
   sed -i 's/^HOST=127\.0\.0\.1/HOST=0.0.0.0/' "${CONFIG_FILE}" 2>/dev/null || true
-  if ! grep -q "^ADMIN_USER=" "${CONFIG_FILE}" 2>/dev/null; then
-    echo "ADMIN_USER=${DEFAULT_ADMIN_USER}" >> "${CONFIG_FILE}"
-  fi
-  if ! grep -q "^ADMIN_PASS=" "${CONFIG_FILE}" 2>/dev/null; then
-    echo "ADMIN_PASS=${DEFAULT_ADMIN_PASS}" >> "${CONFIG_FILE}"
-  fi
+  grep -q "^ADMIN_USER=" "${CONFIG_FILE}" 2>/dev/null || echo "ADMIN_USER=${DEFAULT_ADMIN_USER}" >> "${CONFIG_FILE}"
+  grep -q "^ADMIN_PASS=" "${CONFIG_FILE}" 2>/dev/null || echo "ADMIN_PASS=${DEFAULT_ADMIN_PASS}" >> "${CONFIG_FILE}"
+  grep -q "^MANAGERS_FILE=" "${CONFIG_FILE}" 2>/dev/null || echo "MANAGERS_FILE=${MANAGERS_FILE}" >> "${CONFIG_FILE}"
+
   # shellcheck disable=SC1090
   source "${CONFIG_FILE}"
   if [[ "${DOMAIN:-_}" == "_" || -z "${DOMAIN:-}" ]]; then
     DOMAIN="${DEFAULT_DOMAIN}"
   fi
+
+  if [[ ! -f "${MANAGERS_FILE}" ]]; then
+    echo "${ADMIN_USER}:${ADMIN_PASS}" > "${MANAGERS_FILE}"
+    chmod 600 "${MANAGERS_FILE}"
+  fi
+}
+
+save_config_file() {
+  cat > "${CONFIG_FILE}" <<EOF
+PORT=${PORT}
+HOST=0.0.0.0
+DOMAIN=${DOMAIN}
+GILEH_DATA_DIR=${DATA_DIR}
+ADMIN_USER=${ADMIN_USER}
+ADMIN_PASS=${ADMIN_PASS}
+MANAGERS_FILE=${MANAGERS_FILE}
+EOF
+  chmod 640 "${CONFIG_FILE}"
 }
 
 get_server_ip() {
@@ -81,18 +106,26 @@ get_server_ip() {
 
 get_service_state() {
   if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
-    echo -e "${GREEN}RUNNING${NC}"
+    echo -e "${GREEN}● RUNNING${NC}"
   else
-    echo -e "${RED}STOPPED${NC}"
+    echo -e "${RED}○ STOPPED${NC}"
   fi
 }
 
 get_ssl_state() {
   load_or_init_config
   if [[ -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" ]]; then
-    echo -e "${GREEN}ACTIVE (https://${DOMAIN})${NC}"
+    echo -e "${GREEN}ACTIVE (HTTPS)${NC}"
   else
-    echo -e "${YELLOW}NOT CONFIGURED (HTTP IP Active)${NC}"
+    echo -e "${YELLOW}HTTP ONLY${NC}"
+  fi
+}
+
+get_managers_list() {
+  if [[ -f "${MANAGERS_FILE}" ]]; then
+    awk -F: 'NF>=2 {print $1}' "${MANAGERS_FILE}" | paste -sd ", " -
+  else
+    echo "${ADMIN_USER}"
   fi
 }
 
@@ -100,19 +133,20 @@ install_cli_shortcut() {
   if [[ -f "${APP_DIR}/install.sh" ]]; then
     cp -f "${APP_DIR}/install.sh" "${CLI_SHORTCUT}"
     chmod +x "${CLI_SHORTCUT}"
+  elif [[ -f "./install.sh" ]]; then
+    cp -f "./install.sh" "${CLI_SHORTCUT}"
+    chmod +x "${CLI_SHORTCUT}"
   fi
 }
 
 install_system_dependencies() {
   local need_apt=0
   for cmd in curl git nginx; do
-    if ! command -v "${cmd}" >/dev/null 2>&1; then
-      need_apt=1
-    fi
+    command -v "${cmd}" >/dev/null 2>&1 || need_apt=1
   done
 
   if [[ "${need_apt}" -eq 1 ]]; then
-    log_info "Installing required system packages (curl, git, nginx)..."
+    log_info "Installing system packages (curl, git, nginx)..."
     DEBIAN_FRONTEND=noninteractive apt-get update -y -qq
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl git ca-certificates gnupg nginx dnsutils
   fi
@@ -123,9 +157,7 @@ install_system_dependencies() {
   else
     local node_major
     node_major=$(node -v | cut -d. -f1 | tr -d 'v')
-    if [[ "${node_major}" -lt 18 ]]; then
-      install_node=1
-    fi
+    [[ "${node_major}" -lt 18 ]] && install_node=1
   fi
 
   if [[ "${install_node}" -eq 1 ]]; then
@@ -277,9 +309,9 @@ build_frontend() {
     return 1
   fi
   cd "${APP_DIR}" || return 1
-  log_info "Installing npm packages..."
+  log_info "Installing npm dependencies..."
   npm install --no-audit --no-fund --prefer-offline --loglevel=error
-  log_info "Building production frontend bundle..."
+  log_info "Building frontend..."
   npm run build
 }
 
@@ -301,15 +333,16 @@ option_install() {
   configure_firewall
   install_cli_shortcut
   systemctl restart "${SERVICE_NAME}"
-  log_info "Installation complete!"
+  log_info "GILEH KORD installed and running!"
 }
 
 option_update() {
   require_root
   if [[ ! -d "${APP_DIR}" ]]; then
-    log_error "Application is not installed in ${APP_DIR}. Choose option 1 first."
+    log_error "Not installed yet. Run Option 1 first."
     return 1
   fi
+  log_info "Updating from GitHub..."
   cd "${APP_DIR}" || return 1
   git fetch --depth 1 origin && git reset --hard origin/main
   build_frontend || return 1
@@ -319,51 +352,104 @@ option_update() {
   log_info "Application updated and restarted."
 }
 
-option_start()   { require_root; systemctl start "${SERVICE_NAME}"; log_info "Started."; }
-option_stop()    { require_root; systemctl stop "${SERVICE_NAME}"; log_info "Stopped."; }
-option_restart() { require_root; systemctl restart "${SERVICE_NAME}"; log_info "Restarted."; }
+option_start()   { require_root; systemctl start "${SERVICE_NAME}"; log_info "Service started."; }
+option_stop()    { require_root; systemctl stop "${SERVICE_NAME}"; log_info "Service stopped."; }
+option_restart() { require_root; systemctl restart "${SERVICE_NAME}"; log_info "Service restarted."; }
 
 option_status() {
   load_or_init_config
   systemctl status "${SERVICE_NAME}" --no-pager || true
+  echo ""
   curl -fsS "http://127.0.0.1:${PORT}/api/health" && echo ""
 }
 
 option_logs() {
-  journalctl -u "${SERVICE_NAME}" -n 50 --no-pager
+  journalctl -u "${SERVICE_NAME}" -n 40 --no-pager
 }
 
-option_configure_access() {
+# Dedicated Option 8: Add or Change Manager User & Password
+option_manage_users() {
   require_root
   load_or_init_config
-  echo -e "\nCurrent Domain     : ${CYAN}${DOMAIN}${NC}"
-  echo -e "Current Port       : ${CYAN}${PORT}${NC}"
-  echo -e "Master Admin User  : ${CYAN}${ADMIN_USER}${NC}"
+
+  echo -e "\n${CYAN}┌──────────────────────────────────────────────────────────┐${NC}"
+  echo -e "${CYAN}│        MANAGER TAB — USER & PASSWORD CONFIGURATION       │${NC}"
+  echo -e "${CYAN}└──────────────────────────────────────────────────────────┘${NC}"
+  echo -e "  Current Manager Users : ${YELLOW}$(get_managers_list)${NC}"
+  echo -e "  Primary Master User   : ${GREEN}${ADMIN_USER}${NC}"
+  echo ""
+  echo "  1) Add a new Manager user or change an existing password"
+  echo "  2) Remove a Manager user"
+  echo "  0) Back to main menu"
+  echo ""
+  read -r -p "Select action [0-2]: " U_ACT
+
+  case "${U_ACT}" in
+    1)
+      read -r -p "Enter Manager Username [${ADMIN_USER}]: " NEW_USER
+      NEW_USER="${NEW_USER:-$ADMIN_USER}"
+      NEW_USER=$(echo "${NEW_USER}" | tr -d ' :')
+      if [[ -z "${NEW_USER}" ]]; then
+        log_error "Username cannot be empty."
+        return 1
+      fi
+
+      read -r -p "Enter Password for '${NEW_USER}': " NEW_PASS
+      if [[ -z "${NEW_PASS}" ]]; then
+        log_error "Password cannot be empty."
+        return 1
+      fi
+
+      # Update primary ADMIN_USER / ADMIN_PASS in config.env
+      ADMIN_USER="${NEW_USER}"
+      ADMIN_PASS="${NEW_PASS}"
+      save_config_file
+
+      # Also update or append in managers.conf for multi-user support
+      touch "${MANAGERS_FILE}"
+      grep -v "^${NEW_USER}:" "${MANAGERS_FILE}" > "${MANAGERS_FILE}.tmp" || true
+      echo "${NEW_USER}:${NEW_PASS}" >> "${MANAGERS_FILE}.tmp"
+      mv "${MANAGERS_FILE}.tmp" "${MANAGERS_FILE}"
+      chmod 600 "${MANAGERS_FILE}"
+
+      systemctl restart "${SERVICE_NAME}" 2>/dev/null || true
+      log_info "Manager user '${NEW_USER}' saved and activated immediately!"
+      ;;
+    2)
+      read -r -p "Enter Username to remove: " DEL_USER
+      if [[ -z "${DEL_USER}" ]]; then
+        return 0
+      fi
+      if [[ -f "${MANAGERS_FILE}" ]]; then
+        grep -v "^${DEL_USER}:" "${MANAGERS_FILE}" > "${MANAGERS_FILE}.tmp" || true
+        mv "${MANAGERS_FILE}.tmp" "${MANAGERS_FILE}"
+        log_info "User '${DEL_USER}' removed."
+        systemctl restart "${SERVICE_NAME}" 2>/dev/null || true
+      fi
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
+option_configure_domain_port() {
+  require_root
+  load_or_init_config
+  echo -e "\nCurrent Domain : ${CYAN}${DOMAIN}${NC}"
+  echo -e "Current Port   : ${CYAN}${PORT}${NC}"
   read -r -p "Enter domain name [${DOMAIN}]: " NEW_DOMAIN
   read -r -p "Enter internal port [${PORT}]: " NEW_PORT
-  read -r -p "Enter Master Admin Username [${ADMIN_USER}]: " NEW_ADMIN_USER
-  read -r -p "Enter Master Admin Password [keep current]: " NEW_ADMIN_PASS
 
   DOMAIN="${NEW_DOMAIN:-$DOMAIN}"
   PORT="${NEW_PORT:-$PORT}"
-  ADMIN_USER="${NEW_ADMIN_USER:-$ADMIN_USER}"
-  ADMIN_PASS="${NEW_ADMIN_PASS:-$ADMIN_PASS}"
-
-  cat > "${CONFIG_FILE}" <<EOF
-PORT=${PORT}
-HOST=0.0.0.0
-DOMAIN=${DOMAIN}
-GILEH_DATA_DIR=${DATA_DIR}
-ADMIN_USER=${ADMIN_USER}
-ADMIN_PASS=${ADMIN_PASS}
-EOF
-  chmod 640 "${CONFIG_FILE}"
+  save_config_file
 
   setup_systemd_service
   setup_nginx_proxy
   configure_firewall
   systemctl restart "${SERVICE_NAME}"
-  log_info "Master credentials, domain, and port updated."
+  log_info "Domain and port settings updated."
 }
 
 option_setup_ssl() {
@@ -383,7 +469,7 @@ option_setup_ssl() {
   fi
 }
 
-option_ssl_status_and_renew() {
+option_ssl_status() {
   require_root
   certbot certificates || true
 }
@@ -391,6 +477,7 @@ option_ssl_status_and_renew() {
 option_rebuild() {
   require_root
   build_frontend && systemctl restart "${SERVICE_NAME}"
+  log_info "Frontend rebuilt and service restarted."
 }
 
 option_uninstall() {
@@ -402,10 +489,11 @@ option_uninstall() {
   rm -f "/etc/systemd/system/${SERVICE_NAME}" "${CLI_SHORTCUT}"
   systemctl daemon-reload
   rm -rf "${APP_DIR}"
-  log_info "Uninstalled."
+  log_info "Uninstalled. Data in ${DATA_DIR} preserved."
 }
 
 show_menu() {
+  clear
   load_or_init_config
   local server_ip
   server_ip=$(get_server_ip)
@@ -413,32 +501,27 @@ show_menu() {
   status_badge=$(get_service_state)
   local ssl_badge
   ssl_badge=$(get_ssl_state)
+  local managers_list
+  managers_list=$(get_managers_list)
 
-  echo -e "\n${GREEN}==============================================================${NC}"
-  echo -e "   ${BOLD}GILEH KORD - SSH Deployment, Master Auth & SSL Manager${NC}"
-  echo -e "${GREEN}==============================================================${NC}"
-  echo -e "  App Status  : ${status_badge}"
-  echo -e "  HTTP IP URL : ${CYAN}${BOLD}http://${server_ip}${NC}"
-  echo -e "  Direct Port : ${CYAN}http://${server_ip}:${PORT}${NC}"
-  echo -e "  Domain URL  : ${CYAN}${BOLD}https://${DOMAIN}${NC}"
-  echo -e "  Master User : ${YELLOW}${ADMIN_USER}${NC} (Configure in Option 8)"
-  echo -e "  SSL Status  : ${ssl_badge}"
-  echo -e "  Shortcut    : ${YELLOW}sudo gk${NC}"
-  echo -e "${GREEN}--------------------------------------------------------------${NC}"
-  echo "   1) Install GILEH KORD (Fast Auto-Setup)"
-  echo "   2) Update application from GitHub"
-  echo "   3) Start application"
-  echo "   4) Stop application"
-  echo "   5) Restart application"
-  echo "   6) Check application status"
-  echo "   7) View application logs"
-  echo "   8) Configure Master Username/Password, Domain & Port"
-  echo "   9) Setup / Issue Free Let's Encrypt SSL (Optional)"
-  echo "  10) Check SSL status & test certificate renewal"
-  echo "  11) Rebuild frontend"
-  echo "  12) Uninstall application"
-  echo "  13) Exit"
-  echo -e "${GREEN}==============================================================${NC}"
+  echo -e "${GREEN}┌──────────────────────────────────────────────────────────────┐${NC}"
+  echo -e "${GREEN}│${NC}              ${BOLD}GILEH KORD — SSH CONTROL PANEL${NC}                  ${GREEN}│${NC}"
+  echo -e "${GREEN}├──────────────────────────────────────────────────────────────┤${NC}"
+  echo -e "  Status       : ${status_badge}   ${DIM}|${NC}  SSL: ${ssl_badge}"
+  echo -e "  HTTP IP Link : ${CYAN}${BOLD}http://${server_ip}${NC}"
+  echo -e "  Direct Port  : ${CYAN}http://${server_ip}:${PORT}${NC}"
+  echo -e "  Domain Link  : ${CYAN}https://${DOMAIN}${NC}"
+  echo -e "  Manager User : ${YELLOW}${BOLD}${managers_list}${NC} ${DIM}(Change with Option 8)${NC}"
+  echo -e "  Quick Command: ${GREEN}sudo gk${NC}"
+  echo -e "${GREEN}├──────────────────────────────────────────────────────────────┤${NC}"
+  echo -e "  ${BOLD}1)${NC} Install GILEH KORD          ${BOLD}8)${NC} ${YELLOW}Add / Change Manager User & Pass${NC}"
+  echo -e "  ${BOLD}2)${NC} Update from GitHub          ${BOLD}9)${NC} Configure Domain & Port"
+  echo -e "  ${BOLD}3)${NC} Start Application          ${BOLD}10)${NC} Issue Free Let's Encrypt SSL"
+  echo -e "  ${BOLD}4)${NC} Stop Application           ${BOLD}11)${NC} Check SSL Status"
+  echo -e "  ${BOLD}5)${NC} Restart Application        ${BOLD}12)${NC} Rebuild Frontend"
+  echo -e "  ${BOLD}6)${NC} Check Status               ${BOLD}13)${NC} Uninstall Application"
+  echo -e "  ${BOLD}7)${NC} View Logs                   ${BOLD}0)${NC} Exit"
+  echo -e "${GREEN}└──────────────────────────────────────────────────────────────┘${NC}"
 }
 
 main() {
@@ -449,22 +532,23 @@ main() {
 
   while true; do
     show_menu
-    read -r -p "Select an option [1-13]: " CHOICE
+    read -r -p "Select an option [0-13]: " CHOICE
     case "${CHOICE}" in
-      1) option_install ;;
-      2) option_update ;;
-      3) option_start ;;
-      4) option_stop ;;
-      5) option_restart ;;
-      6) option_status ;;
-      7) option_logs ;;
-      8) option_configure_access ;;
-      9) option_setup_ssl ;;
-      10) option_ssl_status_and_renew ;;
-      11) option_rebuild ;;
-      12) option_uninstall ;;
-      13) log_info "Exiting."; exit 0 ;;
-      *) log_warn "Enter a number between 1 and 13." ;;
+      1)  option_install; pause_return ;;
+      2)  option_update; pause_return ;;
+      3)  option_start; pause_return ;;
+      4)  option_stop; pause_return ;;
+      5)  option_restart; pause_return ;;
+      6)  option_status; pause_return ;;
+      7)  option_logs; pause_return ;;
+      8)  option_manage_users; pause_return ;;
+      9)  option_configure_domain_port; pause_return ;;
+      10) option_setup_ssl; pause_return ;;
+      11) option_ssl_status; pause_return ;;
+      12) option_rebuild; pause_return ;;
+      13) option_uninstall; pause_return ;;
+      0|14|q|Q) clear; log_info "Exited GILEH KORD menu."; exit 0 ;;
+      *)  log_warn "Invalid option."; sleep 1 ;;
     esac
   done
 }
