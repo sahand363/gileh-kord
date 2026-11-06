@@ -12,6 +12,7 @@ const DIST_DIR = path.resolve(__dirname, 'dist');
 const DATA_DIR = process.env.GILEH_DATA_DIR || path.resolve(__dirname, 'data');
 const ADMIN_USER = (process.env.ADMIN_USER || 'admin').trim();
 const ADMIN_PASS = (process.env.ADMIN_PASS || 'admin1234').trim();
+const MANAGERS_FILE = process.env.MANAGERS_FILE || '/etc/gileh-kord/managers.conf';
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -24,6 +25,37 @@ const MIME_TYPES = {
   '.ico': 'image/x-icon',
   '.woff2': 'font/woff2'
 };
+
+function verifyManagerCredentials(username, password) {
+  const cleanUser = String(username || '').trim().toLowerCase();
+  const cleanPass = String(password || '').trim();
+  if (!cleanUser || !cleanPass) return false;
+
+  if (cleanUser === ADMIN_USER.toLowerCase() && cleanPass === ADMIN_PASS) {
+    return true;
+  }
+
+  try {
+    if (fs.existsSync(MANAGERS_FILE)) {
+      const lines = fs.readFileSync(MANAGERS_FILE, 'utf-8').split(/\r?\n/);
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        const sepIdx = trimmed.indexOf(':');
+        if (sepIdx === -1) continue;
+        const u = trimmed.slice(0, sepIdx).trim().toLowerCase();
+        const p = trimmed.slice(sepIdx + 1).trim();
+        if (u === cleanUser && p === cleanPass) {
+          return true;
+        }
+      }
+    }
+  } catch {
+    // Fallback to env credentials
+  }
+
+  return false;
+}
 
 const server = http.createServer((req, res) => {
   const reqUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
@@ -42,7 +74,6 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // Verify Master Username & Password configured via SSH
   if (pathname === '/api/auth/login' && req.method === 'POST') {
     let body = '';
     req.on('data', (chunk) => {
@@ -54,12 +85,9 @@ const server = http.createServer((req, res) => {
         const parsed = JSON.parse(body || '{}');
         const user = String(parsed.username || '').trim();
         const pass = String(parsed.password || '').trim();
-        if (
-          user.toLowerCase() === ADMIN_USER.toLowerCase() &&
-          pass === ADMIN_PASS
-        ) {
+        if (verifyManagerCredentials(user, pass)) {
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ ok: true, username: ADMIN_USER }));
+          res.end(JSON.stringify({ ok: true, username: user }));
         } else {
           res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify({ ok: false, error: 'Invalid credentials' }));
