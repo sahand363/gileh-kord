@@ -2,6 +2,7 @@
   import {
     toJalaliDate,
     toJalaliNumeric,
+    toJalaliDateTime,
     getTodayISODate,
     formatNumber
   } from '../../utils/formatters';
@@ -14,8 +15,10 @@
   import {
     dashboardSummary,
     appSettings,
-    clearDemoDataset,
-    loadDemoDataset
+    pendingServerUpdate,
+    acceptServerUpdate,
+    dismissServerUpdatePrompt,
+    clearDemoDataset
   } from '../../stores/purchaseStore';
   import { settingsRepository } from '../../services/repositories/SettingsRepository';
   import { runtimeState } from '../../services/pwaService';
@@ -45,14 +48,14 @@
     );
   }
 
-  async function handleClearDemo() {
-    await clearDemoDataset();
-    showToast('داده‌های نمونه آزمایشی پاک شدند. فقط اطلاعات واقعی شما نمایش داده می‌شود.');
+  async function handleAcceptServerSync() {
+    await acceptServerUpdate();
+    showToast('آخرین اطلاعات ثبت‌شده از سرور دریافت و جایگزین شد.');
   }
 
-  async function handleRestoreDemo() {
-    await loadDemoDataset();
-    showToast('داده‌های نمونه آزمایشی مجدداً بارگذاری شدند.');
+  async function handleClearDemo() {
+    await clearDemoDataset();
+    showToast('داده‌های نمونه آزمایشی پاک شدند.');
   }
 </script>
 
@@ -66,7 +69,7 @@
     <span class="brand-mark">گ</span>
     <span>
       <strong>{$appSettings.restaurantName || 'گیله‌کُرد'}</strong>
-      <small>{$appSettings.branchName || 'مدیریت جامع خرید و تدارکات رستوران'}</small>
+      <small>{$appSettings.branchName || 'شعبه مرکزی'}</small>
     </span>
   </a>
 
@@ -75,7 +78,6 @@
       type="button"
       class="currency-toggle-pill"
       on:click={toggleReportingCurrency}
-      title="تغییر واحد نمایش مبالغ (تومان / ریال) بدون تغییر داده‌های ذخیره‌شده"
     >
       <span>واحد نمایش:</span>
       <strong>{currentRepCurrency === 'RIAL' ? 'ریال (×۱۰)' : 'تومان'}</strong>
@@ -84,15 +86,14 @@
     <span
       class="conn-pill"
       class:offline={!$runtimeState.isOnline}
-      title={$runtimeState.swMessage}
     >
       <span class="status-dot" class:muted={!$runtimeState.isOnline}></span>
       {#if !$runtimeState.isOnline}
-        <span>آفلاین | ذخیره در دستگاه</span>
+        <span>آفلاین</span>
       {:else if $backendStatus === 'connected'}
-        <span>سرور SQLite متصل</span>
+        <span>سرور متصل</span>
       {:else}
-        <span>آنلاین | حافظه محلی فعال</span>
+        <span>آنلاین</span>
       {/if}
     </span>
 
@@ -117,29 +118,42 @@
 </nav>
 
 <div class="demo-banner">
+  {#if $pendingServerUpdate}
+    <div
+      class="demo-banner-box"
+      style="margin-bottom: 10px; background: #e8f3ec; border-color: #9ec5ad; color: #173f35;"
+    >
+      <span>
+        <strong>بروزرسانی جدید روی سرور موجود است:</strong>
+        آخرین تغییر: «{$pendingServerUpdate.lastAction || 'همگام‌سازی'}» توسط
+        <strong>{$pendingServerUpdate.lastActor || 'کاربر'}</strong>
+        {#if $pendingServerUpdate.updatedAt}
+          در {toJalaliDateTime($pendingServerUpdate.updatedAt)}
+        {/if}
+        ({formatNumber($pendingServerUpdate.counts?.purchases || 0)} خرید،
+        {formatNumber($pendingServerUpdate.counts?.revenues || 0)} روز درآمد).
+        آیا مایلید آخرین اطلاعات سرور در این مرورگر بارگذاری شود؟
+      </span>
+      <div class="demo-banner-actions">
+        <button type="button" class="secondary-btn" on:click={handleAcceptServerSync}>
+          ✓ بله، دریافت آخرین اطلاعات سرور
+        </button>
+        <button type="button" class="quiet-btn" on:click={dismissServerUpdatePrompt}>
+          فعلاً نه
+        </button>
+      </div>
+    </div>
+  {/if}
+
   {#if $dashboardSummary.demoCount > 0}
     <div class="demo-banner-box">
       <span>
-        <strong>حالت نمایشی فعال:</strong>
-        در حال حاضر <strong>{formatNumber($dashboardSummary.demoCount)}</strong> ردیف با برچسب
-        <span class="badge-demo">نمونه آزمایشی</span> و
-        <strong>{formatNumber($dashboardSummary.realCount)}</strong> خرید
-        <span class="badge-real">ثبت واقعی</span> در سامانه وجود دارد.
+        <strong>حالت نمایشی:</strong>
+        <strong>{formatNumber($dashboardSummary.demoCount)}</strong> ردیف نمونه آزمایشی در این مرورگر وجود دارد.
       </span>
       <div class="demo-banner-actions">
         <button type="button" class="quiet-btn" on:click={handleClearDemo}>
           پاک کردن داده‌های نمونه
-        </button>
-      </div>
-    </div>
-  {:else if $dashboardSummary.totalPurchasesCount === 0}
-    <div class="demo-banner-box">
-      <span>
-        پایگاه داده خالی است. می‌توانید اولین خرید واقعی خود را ثبت کنید یا داده‌های نمونه آزمایشی را بارگذاری نمایید.
-      </span>
-      <div class="demo-banner-actions">
-        <button type="button" class="secondary-btn" on:click={handleRestoreDemo}>
-          بارگذاری داده‌های نمونه آزمایشی
         </button>
       </div>
     </div>
