@@ -1,6 +1,6 @@
 <script lang="ts">
   import { backupService } from '../../services/BackupService';
-  import { apiClient } from '../../services/api/apiClient';
+  import { apiClient, backendStatus } from '../../services/api/apiClient';
   import {
     loadPurchases,
     loadDemoDataset,
@@ -61,6 +61,7 @@
     if (!file) return;
 
     backupError = '';
+    sqliteSyncMessage = '';
     isProcessing = true;
 
     try {
@@ -82,13 +83,24 @@
       const count = validation.normalizedBackup.purchases.length;
       const exportDateLabel = toJalaliDateTime(validation.normalizedBackup.exportedAt);
       const confirmed = window.confirm(
-        `آیا از بازیابی فایل پشتیبان اطمینان دارید؟\nتاریخ فایل: ${exportDateLabel}\nتعداد خریدها: ${formatNumber(count)} مورد\nاین اطلاعات جایگزین داده‌های فعلی مرورگر خواهد شد.`
+        `آیا از بازیابی فایل پشتیبان اطمینان دارید؟\nتاریخ فایل: ${exportDateLabel}\nتعداد خریدها: ${formatNumber(count)} مورد`
       );
       if (!confirmed) return;
 
-      await backupService.restoreBackup(parsed);
+      // 1. Restore locally to IndexedDB
+      const normalized = await backupService.restoreBackup(parsed);
+
+      // 2. Also sync immediately to Go SQLite backend if reachable
+      try {
+        const res = await apiClient.importBackupToSQLite(normalized);
+        sqliteSyncMessage = `فایل پشتیبان هم در مرورگر و هم در سرور Go SQLite (${formatNumber(res.importedPurchases)} خرید و ${formatNumber(res.importedProducts)} کالا) همگام‌سازی شد.`;
+      } catch {
+        sqliteSyncMessage =
+          'اطلاعات در مرورگر بازیابی شد (در صورت روشن بودن سرور Go، دکمه همگام‌سازی پایین را بزنید).';
+      }
+
       await loadPurchases(false);
-      showToast('تمامی اطلاعات از فایل پشتیبان با موفقیت بازیابی شد.');
+      showToast('اطلاعات قدیمی شما با موفقیت بازیابی و همگام‌سازی شد.');
     } catch (err) {
       console.error(err);
       backupError =
@@ -110,13 +122,14 @@
     try {
       const backup = await backupService.exportBackup();
       const res = await apiClient.importBackupToSQLite(backup);
-      sqliteSyncMessage = `درون‌ریزی در سرور SQLite انجام شد: ${formatNumber(res.importedPurchases)} خرید، ${formatNumber(res.importedProducts)} کالا و ${formatNumber(res.importedEmployees)} کارمند ثبت شد.`;
-      showToast('داده‌های محلی با موفقیت به پایگاه داده SQLite سرور منتقل شدند.');
+      await loadPurchases(false);
+      sqliteSyncMessage = `همگام‌سازی کامل انجام شد: ${formatNumber(res.importedPurchases)} فاکتور خرید، ${formatNumber(res.importedProducts)} کالا و ${formatNumber(res.importedEmployees)} کارمند در پایگاه داده SQLite سرور ثبت شدند.`;
+      showToast('تمام اطلاعات با پایگاه داده Go SQLite سرور همگام شد.');
     } catch (err) {
       backupError =
         err instanceof Error
           ? err.message
-          : 'عدم ارتباط با سرور بک‌اند Go (اطمینان حاصل کنید سرور روی پورت 8080 فعال است).';
+          : 'خطا در ارتباط با سرور Go SQLite.';
     } finally {
       isProcessing = false;
     }
@@ -136,56 +149,31 @@
 <section class="page active" aria-labelledby="backupTitle">
   <div class="page-heading">
     <div>
-      <p class="eyebrow">امنیت، پشتیبان‌گیری و انتقال به سرور مرکزی SQLite</p>
-      <h1 id="backupTitle">پشتیبان‌گیری و بازیابی</h1>
+      <p class="eyebrow">وارد کردن اطلاعات نسخه قبلی و همگام‌سازی با سرور Go SQLite</p>
+      <h1 id="backupTitle">پشتیبان‌گیری و انتقال اطلاعات</h1>
     </div>
   </div>
 
   <div class="settings-grid">
-    <section class="panel setting-card">
-      <div class="setting-icon">⇧</div>
+    <!-- Step 1: Import Old JSON Backup File -->
+    <section class="panel setting-card" style="border-color: var(--green-2); background: #f8fbf9;">
+      <div class="setting-icon">۱</div>
       <div class="setting-content">
-        <h3>دریافت فایل پشتیبان (Export JSON)</h3>
+        <h3>گام اول: وارد کردن اطلاعات از نسخه قبلی (فایل JSON)</h3>
         <p>
-          خروجی کامل شامل {formatNumber($dashboardSummary.totalPurchasesCount)} خرید،
-          {formatNumber($dashboardSummary.productsCount)} کالا،
-          {formatNumber($dashboardSummary.suppliersCount)} تأمین‌کننده، موجودی انبار و هزینه‌ها.
-        </p>
-        <div class="setting-actions">
-          <button
-            id="backupBtn"
-            type="button"
-            class="primary-btn"
-            style="max-width: 260px;"
-            disabled={isProcessing}
-            on:click={handleExportJSON}
-          >
-            <span>دانلود فایل پشتیبان JSON</span>
-            <span class="btn-arrow">←</span>
-          </button>
-        </div>
-        {#if lastExportedJalali}
-          <small>آخرین خروجی تهیه‌شده در این نشست: {lastExportedJalali}</small>
-        {/if}
-      </div>
-    </section>
-
-    <section class="panel setting-card">
-      <div class="setting-icon">▤</div>
-      <div class="setting-content">
-        <h3>بازیابی از فایل پشتیبان (Import & Validate JSON)</h3>
-        <p>
-          انتخاب فایل پشتیبان قبلی (نسخه ۱ تا ۳) برای بازگردانی اطلاعات. فایل پیش از اعمال به‌طور کامل اعتبارسنجی می‌شود.
+          اگر از نسخه قبلی فایل پشتیبان (`.json`) دارید، آن را انتخاب کنید تا تمام خریدها، کالاها، کارکنان و درآمدهای قبلی شما وارد سیستم شده و به صورت خودکار به سرور Go نیز منتقل شوند.
         </p>
         <div class="setting-actions">
           <button
             id="restoreBtn"
             type="button"
-            class="secondary-btn"
+            class="primary-btn"
+            style="max-width: 290px;"
             disabled={isProcessing}
             on:click={triggerRestore}
           >
-            انتخاب فایل JSON برای بازیابی
+            <span>انتخاب فایل پشتیبان قبلی (.json)</span>
+            <span class="btn-arrow">←</span>
           </button>
           <input
             id="restoreFile"
@@ -204,12 +192,18 @@
       </div>
     </section>
 
+    <!-- Step 2: Sync Current Browser Data directly with Go SQLite Server -->
     <section class="panel setting-card" style="border-color: var(--green-2); background: #f8fbf9;">
-      <div class="setting-icon">⇄</div>
+      <div class="setting-icon">۲</div>
       <div class="setting-content">
-        <h3>انتقال صریح داده‌های محلی به سرور Go + SQLite</h3>
+        <h3>
+          گام دوم: همگام‌سازی اطلاعات فعلی مرورگر با سرور Go (SQLite)
+          {#if $backendStatus === 'connected'}
+            <span class="badge-real">سرور Go متصل است</span>
+          {/if}
+        </h3>
         <p>
-          ارسال داده‌های فعلی مرورگر (IndexedDB) به سرور بک‌اند Go (`POST /api/import/backup`) بدون پاک کردن رکوردهای قبلی سرور.
+          با زدن این دکمه، تمام اطلاعات موجود در این مرورگر ({formatNumber($dashboardSummary.totalPurchasesCount)} خرید و {formatNumber($dashboardSummary.productsCount)} کالا) مستقیماً در پایگاه داده SQLite سرور ذخیره و همگام می‌شوند.
         </p>
         <div class="setting-actions">
           <button
@@ -218,28 +212,56 @@
             disabled={isProcessing}
             on:click={handlePushToSQLiteBackend}
           >
-            انتقال داده‌ها به پایگاه داده SQLite سرور
+            ⇄ همگام‌سازی فوری اطلاعات با سرور Go (SQLite)
           </button>
         </div>
         {#if sqliteSyncMessage}
-          <small style="color: var(--green); font-weight: 700;">{sqliteSyncMessage}</small>
+          <p style="color: var(--green); font-weight: 800; margin-top: 10px; margin-bottom: 0;">
+            ✓ {sqliteSyncMessage}
+          </p>
         {/if}
       </div>
     </section>
 
+    <!-- Export JSON Backup -->
+    <section class="panel setting-card">
+      <div class="setting-icon">⇧</div>
+      <div class="setting-content">
+        <h3>دریافت فایل پشتیبان جدید (Export JSON)</h3>
+        <p>
+          دانلود یک نسخه کامل JSON از تمام اطلاعات فعلی برای نگهداری امن.
+        </p>
+        <div class="setting-actions">
+          <button
+            id="backupBtn"
+            type="button"
+            class="secondary-btn"
+            disabled={isProcessing}
+            on:click={handleExportJSON}
+          >
+            دانلود فایل پشتیبان JSON
+          </button>
+        </div>
+        {#if lastExportedJalali}
+          <small>آخرین خروجی: {lastExportedJalali}</small>
+        {/if}
+      </div>
+    </section>
+
+    <!-- Demo Data Controls -->
     <section class="panel setting-card">
       <div class="setting-icon">✳</div>
       <div class="setting-content">
-        <h3>مدیریت داده‌های نمونه آزمایشی (Demo Data)</h3>
+        <h3>پاک کردن داده‌های نمونه آزمایشی</h3>
         <p>
-          داده‌های نمونه با برچسب «نمونه آزمایشی» از خریدهای واقعی شما متمایز هستند.
+          حذف ردیف‌های آزمایشی و نگه داشتن فقط اطلاعات واقعی رستوران شما.
         </p>
         <div class="setting-actions">
-          <button type="button" class="secondary-btn" on:click={handleReloadDemo}>
-            بارگذاری مجدد داده‌های نمونه آزمایشی
-          </button>
           <button type="button" class="quiet-btn" on:click={handleRemoveDemo}>
             حذف تمام داده‌های نمونه (حفظ خریدهای واقعی)
+          </button>
+          <button type="button" class="quiet-btn" on:click={handleReloadDemo}>
+            بارگذاری مجدد داده‌های نمونه
           </button>
         </div>
       </div>
