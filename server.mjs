@@ -9,7 +9,6 @@ const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '0.0.0.0';
-const GO_BACKEND_PORT = Number(process.env.SERVER_PORT || 8080);
 const DIST_DIR = path.resolve(__dirname, 'dist');
 const DATA_DIR = process.env.GILEH_DATA_DIR || path.resolve(__dirname, 'data');
 const ADMIN_USER = (process.env.ADMIN_USER || 'admin').trim();
@@ -18,6 +17,8 @@ const MANAGERS_FILE = process.env.MANAGERS_FILE || '/etc/gileh-kord/managers.con
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 const SERVER_STORE_FILE = path.join(DATA_DIR, 'server_synced_store.json');
+const SNAPSHOTS_FILE = path.join(DATA_DIR, 'server_snapshots.json');
+const MAX_SNAPSHOTS = 30;
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -31,25 +32,40 @@ const MIME_TYPES = {
   '.woff2': 'font/woff2'
 };
 
+function stripDemoItems(list) {
+  if (!Array.isArray(list)) return [];
+  return list.filter((item) => item && !item.isDemo);
+}
+
 function readServerStore() {
   try {
     if (fs.existsSync(SERVER_STORE_FILE)) {
       const parsed = JSON.parse(fs.readFileSync(SERVER_STORE_FILE, 'utf-8'));
       return {
-        products: Array.isArray(parsed.products) ? parsed.products : [],
-        purchases: Array.isArray(parsed.purchases) ? parsed.purchases : [],
-        suppliers: Array.isArray(parsed.suppliers) ? parsed.suppliers : [],
-        employees: Array.isArray(parsed.employees) ? parsed.employees : [],
-        revenues: Array.isArray(parsed.revenues) ? parsed.revenues : [],
-        timesheets: Array.isArray(parsed.timesheets) ? parsed.timesheets : [],
-        expenses: Array.isArray(parsed.expenses) ? parsed.expenses : [],
-        inventory: Array.isArray(parsed.inventory) ? parsed.inventory : []
+        version: 3,
+        updatedAt: parsed.updatedAt || null,
+        lastActor: parsed.lastActor || 'کاربر',
+        lastAction: parsed.lastAction || 'همگام‌سازی',
+        products: stripDemoItems(parsed.products),
+        purchases: stripDemoItems(parsed.purchases),
+        suppliers: stripDemoItems(parsed.suppliers),
+        employees: stripDemoItems(parsed.employees),
+        revenues: stripDemoItems(parsed.revenues),
+        timesheets: stripDemoItems(parsed.timesheets),
+        expenses: stripDemoItems(parsed.expenses),
+        inventory: stripDemoItems(parsed.inventory),
+        menuItems: stripDemoItems(parsed.menuItems),
+        settings: parsed.settings || {}
       };
     }
   } catch {
     // Return empty default
   }
   return {
+    version: 3,
+    updatedAt: null,
+    lastActor: '',
+    lastAction: '',
     products: [],
     purchases: [],
     suppliers: [],
@@ -57,7 +73,9 @@ function readServerStore() {
     revenues: [],
     timesheets: [],
     expenses: [],
-    inventory: []
+    inventory: [],
+    menuItems: [],
+    settings: {}
   };
 }
 
@@ -65,15 +83,37 @@ function writeServerStore(data) {
   fs.writeFileSync(SERVER_STORE_FILE, JSON.stringify(data, null, 2), 'utf-8');
 }
 
-function mergeById(existingList, incomingList) {
-  const map = new Map();
-  for (const item of existingList || []) {
-    if (item && item.id) map.set(item.id, item);
+function readSnapshots() {
+  try {
+    if (fs.existsSync(SNAPSHOTS_FILE)) {
+      const list = JSON.parse(fs.readFileSync(SNAPSHOTS_FILE, 'utf-8'));
+      return Array.isArray(list) ? list : [];
+    }
+  } catch {
+    // Ignore
   }
-  for (const item of incomingList || []) {
-    if (item && item.id) map.set(item.id, item);
-  }
-  return Array.from(map.values());
+  return [];
+}
+
+function recordSnapshot(actor, actionSummary, state) {
+  const snapshots = readSnapshots();
+  const snap = {
+    id: `snap_${Date.now()}_${crypto.randomUUID().slice(0, 6)}`,
+    timestamp: state.updatedAt || new Date().toISOString(),
+    actor: actor || 'کاربر',
+    actionSummary: actionSummary || 'بروزرسانی اطلاعات',
+    counts: {
+      purchases: (state.purchases || []).length,
+      revenues: (state.revenues || []).length,
+      employees: (state.employees || []).length,
+      menuItems: (state.menuItems || []).length
+    },
+    state
+  };
+  snapshots.unshift(snap);
+  const trimmed = snapshots.slice(0, MAX_SNAPSHOTS);
+  fs.writeFileSync(SNAPSHOTS_FILE, JSON.stringify(trimmed, null, 2), 'utf-8');
+  return snap;
 }
 
 function verifyManagerCredentials(username, password) {
@@ -113,7 +153,7 @@ function readRawBody(req) {
     let total = 0;
     req.on('data', (chunk) => {
       total += chunk.length;
-      if (total > 15 * 1024 * 1024) {
+      if (total > 20 * 1024 * 1024) {
         req.destroy();
         reject(new Error('Payload too large'));
         return;
@@ -123,45 +163,6 @@ function readRawBody(req) {
     req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
   });
-}
-
-function tryForwardToGo(req, rawBody, res, fallbackFn) {
-  const proxyReq = http.request(
-    {
-      hostname: '127.0.0.1',
-      port: GO_BACKEND_PORT,
-      path: req.url,
-      method: req.method,
-      headers: {
-        ...req.headers,
-        'content-length': rawBody.length
-      },
-      timeout: 1200
-    },
-    (proxyRes) => {
-      if (proxyRes.statusCode === 404) {
-        proxyRes.resume();
-        fallbackFn();
-        return;
-      }
-      res.writeHead(proxyRes.statusCode || 200, proxyRes.headers);
-      proxyRes.pipe(res, { end: true });
-    }
-  );
-
-  proxyReq.on('error', () => {
-    fallbackFn();
-  });
-
-  proxyReq.on('timeout', () => {
-    proxyReq.destroy();
-    fallbackFn();
-  });
-
-  if (rawBody.length > 0) {
-    proxyReq.write(rawBody);
-  }
-  proxyReq.end();
 }
 
 function sendJson(res, status, payload) {
@@ -184,6 +185,16 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    if (pathname === '/api/health' || pathname === '/api/status') {
+      sendJson(res, 200, {
+        app: 'GILEH KORD',
+        status: 'ok',
+        dataDir: DATA_DIR,
+        timestamp: new Date().toISOString()
+      });
+      return;
+    }
+
     if (pathname === '/api/auth/login' && req.method === 'POST') {
       try {
         const parsed = JSON.parse(rawBody.toString('utf-8') || '{}');
@@ -200,112 +211,165 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    tryForwardToGo(req, rawBody, res, () => {
-      if (pathname === '/api/health' || pathname === '/api/status') {
+    // 1. Check Sync Metadata (used by new browsers to ask if user wants latest data)
+    if (pathname === '/api/sync/meta' && req.method === 'GET') {
+      const store = readServerStore();
+      sendJson(res, 200, {
+        updatedAt: store.updatedAt,
+        lastActor: store.lastActor,
+        lastAction: store.lastAction,
+        counts: {
+          purchases: store.purchases.length,
+          revenues: store.revenues.length,
+          employees: store.employees.length,
+          menuItems: store.menuItems.length
+        }
+      });
+      return;
+    }
+
+    // 2. Pull Full State (Purchases, Revenues, Timesheets, Employees, Menu, etc.)
+    if (pathname === '/api/sync/state' && req.method === 'GET') {
+      const store = readServerStore();
+      sendJson(res, 200, {
+        updatedAt: store.updatedAt || new Date().toISOString(),
+        state: {
+          version: 3,
+          exportedAt: store.updatedAt || new Date().toISOString(),
+          products: store.products,
+          purchases: store.purchases,
+          suppliers: store.suppliers,
+          employees: store.employees,
+          revenues: store.revenues,
+          timesheets: store.timesheets,
+          expenses: store.expenses,
+          inventory: store.inventory,
+          menuItems: store.menuItems,
+          settings: store.settings
+        }
+      });
+      return;
+    }
+
+    // 3. Push Full State & Record Revertible Snapshot
+    if ((pathname === '/api/sync/push' || pathname === '/api/import/backup') && req.method === 'POST') {
+      try {
+        const body = JSON.parse(rawBody.toString('utf-8') || '{}');
+        const incoming = body.state ? body.state : body;
+        const actor = String(body.actor || 'کاربر').trim();
+        const actionSummary = String(body.actionSummary || 'همگام‌سازی کامل اطلاعات').trim();
+        const now = new Date().toISOString();
+
+        const newState = {
+          version: 3,
+          updatedAt: now,
+          lastActor: actor,
+          lastAction: actionSummary,
+          products: stripDemoItems(incoming.products),
+          purchases: stripDemoItems(incoming.purchases),
+          suppliers: stripDemoItems(incoming.suppliers),
+          employees: stripDemoItems(incoming.employees),
+          revenues: stripDemoItems(incoming.revenues),
+          timesheets: stripDemoItems(incoming.timesheets),
+          expenses: stripDemoItems(incoming.expenses),
+          inventory: stripDemoItems(incoming.inventory),
+          menuItems: stripDemoItems(incoming.menuItems),
+          settings: incoming.settings || {}
+        };
+
+        writeServerStore(newState);
+        const snap = recordSnapshot(actor, actionSummary, newState);
+
         sendJson(res, 200, {
-          app: 'GILEH KORD',
-          status: 'ok',
-          dataDir: DATA_DIR,
-          timestamp: new Date().toISOString()
+          ok: true,
+          imported: true,
+          updatedAt: now,
+          snapshotId: snap.id,
+          importedProducts: newState.products.length,
+          importedSuppliers: newState.suppliers.length,
+          importedEmployees: newState.employees.length,
+          importedPurchases: newState.purchases.length
         });
-        return;
+      } catch {
+        sendJson(res, 400, { error: { message: 'ساختار داده ارسالی معتبر نیست' } });
       }
+      return;
+    }
 
-      if (pathname === '/api/import/backup' && req.method === 'POST') {
-        try {
-          const payload = JSON.parse(rawBody.toString('utf-8') || '{}');
-          const store = readServerStore();
-          store.products = mergeById(store.products, payload.products);
-          store.purchases = mergeById(store.purchases, payload.purchases);
-          store.suppliers = mergeById(store.suppliers, payload.suppliers);
-          store.employees = mergeById(store.employees, payload.employees);
-          store.revenues = mergeById(store.revenues, payload.revenues);
-          store.timesheets = mergeById(store.timesheets, payload.timesheets);
-          store.expenses = mergeById(store.expenses, payload.expenses);
-          store.inventory = mergeById(store.inventory, payload.inventory);
-          writeServerStore(store);
+    // 4. List Snapshots for Manager Revert Tab
+    if (pathname === '/api/sync/history' && req.method === 'GET') {
+      const snaps = readSnapshots().map((s) => ({
+        id: s.id,
+        timestamp: s.timestamp,
+        actor: s.actor,
+        actionSummary: s.actionSummary,
+        counts: s.counts
+      }));
+      sendJson(res, 200, { items: snaps });
+      return;
+    }
 
-          sendJson(res, 200, {
-            imported: true,
-            importedProducts: store.products.length,
-            importedSuppliers: store.suppliers.length,
-            importedEmployees: store.employees.length,
-            importedPurchases: store.purchases.length
-          });
-        } catch {
-          sendJson(res, 400, { error: { message: 'ساختار فایل پشتیبان معتبر نیست' } });
+    // 5. Revert to a Selected Snapshot
+    if (pathname === '/api/sync/revert' && req.method === 'POST') {
+      try {
+        const body = JSON.parse(rawBody.toString('utf-8') || '{}');
+        const snapId = String(body.snapshotId || '').trim();
+        const actor = String(body.actor || 'مدیر').trim();
+        const snaps = readSnapshots();
+        const target = snaps.find((s) => s.id === snapId);
+        if (!target || !target.state) {
+          sendJson(res, 404, { error: { message: 'نسخه مورد نظر در تاریخچه یافت نشد.' } });
+          return;
         }
-        return;
-      }
 
-      if (pathname === '/api/products' && req.method === 'GET') {
-        const store = readServerStore();
-        sendJson(res, 200, { items: store.products });
-        return;
-      }
+        const now = new Date().toISOString();
+        const restoredState = {
+          ...target.state,
+          updatedAt: now,
+          lastActor: actor,
+          lastAction: `بازگشت به نسخه: ${target.actionSummary}`
+        };
 
-      if (pathname === '/api/purchases' && req.method === 'GET') {
-        const store = readServerStore();
-        sendJson(res, 200, { items: store.purchases });
-        return;
-      }
+        writeServerStore(restoredState);
+        recordSnapshot(actor, `بازگشت به نسخه قبلی (${target.actionSummary})`, restoredState);
 
-      if (pathname === '/api/purchases' && req.method === 'POST') {
-        try {
-          const input = JSON.parse(rawBody.toString('utf-8') || '{}');
-          const store = readServerStore();
-          const now = new Date().toISOString();
-          const newPurchase = {
-            id: input.id || `purch_${crypto.randomUUID()}`,
-            productId: input.productId || `prod_${crypto.randomUUID()}`,
-            productName: String(input.productName || '').trim(),
-            quantity: Number(input.quantity) || 1,
-            unit: String(input.unit || 'کیلوگرم'),
-            totalAmount: Math.round(Number(input.totalAmount) || 0),
-            currency: 'IRT',
-            purchaseDate: String(input.purchaseDate || now.slice(0, 10)),
-            employeeId: input.employeeId || undefined,
-            employeeNameSnapshot: input.employeeNameSnapshot || undefined,
-            supplierName: input.supplierName || undefined,
-            invoiceNumber: input.invoiceNumber || undefined,
-            notes: input.notes || undefined,
-            isDemo: false,
-            createdAt: now,
-            updatedAt: now
-          };
-          store.purchases = mergeById(store.purchases, [newPurchase]);
-          writeServerStore(store);
-          sendJson(res, 201, { purchase: newPurchase, product: null });
-        } catch {
-          sendJson(res, 400, { error: { message: 'خطا در ثبت خرید' } });
-        }
-        return;
+        sendJson(res, 200, {
+          ok: true,
+          updatedAt: now,
+          state: {
+            version: 3,
+            exportedAt: now,
+            products: restoredState.products,
+            purchases: restoredState.purchases,
+            suppliers: restoredState.suppliers,
+            employees: restoredState.employees,
+            revenues: restoredState.revenues,
+            timesheets: restoredState.timesheets,
+            expenses: restoredState.expenses,
+            inventory: restoredState.inventory,
+            menuItems: restoredState.menuItems,
+            settings: restoredState.settings
+          }
+        });
+      } catch {
+        sendJson(res, 400, { error: { message: 'خطا در بازگردانی نسخه' } });
       }
+      return;
+    }
 
-      if (pathname.startsWith('/api/purchases/') && req.method === 'PUT') {
-        try {
-          const id = pathname.replace('/api/purchases/', '').trim();
-          const input = JSON.parse(rawBody.toString('utf-8') || '{}');
-          const store = readServerStore();
-          const idx = store.purchases.findIndex((p) => p.id === id);
-          const now = new Date().toISOString();
-          const updated = {
-            ...(idx >= 0 ? store.purchases[idx] : { id, createdAt: now }),
-            ...input,
-            id,
-            updatedAt: now
-          };
-          store.purchases = mergeById(store.purchases, [updated]);
-          writeServerStore(store);
-          sendJson(res, 200, updated);
-        } catch {
-          sendJson(res, 400, { error: { message: 'خطا در ویرایش خرید' } });
-        }
-        return;
-      }
+    if (pathname === '/api/products' && req.method === 'GET') {
+      const store = readServerStore();
+      sendJson(res, 200, { items: store.products });
+      return;
+    }
 
-      sendJson(res, 404, { error: { message: 'مسیر API یافت نشد' } });
-    });
+    if (pathname === '/api/purchases' && req.method === 'GET') {
+      const store = readServerStore();
+      sendJson(res, 200, { items: store.purchases });
+      return;
+    }
+
+    sendJson(res, 404, { error: { message: 'مسیر API یافت نشد' } });
     return;
   }
 
