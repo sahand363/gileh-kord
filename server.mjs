@@ -1,6 +1,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -33,16 +34,46 @@ const MIME_TYPES = {
 function readServerStore() {
   try {
     if (fs.existsSync(SERVER_STORE_FILE)) {
-      return JSON.parse(fs.readFileSync(SERVER_STORE_FILE, 'utf-8'));
+      const parsed = JSON.parse(fs.readFileSync(SERVER_STORE_FILE, 'utf-8'));
+      return {
+        products: Array.isArray(parsed.products) ? parsed.products : [],
+        purchases: Array.isArray(parsed.purchases) ? parsed.purchases : [],
+        suppliers: Array.isArray(parsed.suppliers) ? parsed.suppliers : [],
+        employees: Array.isArray(parsed.employees) ? parsed.employees : [],
+        revenues: Array.isArray(parsed.revenues) ? parsed.revenues : [],
+        timesheets: Array.isArray(parsed.timesheets) ? parsed.timesheets : [],
+        expenses: Array.isArray(parsed.expenses) ? parsed.expenses : [],
+        inventory: Array.isArray(parsed.inventory) ? parsed.inventory : []
+      };
     }
   } catch {
     // Return empty default
   }
-  return { products: [], purchases: [], suppliers: [], employees: [] };
+  return {
+    products: [],
+    purchases: [],
+    suppliers: [],
+    employees: [],
+    revenues: [],
+    timesheets: [],
+    expenses: [],
+    inventory: []
+  };
 }
 
 function writeServerStore(data) {
   fs.writeFileSync(SERVER_STORE_FILE, JSON.stringify(data, null, 2), 'utf-8');
+}
+
+function mergeById(existingList, incomingList) {
+  const map = new Map();
+  for (const item of existingList || []) {
+    if (item && item.id) map.set(item.id, item);
+  }
+  for (const item of incomingList || []) {
+    if (item && item.id) map.set(item.id, item);
+  }
+  return Array.from(map.values());
 }
 
 function verifyManagerCredentials(username, password) {
@@ -76,128 +107,204 @@ function verifyManagerCredentials(username, password) {
   return false;
 }
 
-function proxyToGoBackend(req, res, fallbackHandler) {
+function readRawBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let total = 0;
+    req.on('data', (chunk) => {
+      total += chunk.length;
+      if (total > 15 * 1024 * 1024) {
+        req.destroy();
+        reject(new Error('Payload too large'));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+function tryForwardToGo(req, rawBody, res, fallbackFn) {
   const proxyReq = http.request(
     {
       hostname: '127.0.0.1',
       port: GO_BACKEND_PORT,
       path: req.url,
       method: req.method,
-      headers: req.headers,
-      timeout: 1500
+      headers: {
+        ...req.headers,
+        'content-length': rawBody.length
+      },
+      timeout: 1200
     },
     (proxyRes) => {
+      if (proxyRes.statusCode === 404) {
+        proxyRes.resume();
+        fallbackFn();
+        return;
+      }
       res.writeHead(proxyRes.statusCode || 200, proxyRes.headers);
       proxyRes.pipe(res, { end: true });
     }
   );
 
   proxyReq.on('error', () => {
-    fallbackHandler();
+    fallbackFn();
   });
 
-  req.pipe(proxyReq, { end: true });
+  proxyReq.on('timeout', () => {
+    proxyReq.destroy();
+    fallbackFn();
+  });
+
+  if (rawBody.length > 0) {
+    proxyReq.write(rawBody);
+  }
+  proxyReq.end();
 }
 
-function collectJsonBody(req, callback) {
-  let body = '';
-  req.on('data', (chunk) => {
-    body += chunk;
-    if (body.length > 10 * 1024 * 1024) req.destroy();
-  });
-  req.on('end', () => {
-    try {
-      callback(null, JSON.parse(body || '{}'));
-    } catch (err) {
-      callback(err, null);
-    }
-  });
+function sendJson(res, status, payload) {
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(JSON.stringify(payload));
 }
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
   const reqUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
   const pathname = decodeURIComponent(reqUrl.pathname);
 
-  if (pathname === '/api/auth/login' && req.method === 'POST') {
-    collectJsonBody(req, (err, parsed) => {
-      if (err) {
-        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ ok: false, error: 'Bad request' }));
+  if (pathname.startsWith('/api/')) {
+    let rawBody = Buffer.alloc(0);
+    if (req.method === 'POST' || req.method === 'PUT') {
+      try {
+        rawBody = await readRawBody(req);
+      } catch {
+        sendJson(res, 400, { error: { message: 'بدنه درخواست نامعتبر است' } });
         return;
       }
-      const user = String(parsed.username || '').trim();
-      const pass = String(parsed.password || '').trim();
-      if (verifyManagerCredentials(user, pass)) {
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ ok: true, username: user }));
-      } else {
-        res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ ok: false, error: 'Invalid credentials' }));
-      }
-    });
-    return;
-  }
+    }
 
-  if (pathname.startsWith('/api/')) {
-    proxyToGoBackend(req, res, () => {
-      // Built-in server persistence if Go daemon on 8080 is not running separately
+    if (pathname === '/api/auth/login' && req.method === 'POST') {
+      try {
+        const parsed = JSON.parse(rawBody.toString('utf-8') || '{}');
+        const user = String(parsed.username || '').trim();
+        const pass = String(parsed.password || '').trim();
+        if (verifyManagerCredentials(user, pass)) {
+          sendJson(res, 200, { ok: true, username: user });
+        } else {
+          sendJson(res, 401, { ok: false, error: 'Invalid credentials' });
+        }
+      } catch {
+        sendJson(res, 400, { ok: false, error: 'Bad request' });
+      }
+      return;
+    }
+
+    tryForwardToGo(req, rawBody, res, () => {
       if (pathname === '/api/health' || pathname === '/api/status') {
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(
-          JSON.stringify({
-            app: 'GILEH KORD',
-            status: 'ok',
-            dataDir: DATA_DIR,
-            timestamp: new Date().toISOString()
-          })
-        );
+        sendJson(res, 200, {
+          app: 'GILEH KORD',
+          status: 'ok',
+          dataDir: DATA_DIR,
+          timestamp: new Date().toISOString()
+        });
         return;
       }
 
       if (pathname === '/api/import/backup' && req.method === 'POST') {
-        collectJsonBody(req, (err, payload) => {
-          if (err || !payload) {
-            res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-            res.end(JSON.stringify({ error: { message: 'فایل پشتیبان نامعتبر است' } }));
-            return;
-          }
+        try {
+          const payload = JSON.parse(rawBody.toString('utf-8') || '{}');
           const store = readServerStore();
-          store.products = Array.isArray(payload.products) ? payload.products : store.products;
-          store.purchases = Array.isArray(payload.purchases) ? payload.purchases : store.purchases;
-          store.suppliers = Array.isArray(payload.suppliers) ? payload.suppliers : store.suppliers;
-          store.employees = Array.isArray(payload.employees) ? payload.employees : store.employees;
+          store.products = mergeById(store.products, payload.products);
+          store.purchases = mergeById(store.purchases, payload.purchases);
+          store.suppliers = mergeById(store.suppliers, payload.suppliers);
+          store.employees = mergeById(store.employees, payload.employees);
+          store.revenues = mergeById(store.revenues, payload.revenues);
+          store.timesheets = mergeById(store.timesheets, payload.timesheets);
+          store.expenses = mergeById(store.expenses, payload.expenses);
+          store.inventory = mergeById(store.inventory, payload.inventory);
           writeServerStore(store);
 
-          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(
-            JSON.stringify({
-              imported: true,
-              importedProducts: store.products.length,
-              importedSuppliers: store.suppliers.length,
-              importedEmployees: store.employees.length,
-              importedPurchases: store.purchases.length
-            })
-          );
-        });
+          sendJson(res, 200, {
+            imported: true,
+            importedProducts: store.products.length,
+            importedSuppliers: store.suppliers.length,
+            importedEmployees: store.employees.length,
+            importedPurchases: store.purchases.length
+          });
+        } catch {
+          sendJson(res, 400, { error: { message: 'ساختار فایل پشتیبان معتبر نیست' } });
+        }
         return;
       }
 
       if (pathname === '/api/products' && req.method === 'GET') {
         const store = readServerStore();
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ items: store.products || [] }));
+        sendJson(res, 200, { items: store.products });
         return;
       }
 
       if (pathname === '/api/purchases' && req.method === 'GET') {
         const store = readServerStore();
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ items: store.purchases || [] }));
+        sendJson(res, 200, { items: store.purchases });
         return;
       }
 
-      res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ error: { message: 'Not Found' } }));
+      if (pathname === '/api/purchases' && req.method === 'POST') {
+        try {
+          const input = JSON.parse(rawBody.toString('utf-8') || '{}');
+          const store = readServerStore();
+          const now = new Date().toISOString();
+          const newPurchase = {
+            id: input.id || `purch_${crypto.randomUUID()}`,
+            productId: input.productId || `prod_${crypto.randomUUID()}`,
+            productName: String(input.productName || '').trim(),
+            quantity: Number(input.quantity) || 1,
+            unit: String(input.unit || 'کیلوگرم'),
+            totalAmount: Math.round(Number(input.totalAmount) || 0),
+            currency: 'IRT',
+            purchaseDate: String(input.purchaseDate || now.slice(0, 10)),
+            employeeId: input.employeeId || undefined,
+            employeeNameSnapshot: input.employeeNameSnapshot || undefined,
+            supplierName: input.supplierName || undefined,
+            invoiceNumber: input.invoiceNumber || undefined,
+            notes: input.notes || undefined,
+            isDemo: false,
+            createdAt: now,
+            updatedAt: now
+          };
+          store.purchases = mergeById(store.purchases, [newPurchase]);
+          writeServerStore(store);
+          sendJson(res, 201, { purchase: newPurchase, product: null });
+        } catch {
+          sendJson(res, 400, { error: { message: 'خطا در ثبت خرید' } });
+        }
+        return;
+      }
+
+      if (pathname.startsWith('/api/purchases/') && req.method === 'PUT') {
+        try {
+          const id = pathname.replace('/api/purchases/', '').trim();
+          const input = JSON.parse(rawBody.toString('utf-8') || '{}');
+          const store = readServerStore();
+          const idx = store.purchases.findIndex((p) => p.id === id);
+          const now = new Date().toISOString();
+          const updated = {
+            ...(idx >= 0 ? store.purchases[idx] : { id, createdAt: now }),
+            ...input,
+            id,
+            updatedAt: now
+          };
+          store.purchases = mergeById(store.purchases, [updated]);
+          writeServerStore(store);
+          sendJson(res, 200, updated);
+        } catch {
+          sendJson(res, 400, { error: { message: 'خطا در ویرایش خرید' } });
+        }
+        return;
+      }
+
+      sendJson(res, 404, { error: { message: 'مسیر API یافت نشد' } });
     });
     return;
   }
