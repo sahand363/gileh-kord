@@ -47,7 +47,7 @@ func main() {
 	log.Println("[BOOT] Database migrations verified.")
 
 	mux := http.NewServeMux()
-	mux.Handle("/api/health", handlers.NewHealthHandler(db, cfg, startTime))
+	handlers.RegisterRoutes(mux, db, cfg, startTime)
 
 	handlerChain := middleware.Recovery(
 		middleware.RequestLogger(
