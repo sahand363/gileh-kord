@@ -1,9 +1,23 @@
 import { dbClient, requestToPromise } from '../db';
+import { apiClient } from '../api/apiClient';
 import type { Product } from '../../models/types';
 import { normalizeProductKey } from '../../utils/formatters';
 
 export class ProductRepository {
   public async getAll(): Promise<Product[]> {
+    if (apiClient.isEnabled()) {
+      try {
+        const remoteItems = await apiClient.listProducts();
+        await this.replaceAllLocal(remoteItems);
+        return remoteItems;
+      } catch {
+        // Gracefully fall back to local IndexedDB when offline or backend unreachable
+      }
+    }
+    return this.getAllLocal();
+  }
+
+  private async getAllLocal(): Promise<Product[]> {
     return dbClient.executeTransaction('products', 'readonly', async (stores) => {
       const items = (await requestToPromise(stores['products'].getAll())) as Product[];
       return (items || []).sort((a, b) =>
@@ -13,38 +27,37 @@ export class ProductRepository {
   }
 
   public async search(query: string, limit: number = 5): Promise<Product[]> {
-    const term = normalizeProductKey(query);
-    if (!term) return [];
-    const all = await this.getAll();
+    const clean = normalizeProductKey(query);
+    if (!clean) return [];
+
+    if (apiClient.isEnabled()) {
+      try {
+        const remote = await apiClient.listProducts(clean);
+        return remote.slice(0, limit);
+      } catch {
+        // Fallback to local search
+      }
+    }
+
+    const all = await this.getAllLocal();
     return all
-      .filter((p) => normalizeProductKey(p.name).includes(term))
+      .filter((p) => {
+        const norm = p.normalizedName || normalizeProductKey(p.name);
+        return norm.includes(clean);
+      })
       .slice(0, limit);
   }
 
-  public async findByName(name: string): Promise<Product | null> {
-    const targetKey = normalizeProductKey(name);
-    if (!targetKey) return null;
-
-    return dbClient.executeTransaction('products', 'readonly', async (stores) => {
-      const all = (await requestToPromise(stores['products'].getAll())) as Product[];
-      return (
-        all.find((p) => (p.normalizedName || normalizeProductKey(p.name)) === targetKey) ||
-        null
-      );
-    });
+  public async replaceAll(products: Product[]): Promise<void> {
+    await this.replaceAllLocal(products);
   }
 
-  public async replaceAll(products: Product[]): Promise<void> {
+  private async replaceAllLocal(products: Product[]): Promise<void> {
     await dbClient.executeTransaction('products', 'readwrite', async (stores) => {
       const store = stores['products'];
       await requestToPromise(store.clear());
       for (const item of products) {
-        const normalized: Product = {
-          ...item,
-          name: item.name.trim(),
-          normalizedName: item.normalizedName || normalizeProductKey(item.name)
-        };
-        await requestToPromise(store.put(normalized));
+        await requestToPromise(store.put(item));
       }
     });
   }
