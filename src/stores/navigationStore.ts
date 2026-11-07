@@ -5,6 +5,8 @@ export type { AppPage };
 
 export type ManagerSubTab =
   | 'overview'
+  | 'menu'
+  | 'history_logs'
   | 'employees'
   | 'expenses'
   | 'inventory'
@@ -39,6 +41,8 @@ const PUBLIC_PAGES = new Set<AppPage>([
 
 const MANAGER_PROTECTED_SUBTABS = new Set<ManagerSubTab>([
   'overview',
+  'menu',
+  'history_logs',
   'employees',
   'expenses',
   'inventory',
