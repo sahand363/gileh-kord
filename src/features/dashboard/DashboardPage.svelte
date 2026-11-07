@@ -22,27 +22,58 @@
     getJalaliMonthLength,
     getJalaliYearMonthKey,
     getPersianWeekdayName,
-    isoToJalaliParts
+    isoToJalaliParts,
+    jalaliPartsToISO
   } from '../../utils/jalali';
   import {
     getEffectiveDayRevenue,
     sortPurchasesDescending
   } from '../../utils/calculations';
-  import type { ReportingCurrency } from '../../models/types';
+  import type {
+    Expense,
+    Purchase,
+    ReportingCurrency,
+    RevenueDayRecord
+  } from '../../models/types';
   import ColumnChart, { type ColumnChartItem } from '../../components/common/ColumnChart.svelte';
+
+  type AnalyticsPeriod = '7d' | '30d' | 'current_month';
 
   const todayISO = getTodayISODate();
   const currentMonthKey = getJalaliYearMonthKey(todayISO);
+  const currentMonthLabel = formatJalaliYearMonthLabel(currentMonthKey);
   const todayJalali = `${getPersianWeekdayName(todayISO)} ${formatJalaliDayMonth(todayISO)} (${toJalaliNumeric(todayISO)})`;
+
+  let selectedPeriod: AnalyticsPeriod = '7d';
 
   $: repCurr = ($appSettings.reportingCurrency || 'TOMAN') as ReportingCurrency;
   $: currLabel = getCurrencyLabel(repCurr);
   $: scaleMultiplier = repCurr === 'RIAL' ? 10 : 1;
 
-  // Build exact last 7 calendar days (oldest to newest: 6 days ago .. today)
-  $: last7DaysISOs = (() => {
+  $: periodTitle =
+    selectedPeriod === '7d'
+      ? '۷ روز گذشته'
+      : selectedPeriod === '30d'
+        ? '۳۰ روز گذشته'
+        : `ماه جاری (${currentMonthLabel})`;
+
+  // Build the list of ISO dates (oldest to newest) for the selected period
+  $: activePeriodISOs = (() => {
+    if (selectedPeriod === 'current_month') {
+      const parts = isoToJalaliParts(todayISO);
+      if (parts) {
+        const days: string[] = [];
+        for (let jd = 1; jd <= parts.jd; jd++) {
+          const iso = jalaliPartsToISO(parts.jy, parts.jm, jd);
+          if (iso) days.push(iso);
+        }
+        if (days.length > 0) return days;
+      }
+    }
+
+    const totalDays = selectedPeriod === '30d' ? 30 : 7;
     const days: string[] = [];
-    for (let i = 6; i >= 0; i--) {
+    for (let i = totalDays - 1; i >= 0; i--) {
       const d = new Date();
       d.setDate(d.getDate() - i);
       days.push(getTodayISODate(d));
@@ -50,12 +81,12 @@
     return days;
   })();
 
-  // Chart 1: Last 7 Days Income Day-by-Day
-  $: last7DaysIncomeColumns = last7DaysISOs.map((iso): ColumnChartItem => {
-    const revRec = $revenues.find((r) => r.date === iso && !r.isDemo);
+  // Chart 1: Selected Period Income Day-by-Day
+  $: periodIncomeColumns = activePeriodISOs.map((iso: string): ColumnChartItem => {
+    const revRec = $revenues.find((r: RevenueDayRecord) => r.date === iso && !r.isDemo);
     const incomeVal = revRec ? getEffectiveDayRevenue(revRec) : 0;
     return {
-      id: `inc7_${iso}`,
+      id: `inc_${selectedPeriod}_${iso}`,
       label: getPersianWeekdayName(iso),
       subLabel: toJalaliNumeric(iso).slice(5),
       value: incomeVal * scaleMultiplier,
@@ -63,21 +94,21 @@
     };
   });
 
-  $: last7DaysIncomeTotalToman = last7DaysISOs.reduce((sum, iso) => {
-    const revRec = $revenues.find((r) => r.date === iso && !r.isDemo);
+  $: periodIncomeTotalToman = activePeriodISOs.reduce((sum: number, iso: string) => {
+    const revRec = $revenues.find((r: RevenueDayRecord) => r.date === iso && !r.isDemo);
     return sum + (revRec ? getEffectiveDayRevenue(revRec) : 0);
   }, 0);
 
-  // Chart 2: Last 7 Days All Spendings Day-by-Day (Purchases + Expenses)
-  $: last7DaysSpendingColumns = last7DaysISOs.map((iso): ColumnChartItem => {
+  // Chart 2: Selected Period Spendings Day-by-Day (Purchases + Expenses)
+  $: periodSpendingColumns = activePeriodISOs.map((iso: string): ColumnChartItem => {
     const dayPurchSum = $purchases
-      .filter((p) => p.purchaseDate === iso && !p.isDemo)
-      .reduce((s, p) => s + (Number(p.totalAmount) || 0), 0);
+      .filter((p: Purchase) => p.purchaseDate === iso && !p.isDemo)
+      .reduce((s: number, p: Purchase) => s + (Number(p.totalAmount) || 0), 0);
     const dayExpSum = $expenses
-      .filter((e) => e.expenseDate === iso && !e.isDemo)
-      .reduce((s, e) => s + (Number(e.amount) || 0), 0);
+      .filter((e: Expense) => e.expenseDate === iso && !e.isDemo)
+      .reduce((s: number, e: Expense) => s + (Number(e.amount) || 0), 0);
     return {
-      id: `spd7_${iso}`,
+      id: `spd_${selectedPeriod}_${iso}`,
       label: getPersianWeekdayName(iso),
       subLabel: toJalaliNumeric(iso).slice(5),
       value: (dayPurchSum + dayExpSum) * scaleMultiplier,
@@ -85,15 +116,20 @@
     };
   });
 
-  $: last7DaysSpendingTotalToman = last7DaysISOs.reduce((sum, iso) => {
+  $: periodSpendingTotalToman = activePeriodISOs.reduce((sum: number, iso: string) => {
     const dayPurchSum = $purchases
-      .filter((p) => p.purchaseDate === iso && !p.isDemo)
-      .reduce((s, p) => s + (Number(p.totalAmount) || 0), 0);
+      .filter((p: Purchase) => p.purchaseDate === iso && !p.isDemo)
+      .reduce((s: number, p: Purchase) => s + (Number(p.totalAmount) || 0), 0);
     const dayExpSum = $expenses
-      .filter((e) => e.expenseDate === iso && !e.isDemo)
-      .reduce((s, e) => s + (Number(e.amount) || 0), 0);
+      .filter((e: Expense) => e.expenseDate === iso && !e.isDemo)
+      .reduce((s: number, e: Expense) => s + (Number(e.amount) || 0), 0);
     return sum + dayPurchSum + dayExpSum;
   }, 0);
+
+  $: periodNetToman = periodIncomeTotalToman - periodSpendingTotalToman;
+
+  // Table rows shown newest-first for easy reading on 30-day & current-month views
+  $: tablePeriodISOs = [...activePeriodISOs].reverse();
 
   // Available Jalali months across purchases, revenues, and expenses (plus current month)
   $: availableMonths = (() => {
@@ -139,7 +175,7 @@
 
     const monthPurchases = sortPurchasesDescending(
       $purchases.filter(
-        (p) =>
+        (p: Purchase) =>
           !p.isDemo &&
           getJalaliYearMonthKey(p.purchaseDate) === ym &&
           (!isCurrentMonth || p.purchaseDate <= todayISO)
@@ -147,29 +183,29 @@
     );
 
     const monthExpenses = $expenses.filter(
-      (e) =>
+      (e: Expense) =>
         !e.isDemo &&
         getJalaliYearMonthKey(e.expenseDate) === ym &&
         (!isCurrentMonth || e.expenseDate <= todayISO)
     );
 
     const monthRevenues = $revenues.filter(
-      (r) =>
+      (r: RevenueDayRecord) =>
         !r.isDemo &&
         getJalaliYearMonthKey(r.date) === ym &&
         (!isCurrentMonth || r.date <= todayISO)
     );
 
     const totalPurchasesToman = monthPurchases.reduce(
-      (s, p) => s + (Number(p.totalAmount) || 0),
+      (s: number, p: Purchase) => s + (Number(p.totalAmount) || 0),
       0
     );
     const totalExpensesToman = monthExpenses.reduce(
-      (s, e) => s + (Number(e.amount) || 0),
+      (s: number, e: Expense) => s + (Number(e.amount) || 0),
       0
     );
     const totalRevenueToman = monthRevenues.reduce(
-      (s, r) => s + getEffectiveDayRevenue(r),
+      (s: number, r: RevenueDayRecord) => s + getEffectiveDayRevenue(r),
       0
     );
     const totalSpendingsToman = totalPurchasesToman + totalExpensesToman;
@@ -207,13 +243,12 @@
       .replace(/"/g, '&quot;');
   }
 
-  // 1. Export as Printable PDF (Vector RTL Persian report with charts & full purchase list)
   function handleExportMonthlyPDF() {
     const rpt = monthlyReportData;
     const purchaseRowsHtml =
       rpt.monthPurchases.length > 0
         ? rpt.monthPurchases
-            .map((p, idx) => {
+            .map((p: Purchase, idx: number) => {
               const empName = resolvePurchaseEmployeeName(p, $employeeByIdMap);
               return `
                 <tr>
@@ -234,7 +269,7 @@
       rpt.monthExpenses.length > 0
         ? rpt.monthExpenses
             .map(
-              (e, idx) => `
+              (e: Expense, idx: number) => `
                 <tr>
                   <td>${formatNumber(idx + 1)}</td>
                   <td><strong>${escapeHtml(e.title)}</strong></td>
@@ -374,14 +409,16 @@
     printWin.document.close();
   }
 
-  // 2. Export as High-Resolution PNG Image (Draws Analytics + Full Bought List onto Canvas)
   function handleExportMonthlyImage() {
     const rpt = monthlyReportData;
     const rows = rpt.monthPurchases;
     const rowHeight = 36;
     const baseHeight = 410;
     const canvasWidth = 1080;
-    const canvasHeight = Math.max(620, baseHeight + Math.max(1, rows.length) * rowHeight + 80);
+    const canvasHeight = Math.max(
+      620,
+      baseHeight + Math.max(1, rows.length) * rowHeight + 80
+    );
 
     const canvas = document.createElement('canvas');
     canvas.width = canvasWidth;
@@ -392,11 +429,9 @@
     ctx.direction = 'rtl';
     ctx.textBaseline = 'middle';
 
-    // Background
     ctx.fillStyle = '#f4f2eb';
     ctx.fillRect(0, 0, canvasWidth, canvasHeight);
 
-    // Header Banner
     ctx.fillStyle = '#173f35';
     ctx.fillRect(30, 26, canvasWidth - 60, 105);
 
@@ -413,7 +448,6 @@
       102
     );
 
-    // 4 Summary KPI Boxes
     const kpiItems = [
       {
         title: 'مجموع درآمد ماه',
@@ -453,7 +487,6 @@
       ctx.fillText(item.val, x + boxW - 14, y + 66);
     });
 
-    // Purchases Table Title
     ctx.fillStyle = '#173f35';
     ctx.font = 'bold 19px Vazirmatn, Tahoma, Arial, sans-serif';
     ctx.textAlign = 'right';
@@ -463,7 +496,6 @@
       276
     );
 
-    // Table Header
     const tableTop = 304;
     ctx.fillStyle = '#eaf1ec';
     ctx.fillRect(30, tableTop, canvasWidth - 60, 40);
@@ -478,7 +510,6 @@
     ctx.textAlign = 'left';
     ctx.fillText(`مبلغ (${currLabel})`, 48, tableTop + 20);
 
-    // Table Rows
     if (rows.length === 0) {
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(30, tableTop + 42, canvasWidth - 60, 50);
@@ -487,7 +518,7 @@
       ctx.font = '15px Vazirmatn, Tahoma, Arial, sans-serif';
       ctx.fillText('هیچ خریدی در این ماه ثبت نشده است.', canvasWidth / 2, tableTop + 67);
     } else {
-      rows.forEach((p, idx) => {
+      rows.forEach((p: Purchase, idx: number) => {
         const ry = tableTop + 42 + idx * rowHeight;
         ctx.fillStyle = idx % 2 === 0 ? '#ffffff' : '#fafaf6';
         ctx.fillRect(30, ry, canvasWidth - 60, rowHeight);
@@ -541,12 +572,12 @@
 </script>
 
 <section class="page active dashboard-page" aria-labelledby="dashboardTitle">
-  <!-- Green Welcome Space (Preserved) -->
+  <!-- Green Welcome Space -->
   <header class="dashboard-hero">
     <div>
       <p class="eyebrow">پیشخوان مدیریت کافه</p>
       <h1 id="dashboardTitle">خوش آمدید به گیله‌کُرد</h1>
-      <p>تحلیل روزبه‌روز درآمد و مخارج ۷ روز گذشته و خروجی گزارش ماهانه.</p>
+      <p>تحلیل روزبه‌روز درآمد و مخارج (۷ روزه، ۳۰ روزه و ماه جاری) و خروجی گزارش ماهانه.</p>
     </div>
     <div class="dashboard-hero-date">▦ &nbsp; {todayJalali}</div>
   </header>
@@ -597,39 +628,81 @@
     </div>
   </section>
 
-  <!-- 7-Day Income & 7-Day Spendings Charts (Moved inside Dashboard) -->
+  <!-- Period Toggle Bar: 7 Days / 30 Days / Current Jalali Month -->
+  <section class="panel card-pad" style="margin-bottom: 16px;">
+    <div class="section-heading" style="margin-bottom: 12px;">
+      <div>
+        <h2>بازه زمانی تحلیل نمودارها و جدول: {periodTitle}</h2>
+        <p>
+          تعداد روزهای دوره: <strong>{formatNumber(activePeriodISOs.length)} روز</strong>
+          | تراز خالص دوره:
+          <strong style="color: {periodNetToman >= 0 ? 'var(--green)' : 'var(--danger)'};">
+            {formatReportingMoney(periodNetToman, repCurr)} {currLabel}
+          </strong>
+        </p>
+      </div>
+
+      <div class="setting-actions">
+        <button
+          type="button"
+          class={selectedPeriod === '7d' ? 'secondary-btn' : 'quiet-btn'}
+          on:click={() => (selectedPeriod = '7d')}
+        >
+          {selectedPeriod === '7d' ? '● ' : ''}۷ روز گذشته
+        </button>
+
+        <button
+          type="button"
+          class={selectedPeriod === '30d' ? 'secondary-btn' : 'quiet-btn'}
+          on:click={() => (selectedPeriod = '30d')}
+        >
+          {selectedPeriod === '30d' ? '● ' : ''}۳۰ روز گذشته
+        </button>
+
+        <button
+          type="button"
+          class={selectedPeriod === 'current_month' ? 'secondary-btn' : 'quiet-btn'}
+          on:click={() => (selectedPeriod = 'current_month')}
+        >
+          {selectedPeriod === 'current_month' ? '● ' : ''}ماه جاری ({currentMonthLabel})
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Income & Spendings Charts for Selected Period -->
   <div class="two-col-grid" style="margin-bottom: 16px;">
     <section class="panel card-pad">
       <div class="section-heading">
         <div>
-          <h2>درآمد ۷ روز گذشته (روزبه‌روز)</h2>
+          <h2>درآمد {periodTitle} (روزبه‌روز)</h2>
           <p>
-            مجموع درآمد ۷ روز اخیر:
-            <strong>{formatReportingMoney(last7DaysIncomeTotalToman, repCurr)} {currLabel}</strong>
+            مجموع درآمد دوره:
+            <strong>{formatReportingMoney(periodIncomeTotalToman, repCurr)} {currLabel}</strong>
           </p>
         </div>
       </div>
-      <ColumnChart items={last7DaysIncomeColumns} height={210} unitLabel={currLabel} />
+      <ColumnChart items={periodIncomeColumns} height={210} unitLabel={currLabel} />
     </section>
 
     <section class="panel card-pad">
       <div class="section-heading">
         <div>
-          <h2>کل مخارج ۷ روز گذشته (روزبه‌روز)</h2>
+          <h2>کل مخارج {periodTitle} (روزبه‌روز)</h2>
           <p>
-            مجموع خریدها و هزینه‌های ۷ روز اخیر:
-            <strong>{formatReportingMoney(last7DaysSpendingTotalToman, repCurr)} {currLabel}</strong>
+            مجموع خریدها و هزینه‌های دوره:
+            <strong>{formatReportingMoney(periodSpendingTotalToman, repCurr)} {currLabel}</strong>
           </p>
         </div>
       </div>
-      <ColumnChart items={last7DaysSpendingColumns} height={210} unitLabel={currLabel} />
+      <ColumnChart items={periodSpendingColumns} height={210} unitLabel={currLabel} />
     </section>
   </div>
 
-  <!-- 7-Day Day-by-Day Breakdown Table -->
+  <!-- Day-by-Day Breakdown Table for Selected Period -->
   <section class="panel card-pad">
     <div class="section-heading">
-      <h2>جدول تفکیکی ۷ روز گذشته ({currLabel})</h2>
+      <h2>جدول تفکیکی {periodTitle} ({currLabel})</h2>
     </div>
     <div class="table-scroll">
       <table class="data-table">
@@ -642,15 +715,17 @@
           </tr>
         </thead>
         <tbody>
-          {#each last7DaysISOs as iso (iso)}
-            {@const revRec = $revenues.find((r) => r.date === iso && !r.isDemo)}
+          {#each tablePeriodISOs as iso (iso)}
+            {@const revRec = $revenues.find(
+              (r: RevenueDayRecord) => r.date === iso && !r.isDemo
+            )}
             {@const dayIncToman = revRec ? getEffectiveDayRevenue(revRec) : 0}
             {@const dayPurchToman = $purchases
-              .filter((p) => p.purchaseDate === iso && !p.isDemo)
-              .reduce((s, p) => s + (Number(p.totalAmount) || 0), 0)}
+              .filter((p: Purchase) => p.purchaseDate === iso && !p.isDemo)
+              .reduce((s: number, p: Purchase) => s + (Number(p.totalAmount) || 0), 0)}
             {@const dayExpToman = $expenses
-              .filter((e) => e.expenseDate === iso && !e.isDemo)
-              .reduce((s, e) => s + (Number(e.amount) || 0), 0)}
+              .filter((e: Expense) => e.expenseDate === iso && !e.isDemo)
+              .reduce((s: number, e: Expense) => s + (Number(e.amount) || 0), 0)}
             {@const daySpdToman = dayPurchToman + dayExpToman}
             {@const dayNetToman = dayIncToman - daySpdToman}
             <tr>
