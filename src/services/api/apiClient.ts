@@ -1,0 +1,170 @@
+import { writable } from 'svelte/store';
+import type { BackupData, Product, Purchase } from '../../models/types';
+
+export type BackendConnectionState = 'disconnected' | 'checking' | 'connected';
+
+export const backendStatus = writable<BackendConnectionState>('disconnected');
+
+export class ApiClient {
+  private baseUrl = '';
+  private enabled = false;
+
+  public configure(options: { baseUrl?: string; enabled?: boolean }): void {
+    if (options.baseUrl !== undefined) {
+      this.baseUrl = options.baseUrl.trim().replace(/\/+$/, '');
+    }
+    if (options.enabled !== undefined) {
+      this.enabled = options.enabled;
+    }
+  }
+
+  public isEnabled(): boolean {
+    return this.enabled;
+  }
+
+  private buildUrl(path: string): string {
+    const cleanPath = path.startsWith('/') ? path : `/${path}`;
+    return `${this.baseUrl}${cleanPath}`;
+  }
+
+  private async request<T>(
+    path: string,
+    init?: RequestInit,
+    timeoutMs = 4500
+  ): Promise<T> {
+    if (typeof fetch === 'undefined') {
+      throw new Error('Fetch API is not available in this environment.');
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const response = await fetch(this.buildUrl(path), {
+        ...init,
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          ...(init?.headers || {})
+        },
+        signal: controller.signal
+      });
+
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        const message =
+          data?.error?.message || `خطای ارتباط با سرور (${response.status})`;
+        throw new Error(message);
+      }
+      backendStatus.set('connected');
+      return data as T;
+    } catch (err) {
+      backendStatus.set('disconnected');
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  public async checkHealth(): Promise<boolean> {
+    try {
+      backendStatus.set('checking');
+      const res = await this.request<{ status: string }>('/api/health', {
+        method: 'GET'
+      });
+      const ok = res?.status === 'ok';
+      backendStatus.set(ok ? 'connected' : 'disconnected');
+      return ok;
+    } catch {
+      backendStatus.set('disconnected');
+      return false;
+    }
+  }
+
+  public async listProducts(query = ''): Promise<Product[]> {
+    const q = query ? `?query=${encodeURIComponent(query)}` : '';
+    const res = await this.request<{ items: Product[] }>(`/api/products${q}`);
+    return res.items || [];
+  }
+
+  public async listPurchases(params?: {
+    query?: string;
+    dateFrom?: string;
+    dateTo?: string;
+    employeeId?: string;
+    supplierName?: string;
+    pageSize?: number;
+  }): Promise<Purchase[]> {
+    const search = new URLSearchParams();
+    if (params?.query) search.set('query', params.query);
+    if (params?.dateFrom) search.set('date_from', params.dateFrom);
+    if (params?.dateTo) search.set('date_to', params.dateTo);
+    if (params?.employeeId) search.set('employee_id', params.employeeId);
+    if (params?.supplierName) search.set('supplier', params.supplierName);
+    search.set('page_size', String(params?.pageSize || 500));
+
+    const qs = search.toString();
+    const res = await this.request<{ items: Purchase[] }>(
+      `/api/purchases${qs ? `?${qs}` : ''}`
+    );
+    return res.items || [];
+  }
+
+  public async createPurchase(input: {
+    id?: string;
+    productName: string;
+    quantity: number;
+    unit: string;
+    totalAmount: number;
+    purchaseDate: string;
+    employeeId?: string;
+    employeeNameSnapshot?: string;
+    supplierName?: string;
+    invoiceNumber?: string;
+    notes?: string;
+  }): Promise<{ purchase: Purchase; product: Product }> {
+    return this.request<{ purchase: Purchase; product: Product }>(
+      '/api/purchases',
+      {
+        method: 'POST',
+        body: JSON.stringify(input)
+      }
+    );
+  }
+
+  public async updatePurchase(
+    id: string,
+    input: {
+      productName: string;
+      quantity: number;
+      unit: string;
+      totalAmount: number;
+      purchaseDate: string;
+      employeeId?: string;
+      employeeNameSnapshot?: string;
+      supplierName?: string;
+      invoiceNumber?: string;
+      notes?: string;
+    }
+  ): Promise<Purchase> {
+    return this.request<Purchase>(`/api/purchases/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: JSON.stringify(input)
+    });
+  }
+
+  public async importBackupToSQLite(backup: BackupData): Promise<{
+    imported: boolean;
+    importedProducts: number;
+    importedSuppliers: number;
+    importedEmployees: number;
+    importedPurchases: number;
+  }> {
+    return this.request('/api/import/backup', {
+      method: 'POST',
+      body: JSON.stringify(backup)
+    }, 15000);
+  }
+}
+
+export const apiClient = new ApiClient();
