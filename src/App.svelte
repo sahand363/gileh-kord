@@ -6,6 +6,7 @@
   import BottomNav from './components/common/BottomNav.svelte';
   import Toast from './components/common/Toast.svelte';
 
+  import DashboardPage from './features/dashboard/DashboardPage.svelte';
   import PurchaseEntryPage from './features/purchases/PurchaseEntryPage.svelte';
   import TimesheetsPage from './features/timesheets/TimesheetsPage.svelte';
   import RevenuePage from './features/revenue/RevenuePage.svelte';
@@ -20,7 +21,9 @@
   <Topbar />
 
   <main class="main-wrap">
-    {#if $currentPage === 'entry'}
+    {#if $currentPage === 'dashboard'}
+      <DashboardPage />
+    {:else if $currentPage === 'entry'}
       <PurchaseEntryPage />
     {:else if $currentPage === 'timesheets'}
       <TimesheetsPage />
