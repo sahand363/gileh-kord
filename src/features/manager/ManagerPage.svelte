@@ -1,684 +1,781 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
+  import {
+    managerAuthService,
+    isManagerUnlocked,
+    activeManagerUsername
+  } from '../../services/ManagerAuthService';
   import {
     purchases,
     expenses,
     revenues,
-    employeeByIdMap,
-    resolvePurchaseEmployeeName,
-    appSettings
+    employees,
+    timesheets,
+    appSettings,
+    syncSnapshots,
+    refreshSnapshotsList,
+    revertServerToSnapshot,
+    syncLocalStateToServer,
+    updateGlobalRevenueCoefficient,
+    updateEmployee,
+    saveDailyTotalRevenue,
+    deleteDetailedRevenueEntry,
+    deleteRevenueDayRecord
   } from '../../stores/purchaseStore';
+  import {
+    activeManagerTab,
+    type ManagerSubTab
+  } from '../../stores/navigationStore';
   import { showToast } from '../../stores/toastStore';
   import {
-    formatReportingMoney,
-    getCurrencyLabel,
+    formatMoney,
     formatNumber,
+    formatLivePriceInput,
+    parseNumericInput,
     toJalaliDate,
-    toJalaliNumeric,
-    getTodayISODate
+    toJalaliDateTime,
+    toJalaliNumeric
   } from '../../utils/formatters';
+  import { getPersianWeekdayName } from '../../utils/jalali';
   import {
-    formatJalaliDayMonth,
-    formatJalaliYearMonthLabel,
-    getJalaliMonthLength,
-    getJalaliYearMonthKey,
-    getPersianWeekdayName,
-    isoToJalaliParts
-  } from '../../utils/jalali';
-  import {
-    getEffectiveDayRevenue,
-    sortPurchasesDescending
+    calculateFinancialOverview,
+    calculateStaffRevenueAllocations,
+    filterRevenueRecords,
+    getEffectiveDayRevenue
   } from '../../utils/calculations';
-  import type { ReportingCurrency } from '../../models/types';
+  import type { RevenueDayRecord } from '../../models/types';
+  import EmptyState from '../../components/common/EmptyState.svelte';
+  import JalaliDatePicker from '../../components/common/JalaliDatePicker.svelte';
   import ColumnChart, { type ColumnChartItem } from '../../components/common/ColumnChart.svelte';
 
-  const todayISO = getTodayISODate();
-  const currentMonthKey = getJalaliYearMonthKey(todayISO);
-  const todayJalali = `${getPersianWeekdayName(todayISO)} ${formatJalaliDayMonth(todayISO)} (${toJalaliNumeric(todayISO)})`;
+  // Nested Management Sub-Modules (Protected behind #if $isManagerUnlocked)
+  import DashboardPage from '../dashboard/DashboardPage.svelte';
+  import MenuPage from '../menu/MenuPage.svelte';
+  import EmployeesPage from '../employees/EmployeesPage.svelte';
+  import InventoryPage from '../inventory/InventoryPage.svelte';
+  import ProductsPage from '../products/ProductsPage.svelte';
+  import SuppliersPage from '../suppliers/SuppliersPage.svelte';
+  import BackupPage from '../backup/BackupPage.svelte';
+  import SettingsPage from '../settings/SettingsPage.svelte';
 
-  $: repCurr = ($appSettings.reportingCurrency || 'TOMAN') as ReportingCurrency;
-  $: currLabel = getCurrencyLabel(repCurr);
-  $: scaleMultiplier = repCurr === 'RIAL' ? 10 : 1;
+  const MANAGER_TABS: Array<{ id: ManagerSubTab; label: string; icon: string }> = [
+    { id: 'dashboard', label: 'پیشخوان', icon: '⊞' },
+    { id: 'overview', label: 'درآمد و سهم کارکنان', icon: '₿' },
+    { id: 'menu', label: 'منوی کافه', icon: '☕' },
+    { id: 'employees', label: 'ثبت کارکنان و ضرایب', icon: '♟' },
+    { id: 'inventory', label: 'انبار', icon: '◫' },
+    { id: 'products', label: 'کالاها', icon: '❖' },
+    { id: 'suppliers', label: 'تأمین‌کنندگان', icon: '◈' },
+    { id: 'history_logs', label: 'تاریخچه و بازگشت', icon: '↺' },
+    { id: 'backup', label: 'پشتیبان‌گیری', icon: '⇧' },
+    { id: 'settings', label: 'تنظیمات', icon: '⚙' }
+  ];
 
-  // Build exact last 7 calendar days (oldest to newest: 6 days ago .. today)
-  $: last7DaysISOs = (() => {
-    const days: string[] = [];
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date();
-      d.setDate(d.getDate() - i);
-      days.push(getTodayISODate(d));
+  let usernameInput = 'admin';
+  let passwordInput = '';
+  let authError = '';
+
+  let frontendMultiplierInput = '0.6';
+  let coeffError = '';
+
+  let dateFrom = '';
+  let dateTo = '';
+  let onlyReal = false;
+
+  let editingRevDate: string | null = null;
+  let editRevTotal = '';
+  let editRevCard = '';
+  let editRevOnline = '';
+  let editRevCash = '';
+  let editRevNotes = '';
+  let editRevError = '';
+
+  $: frontendMultiplier = $appSettings.globalRevenueCoefficient ?? 0.6;
+
+  onMount(async () => {
+    await managerAuthService.checkInitialized();
+    if ($activeManagerUsername) {
+      usernameInput = $activeManagerUsername;
     }
-    return days;
-  })();
-
-  // Chart 1: Last 7 Days Income Day-by-Day
-  $: last7DaysIncomeColumns = last7DaysISOs.map((iso): ColumnChartItem => {
-    const revRec = $revenues.find((r) => r.date === iso && !r.isDemo);
-    const incomeVal = revRec ? getEffectiveDayRevenue(revRec) : 0;
-    return {
-      id: `inc7_${iso}`,
-      label: getPersianWeekdayName(iso),
-      subLabel: toJalaliNumeric(iso).slice(5),
-      value: incomeVal * scaleMultiplier,
-      tone: 'primary'
-    };
+    frontendMultiplierInput = String($appSettings.globalRevenueCoefficient ?? 0.6);
+    void refreshSnapshotsList();
   });
 
-  $: last7DaysIncomeTotalToman = last7DaysISOs.reduce((sum, iso) => {
-    const revRec = $revenues.find((r) => r.date === iso && !r.isDemo);
-    return sum + (revRec ? getEffectiveDayRevenue(revRec) : 0);
-  }, 0);
+  $: filteredDailyRevenues = filterRevenueRecords(
+    $revenues,
+    dateFrom,
+    dateTo,
+    onlyReal
+  );
 
-  // Chart 2: Last 7 Days All Spendings Day-by-Day (Purchases + Expenses)
-  $: last7DaysSpendingColumns = last7DaysISOs.map((iso): ColumnChartItem => {
-    const dayPurchSum = $purchases
-      .filter((p) => p.purchaseDate === iso && !p.isDemo)
-      .reduce((s, p) => s + (Number(p.totalAmount) || 0), 0);
-    const dayExpSum = $expenses
-      .filter((e) => e.expenseDate === iso && !e.isDemo)
-      .reduce((s, e) => s + (Number(e.amount) || 0), 0);
-    return {
-      id: `spd7_${iso}`,
-      label: getPersianWeekdayName(iso),
-      subLabel: toJalaliNumeric(iso).slice(5),
-      value: (dayPurchSum + dayExpSum) * scaleMultiplier,
-      tone: 'danger'
-    };
+  $: financialOverview = calculateFinancialOverview({
+    revenues: $revenues,
+    purchases: $purchases,
+    expenses: $expenses,
+    coefficient: frontendMultiplier,
+    dateFrom,
+    dateTo,
+    onlyReal
   });
 
-  $: last7DaysSpendingTotalToman = last7DaysISOs.reduce((sum, iso) => {
-    const dayPurchSum = $purchases
-      .filter((p) => p.purchaseDate === iso && !p.isDemo)
-      .reduce((s, p) => s + (Number(p.totalAmount) || 0), 0);
-    const dayExpSum = $expenses
-      .filter((e) => e.expenseDate === iso && !e.isDemo)
-      .reduce((s, e) => s + (Number(e.amount) || 0), 0);
-    return sum + dayPurchSum + dayExpSum;
-  }, 0);
+  $: managerFrontendRevenue = Math.round(
+    financialOverview.totalRevenue * frontendMultiplier
+  );
 
-  // Available Jalali months across purchases, revenues, and expenses (plus current month)
-  $: availableMonths = (() => {
-    const set = new Set<string>();
-    if (currentMonthKey) set.add(currentMonthKey);
-    for (const p of $purchases) {
-      if (!p.isDemo) {
-        const ym = getJalaliYearMonthKey(p.purchaseDate);
-        if (ym) set.add(ym);
-      }
-    }
-    for (const r of $revenues) {
-      if (!r.isDemo) {
-        const ym = getJalaliYearMonthKey(r.date);
-        if (ym) set.add(ym);
-      }
-    }
-    for (const e of $expenses) {
-      if (!e.isDemo) {
-        const ym = getJalaliYearMonthKey(e.expenseDate);
-        if (ym) set.add(ym);
-      }
-    }
-    return Array.from(set).sort((a, b) => b.localeCompare(a));
-  })();
+  $: staffAllocations = calculateStaffRevenueAllocations({
+    employees: $employees,
+    timesheets: $timesheets,
+    totalRevenue: financialOverview.totalRevenue,
+    dateFrom,
+    dateTo,
+    onlyReal
+  });
 
-  let selectedExportMonth = currentMonthKey;
-  $: if (!selectedExportMonth && availableMonths.length > 0) {
-    selectedExportMonth = availableMonths[0];
+  $: dailyRevenueColumns = filteredDailyRevenues
+    .slice(0, 12)
+    .reverse()
+    .map(
+      (r): ColumnChartItem => ({
+        id: r.id,
+        label: getPersianWeekdayName(r.date),
+        subLabel: toJalaliNumeric(r.date).slice(5),
+        value: getEffectiveDayRevenue(r),
+        tone: 'primary'
+      })
+    );
+
+  $: staffRevenueColumns = staffAllocations.rows.map(
+    (row): ColumnChartItem => ({
+      id: row.employee.id,
+      label: row.employee.name,
+      subLabel: `${formatNumber(row.effectiveHours)} ساعت مؤثر (×${formatNumber(row.multiplier)})`,
+      value: row.allocatedRevenue,
+      tone: 'gold'
+    })
+  );
+
+  function startEditRevenue(rev: RevenueDayRecord) {
+    editingRevDate = rev.date;
+    editRevTotal = formatLivePriceInput(getEffectiveDayRevenue(rev));
+    editRevCard = rev.cardAmount ? formatLivePriceInput(rev.cardAmount) : '';
+    editRevOnline = rev.onlineAmount ? formatLivePriceInput(rev.onlineAmount) : '';
+    editRevCash = rev.cashAmount ? formatLivePriceInput(rev.cashAmount) : '';
+    editRevNotes = rev.notes || '';
+    editRevError = '';
   }
 
-  // Monthly Report Data for Selected Month (automatically handles mid-month up to today)
-  $: monthlyReportData = (() => {
-    const ym = selectedExportMonth || currentMonthKey;
-    const isCurrentMonth = ym === currentMonthKey;
-    const todayParts = isoToJalaliParts(todayISO);
-    const [jyStr, jmStr] = (ym || '1405/08').split('/');
-    const jy = Number(jyStr) || 1405;
-    const jm = Number(jmStr) || 8;
-    const totalDaysInMonth = getJalaliMonthLength(jy, jm);
-    const elapsedDays =
-      isCurrentMonth && todayParts ? todayParts.jd : totalDaysInMonth;
-
-    const monthPurchases = sortPurchasesDescending(
-      $purchases.filter(
-        (p) =>
-          !p.isDemo &&
-          getJalaliYearMonthKey(p.purchaseDate) === ym &&
-          (!isCurrentMonth || p.purchaseDate <= todayISO)
-      )
-    );
-
-    const monthExpenses = $expenses.filter(
-      (e) =>
-        !e.isDemo &&
-        getJalaliYearMonthKey(e.expenseDate) === ym &&
-        (!isCurrentMonth || e.expenseDate <= todayISO)
-    );
-
-    const monthRevenues = $revenues.filter(
-      (r) =>
-        !r.isDemo &&
-        getJalaliYearMonthKey(r.date) === ym &&
-        (!isCurrentMonth || r.date <= todayISO)
-    );
-
-    const totalPurchasesToman = monthPurchases.reduce(
-      (s, p) => s + (Number(p.totalAmount) || 0),
-      0
-    );
-    const totalExpensesToman = monthExpenses.reduce(
-      (s, e) => s + (Number(e.amount) || 0),
-      0
-    );
-    const totalRevenueToman = monthRevenues.reduce(
-      (s, r) => s + getEffectiveDayRevenue(r),
-      0
-    );
-    const totalSpendingsToman = totalPurchasesToman + totalExpensesToman;
-    const netBalanceToman = totalRevenueToman - totalSpendingsToman;
-
-    return {
-      ym,
-      monthLabel: formatJalaliYearMonthLabel(ym),
-      isCurrentMonth,
-      elapsedDays,
-      totalDaysInMonth,
-      periodSubtitle: isCurrentMonth
-        ? `گزارش میان‌دوره: ۱ تا ${formatNumber(elapsedDays)} ${formatJalaliYearMonthLabel(ym)} (${formatNumber(elapsedDays)} روز سپری‌شده)`
-        : `گزارش کامل ماه: ۱ تا ${formatNumber(totalDaysInMonth)} ${formatJalaliYearMonthLabel(ym)}`,
-      monthPurchases,
-      monthExpenses,
-      monthRevenues,
-      totalPurchasesToman,
-      totalExpensesToman,
-      totalSpendingsToman,
-      totalRevenueToman,
-      netBalanceToman,
-      avgDailyRevenueToman:
-        elapsedDays > 0 ? Math.round(totalRevenueToman / elapsedDays) : 0,
-      avgDailySpendingToman:
-        elapsedDays > 0 ? Math.round(totalSpendingsToman / elapsedDays) : 0
-    };
-  })();
-
-  function escapeHtml(str: string): string {
-    return String(str || '')
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
+  function cancelEditRevenue() {
+    editingRevDate = null;
+    editRevError = '';
   }
 
-  // 1. Export as Printable PDF (Vector RTL Persian report with charts & full purchase list)
-  function handleExportMonthlyPDF() {
-    const rpt = monthlyReportData;
-    const purchaseRowsHtml =
-      rpt.monthPurchases.length > 0
-        ? rpt.monthPurchases
-            .map((p, idx) => {
-              const empName = resolvePurchaseEmployeeName(p, $employeeByIdMap);
-              return `
-                <tr>
-                  <td>${formatNumber(idx + 1)}</td>
-                  <td><strong>${escapeHtml(p.productName)}</strong></td>
-                  <td>${formatNumber(p.quantity)} ${escapeHtml(p.unit)}</td>
-                  <td>${formatJalaliDayMonth(p.purchaseDate)} (${toJalaliNumeric(p.purchaseDate)})</td>
-                  <td>${escapeHtml(empName)}</td>
-                  <td>${escapeHtml(p.supplierName || '—')}</td>
-                  <td><strong>${formatReportingMoney(p.totalAmount, repCurr)} ${currLabel}</strong></td>
-                </tr>
-              `;
-            })
-            .join('')
-        : `<tr><td colspan="7" style="text-align:center; padding: 18px;">هیچ خریدی در این ماه ثبت نشده است.</td></tr>`;
-
-    const expenseRowsHtml =
-      rpt.monthExpenses.length > 0
-        ? rpt.monthExpenses
-            .map(
-              (e, idx) => `
-                <tr>
-                  <td>${formatNumber(idx + 1)}</td>
-                  <td><strong>${escapeHtml(e.title)}</strong></td>
-                  <td>${escapeHtml(e.category)}</td>
-                  <td>${formatJalaliDayMonth(e.expenseDate)} (${toJalaliNumeric(e.expenseDate)})</td>
-                  <td><strong>${formatReportingMoney(e.amount, repCurr)} ${currLabel}</strong></td>
-                </tr>
-              `
-            )
-            .join('')
-        : '';
-
-    const htmlContent = `<!DOCTYPE html>
-<html lang="fa" dir="rtl">
-<head>
-  <meta charset="UTF-8" />
-  <title>گزارش ماهانه گیله‌کرد — ${escapeHtml(rpt.monthLabel)}</title>
-  <style>
-    @page { size: A4 portrait; margin: 12mm; }
-    * { box-sizing: border-box; font-family: Vazirmatn, IRANSansX, Tahoma, Arial, sans-serif; }
-    body { margin: 0; padding: 0; direction: rtl; color: #1b2621; background: #fff; font-size: 11.5px; }
-    .header { background: #173f35; color: #fff; padding: 18px 22px; border-radius: 14px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-    .header h1 { margin: 0; font-size: 20px; }
-    .header p { margin: 5px 0 0; font-size: 11px; opacity: 0.9; }
-    .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 18px; }
-    .kpi { border: 1px solid #d5dfd8; border-radius: 12px; padding: 12px; background: #f8faf8; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-    .kpi span { display: block; font-size: 10px; color: #5b6b61; font-weight: bold; }
-    .kpi strong { display: block; font-size: 15px; color: #173f35; margin-top: 6px; }
-    .kpi small { display: block; font-size: 9.5px; color: #6e7d74; margin-top: 4px; }
-    h2 { font-size: 14px; color: #173f35; border-bottom: 2px solid #173f35; padding-bottom: 6px; margin: 18px 0 10px; }
-    table { width: 100%; border-collapse: collapse; font-size: 10.5px; margin-bottom: 16px; }
-    th { background: #eaf1ec; color: #173f35; padding: 8px; text-align: right; border: 1px solid #cfe0d4; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-    td { padding: 7px 8px; border: 1px solid #e1e8e3; }
-    tr:nth-child(even) td { background: #fbfcfa; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-    .footer-sum { display: flex; justify-content: space-between; padding: 12px 16px; background: #eaf1ec; border-radius: 10px; font-weight: bold; color: #173f35; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-  </style>
-</head>
-<body>
-  <div class="header">
-    <div>
-      <h1>گزارش تحلیل و فهرست خرید ماهانه — کافه گیله‌کُرد</h1>
-      <p>${escapeHtml(rpt.periodSubtitle)} | واحد مبالغ: ${escapeHtml(currLabel)}</p>
-    </div>
-    <div style="text-align: left; font-size: 11px;">
-      <div>تاریخ استخراج: ${toJalaliDate(todayISO)}</div>
-      <div>(${toJalaliNumeric(todayISO)})</div>
-    </div>
-  </div>
-
-  <div class="kpis">
-    <div class="kpi">
-      <span>مجموع درآمد ماه</span>
-      <strong>${formatReportingMoney(rpt.totalRevenueToman, repCurr)} ${currLabel}</strong>
-      <small>میانگین روزانه: ${formatReportingMoney(rpt.avgDailyRevenueToman, repCurr)} ${currLabel}</small>
-    </div>
-    <div class="kpi">
-      <span>مجموع خریدها (${formatNumber(rpt.monthPurchases.length)} فاکتور)</span>
-      <strong>${formatReportingMoney(rpt.totalPurchasesToman, repCurr)} ${currLabel}</strong>
-      <small>کالاها و ملزومات خریداری‌شده</small>
-    </div>
-    <div class="kpi">
-      <span>هزینه‌های جاری (${formatNumber(rpt.monthExpenses.length)} مورد)</span>
-      <strong>${formatReportingMoney(rpt.totalExpensesToman, repCurr)} ${currLabel}</strong>
-      <small>مجموع کل مخارج: ${formatReportingMoney(rpt.totalSpendingsToman, repCurr)} ${currLabel}</small>
-    </div>
-    <div class="kpi">
-      <span>تراز خالص ماه</span>
-      <strong style="color: ${rpt.netBalanceToman >= 0 ? '#173f35' : '#b9574d'};">
-        ${formatReportingMoney(rpt.netBalanceToman, repCurr)} ${currLabel}
-      </strong>
-      <small>درآمد منهای کل مخارج</small>
-    </div>
-  </div>
-
-  <h2>فهرست کامل اقلام خریداری‌شده در ${escapeHtml(rpt.monthLabel)} (${formatNumber(rpt.monthPurchases.length)} ردیف)</h2>
-  <table>
-    <thead>
-      <tr>
-        <th>#</th>
-        <th>نام محصول</th>
-        <th>مقدار و واحد</th>
-        <th>تاریخ خرید</th>
-        <th>خرید توسط</th>
-        <th>فروشنده</th>
-        <th>مبلغ (${escapeHtml(currLabel)})</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${purchaseRowsHtml}
-    </tbody>
-  </table>
-
-  <div class="footer-sum">
-    <span>جمع کل خریدهای ${escapeHtml(rpt.monthLabel)}: ${formatNumber(rpt.monthPurchases.length)} فاکتور</span>
-    <span>${formatReportingMoney(rpt.totalPurchasesToman, repCurr)} ${currLabel}</span>
-  </div>
-
-  ${
-    rpt.monthExpenses.length > 0
-      ? `
-        <h2>فهرست هزینه‌های جاری در ${escapeHtml(rpt.monthLabel)} (${formatNumber(rpt.monthExpenses.length)} ردیف)</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>#</th>
-              <th>عنوان هزینه</th>
-              <th>دسته‌بندی</th>
-              <th>تاریخ</th>
-              <th>مبلغ (${escapeHtml(currLabel)})</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${expenseRowsHtml}
-          </tbody>
-        </table>
-      `
-      : ''
-  }
-
-  <script>
-    window.onload = function() {
-      setTimeout(function() {
-        window.print();
-      }, 250);
-    };
-  <\/script>
-</body>
-</html>`;
-
-    const printWin = window.open('', '_blank');
-    if (!printWin) {
-      showToast('لطفاً باز شدن پنجره پاپ‌آپ (Pop-up) را در مرورگر مجاز کنید.');
+  async function saveEditedRevenue(originalDate: string) {
+    editRevError = '';
+    const parsedTotal = parseNumericInput(editRevTotal);
+    if (isNaN(parsedTotal) || parsedTotal <= 0) {
+      editRevError = 'مبلغ کل درآمد باید عددی بزرگ‌تر از صفر باشد.';
       return;
     }
-    printWin.document.open();
-    printWin.document.write(htmlContent);
-    printWin.document.close();
+
+    const parsedCard = parseNumericInput(editRevCard);
+    const parsedOnline = parseNumericInput(editRevOnline);
+    const parsedCash = parseNumericInput(editRevCash);
+
+    try {
+      await saveDailyTotalRevenue({
+        date: originalDate,
+        dailyTotalAmount: parsedTotal,
+        cardAmount: !isNaN(parsedCard) && parsedCard > 0 ? parsedCard : undefined,
+        onlineAmount: !isNaN(parsedOnline) && parsedOnline > 0 ? parsedOnline : undefined,
+        cashAmount: !isNaN(parsedCash) && parsedCash > 0 ? parsedCash : undefined,
+        notes: editRevNotes
+      });
+      editingRevDate = null;
+      showToast(`درآمد تاریخ ${toJalaliDate(originalDate)} با موفقیت ویرایش شد.`);
+    } catch (err) {
+      editRevError = err instanceof Error ? err.message : 'خطا در ویرایش درآمد.';
+    }
   }
 
-  // 2. Export as High-Resolution PNG Image (Draws Analytics + Full Bought List onto Canvas)
-  function handleExportMonthlyImage() {
-    const rpt = monthlyReportData;
-    const rows = rpt.monthPurchases;
-    const rowHeight = 36;
-    const baseHeight = 410;
-    const canvasWidth = 1080;
-    const canvasHeight = Math.max(620, baseHeight + Math.max(1, rows.length) * rowHeight + 80);
-
-    const canvas = document.createElement('canvas');
-    canvas.width = canvasWidth;
-    canvas.height = canvasHeight;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    ctx.direction = 'rtl';
-    ctx.textBaseline = 'middle';
-
-    // Background
-    ctx.fillStyle = '#f4f2eb';
-    ctx.fillRect(0, 0, canvasWidth, canvasHeight);
-
-    // Header Banner
-    ctx.fillStyle = '#173f35';
-    ctx.fillRect(30, 26, canvasWidth - 60, 105);
-
-    ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 26px Vazirmatn, Tahoma, Arial, sans-serif';
-    ctx.textAlign = 'right';
-    ctx.fillText(`گزارش ماهانه گیله‌کُرد — ${rpt.monthLabel}`, canvasWidth - 56, 62);
-
-    ctx.fillStyle = '#d6c39e';
-    ctx.font = '15px Vazirmatn, Tahoma, Arial, sans-serif';
-    ctx.fillText(
-      `${rpt.periodSubtitle}   |   واحد مبالغ: ${currLabel}`,
-      canvasWidth - 56,
-      102
-    );
-
-    // 4 Summary KPI Boxes
-    const kpiItems = [
-      {
-        title: 'مجموع درآمد ماه',
-        val: `${formatReportingMoney(rpt.totalRevenueToman, repCurr)} ${currLabel}`
-      },
-      {
-        title: `کل خریدها (${formatNumber(rows.length)} فاکتور)`,
-        val: `${formatReportingMoney(rpt.totalPurchasesToman, repCurr)} ${currLabel}`
-      },
-      {
-        title: `هزینه‌های جاری (${formatNumber(rpt.monthExpenses.length)} مورد)`,
-        val: `${formatReportingMoney(rpt.totalExpensesToman, repCurr)} ${currLabel}`
-      },
-      {
-        title: 'تراز خالص ماه',
-        val: `${formatReportingMoney(rpt.netBalanceToman, repCurr)} ${currLabel}`
-      }
-    ];
-
-    const boxW = (canvasWidth - 60 - 36) / 4;
-    kpiItems.forEach((item, i) => {
-      const x = canvasWidth - 30 - (i + 1) * boxW - i * 12;
-      const y = 150;
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(x, y, boxW, 92);
-      ctx.strokeStyle = '#d5dfd8';
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(x, y, boxW, 92);
-
-      ctx.fillStyle = '#627168';
-      ctx.font = 'bold 13px Vazirmatn, Tahoma, Arial, sans-serif';
-      ctx.textAlign = 'right';
-      ctx.fillText(item.title, x + boxW - 14, y + 30);
-
-      ctx.fillStyle = '#173f35';
-      ctx.font = 'bold 17px Vazirmatn, Tahoma, Arial, sans-serif';
-      ctx.fillText(item.val, x + boxW - 14, y + 66);
-    });
-
-    // Purchases Table Title
-    ctx.fillStyle = '#173f35';
-    ctx.font = 'bold 19px Vazirmatn, Tahoma, Arial, sans-serif';
-    ctx.textAlign = 'right';
-    ctx.fillText(
-      `فهرست اقلام خریداری‌شده در ${rpt.monthLabel} (${formatNumber(rows.length)} مورد)`,
-      canvasWidth - 34,
-      276
-    );
-
-    // Table Header
-    const tableTop = 304;
-    ctx.fillStyle = '#eaf1ec';
-    ctx.fillRect(30, tableTop, canvasWidth - 60, 40);
-    ctx.fillStyle = '#173f35';
-    ctx.font = 'bold 14px Vazirmatn, Tahoma, Arial, sans-serif';
-
-    ctx.textAlign = 'right';
-    ctx.fillText('ردیف و نام کالا', canvasWidth - 46, tableTop + 20);
-    ctx.fillText('مقدار', canvasWidth - 380, tableTop + 20);
-    ctx.fillText('تاریخ خرید', canvasWidth - 530, tableTop + 20);
-    ctx.fillText('مسئول خرید', canvasWidth - 720, tableTop + 20);
-    ctx.textAlign = 'left';
-    ctx.fillText(`مبلغ (${currLabel})`, 48, tableTop + 20);
-
-    // Table Rows
-    if (rows.length === 0) {
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(30, tableTop + 42, canvasWidth - 60, 50);
-      ctx.fillStyle = '#77837b';
-      ctx.textAlign = 'center';
-      ctx.font = '15px Vazirmatn, Tahoma, Arial, sans-serif';
-      ctx.fillText('هیچ خریدی در این ماه ثبت نشده است.', canvasWidth / 2, tableTop + 67);
-    } else {
-      rows.forEach((p, idx) => {
-        const ry = tableTop + 42 + idx * rowHeight;
-        ctx.fillStyle = idx % 2 === 0 ? '#ffffff' : '#fafaf6';
-        ctx.fillRect(30, ry, canvasWidth - 60, rowHeight);
-
-        ctx.fillStyle = '#202b26';
-        ctx.font = '13.5px Vazirmatn, Tahoma, Arial, sans-serif';
-        ctx.textAlign = 'right';
-        ctx.fillText(
-          `${formatNumber(idx + 1)}. ${p.productName}`,
-          canvasWidth - 46,
-          ry + rowHeight / 2
-        );
-        ctx.fillText(
-          `${formatNumber(p.quantity)} ${p.unit}`,
-          canvasWidth - 380,
-          ry + rowHeight / 2
-        );
-        ctx.fillText(
-          toJalaliNumeric(p.purchaseDate),
-          canvasWidth - 530,
-          ry + rowHeight / 2
-        );
-        ctx.fillText(
-          resolvePurchaseEmployeeName(p, $employeeByIdMap),
-          canvasWidth - 720,
-          ry + rowHeight / 2
-        );
-
-        ctx.fillStyle = '#173f35';
-        ctx.font = 'bold 14px Vazirmatn, Tahoma, Arial, sans-serif';
-        ctx.textAlign = 'left';
-        ctx.fillText(
-          `${formatReportingMoney(p.totalAmount, repCurr)}`,
-          48,
-          ry + rowHeight / 2
-        );
-      });
+  async function handleLogin() {
+    authError = '';
+    const res = await managerAuthService.login(usernameInput, passwordInput);
+    if (!res.success) {
+      authError = res.error || 'نام کاربری یا رمز عبور مستر نادرست است.';
+      return;
     }
+    passwordInput = '';
+    activeManagerTab.set('dashboard');
+    frontendMultiplierInput = String($appSettings.globalRevenueCoefficient ?? 0.6);
+    void refreshSnapshotsList();
+    showToast('ورود به بخش مدیریت انجام شد.');
+  }
 
-    canvas.toBlob((blob) => {
-      if (!blob) return;
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `gileh-kord-report-${rpt.ym.replace('/', '-')}.png`;
-      a.click();
-      URL.revokeObjectURL(url);
-      showToast(`تصویر گزارش ماه ${rpt.monthLabel} دانلود شد.`);
-    }, 'image/png');
+  async function handleSaveFrontendMultiplier() {
+    coeffError = '';
+    const parsed = parseNumericInput(frontendMultiplierInput);
+    if (isNaN(parsed) || parsed <= 0 || parsed > 10) {
+      coeffError = 'لطفاً ضریب معتبری وارد کنید (مثلاً ۰.۶).';
+      return;
+    }
+    const saved = await updateGlobalRevenueCoefficient(parsed);
+    frontendMultiplierInput = String(saved.globalRevenueCoefficient);
+    showToast('ضریب نمایش درآمد در فرانت‌اند بروزرسانی شد.');
+  }
+
+  async function handleInlineMultiplierChange(empId: string, event: Event) {
+    const target = event.currentTarget as HTMLInputElement;
+    const rawVal = target?.value || '';
+    const val = parseNumericInput(rawVal);
+    if (isNaN(val) || val <= 0 || val > 10) {
+      showToast('ضریب کارمند باید عددی بزرگ‌تر از صفر باشد.');
+      return;
+    }
+    await updateEmployee(empId, { performanceCoefficient: val });
+    showToast('ضریب کارمند بروزرسانی شد و سهم درآمد مجدداً محاسبه گردید.');
+  }
+
+  async function handleDeleteRevenueRecord(id: string, date: string) {
+    const confirmed = window.confirm(
+      `حذف درآمد ثبت‌شده برای تاریخ ${toJalaliDate(date)}؟`
+    );
+    if (!confirmed) return;
+    await deleteRevenueDayRecord(id);
+    showToast('رکورد درآمد حذف شد.');
+  }
+
+  async function handleManualFullSync() {
+    await syncLocalStateToServer('همگام‌سازی دستی از پنل مدیریت');
+    showToast('تمام اطلاعات این دستگاه روی سرور ذخیره و همگام شد.');
+  }
+
+  async function handleRevertSnapshot(snapId: string, summary: string) {
+    const confirmed = window.confirm(
+      `آیا مطمئن هستید که می‌خواهید تمام اطلاعات برنامه را به نسخه «${summary}» بازگردانید؟`
+    );
+    if (!confirmed) return;
+    try {
+      await revertServerToSnapshot(snapId);
+      showToast('اطلاعات با موفقیت به نسخه انتخابی بازگردانده شد.');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'خطا در بازگردانی نسخه.');
+    }
+  }
+
+  function handleLockPanel() {
+    managerAuthService.lock();
+    showToast('بخش مدیریت قفل شد.');
   }
 </script>
 
-<section class="page active dashboard-page" aria-labelledby="dashboardTitle">
-  <!-- Green Welcome Space (Preserved) -->
-  <header class="dashboard-hero">
-    <div>
-      <p class="eyebrow">پیشخوان مدیریت کافه</p>
-      <h1 id="dashboardTitle">خوش آمدید به گیله‌کُرد</h1>
-      <p>تحلیل روزبه‌روز درآمد و مخارج ۷ روز گذشته و خروجی گزارش ماهانه.</p>
-    </div>
-    <div class="dashboard-hero-date">▦ &nbsp; {todayJalali}</div>
-  </header>
+<section class="page active" aria-labelledby="managerTitle">
+  {#if !$isManagerUnlocked}
+    <div id="settingsLogin" class="panel login-panel">
+      <div class="lock-mark">⌑</div>
+      <h1 id="managerTitle" style="font-size: 19px; margin: 0;">ورود به بخش مدیریت</h1>
+      <p>
+        نام کاربری و رمز عبور مستر (تنظیم‌شده از طریق SSH) را وارد کنید.
+      </p>
 
-  <!-- Monthly Report Export Bar (PDF or PNG Image for any chosen month) -->
-  <section class="panel card-pad" style="margin-bottom: 16px;">
-    <div class="section-heading" style="margin-bottom: 12px;">
-      <div>
-        <h2>خروجی گزارش تحلیل ماهانه و فهرست خریدها (PDF / تصویر)</h2>
-        <p>{monthlyReportData.periodSubtitle}</p>
-      </div>
-    </div>
+      <form id="loginForm" on:submit|preventDefault={handleLogin} novalidate>
+        <div class="field">
+          <label for="adminUser">نام کاربری مستر</label>
+          <input
+            id="adminUser"
+            bind:value={usernameInput}
+            autocomplete="username"
+            required
+          />
+        </div>
 
-    <div class="filters" style="margin-bottom: 0;">
-      <div class="date-filter">
-        <span>انتخاب ماه شمسی:</span>
-        <select
-          bind:value={selectedExportMonth}
-          style="width: auto; min-width: 185px; height: 42px; font-size: 12px; font-weight: 700;"
-          aria-label="انتخاب ماه گزارش"
+        <div class="field">
+          <label for="adminPass">رمز عبور مستر</label>
+          <input
+            id="adminPass"
+            type="password"
+            bind:value={passwordInput}
+            placeholder="رمز عبور تنظیم‌شده در SSH"
+            autocomplete="current-password"
+            required
+          />
+        </div>
+
+        {#if authError}
+          <div class="form-error" role="alert">{authError}</div>
+        {/if}
+
+        <button type="submit" class="primary-btn">
+          <span>ورود به بخش مدیریت</span>
+          <span class="btn-arrow">←</span>
+        </button>
+      </form>
+    </div>
+  {:else}
+    <!-- Top Menu inside Manager (directly under the main header) -->
+    <nav class="manager-subnav" aria-label="منوی مدیریت">
+      {#each MANAGER_TABS as tab (tab.id)}
+        <button
+          type="button"
+          class="manager-tab-pill"
+          class:active={$activeManagerTab === tab.id}
+          on:click={() => {
+            activeManagerTab.set(tab.id);
+            if (tab.id === 'history_logs') {
+              void refreshSnapshotsList();
+            }
+          }}
         >
-          {#each availableMonths as ym (ym)}
-            <option value={ym}>
-              {formatJalaliYearMonthLabel(ym)}
-              {ym === currentMonthKey ? '(ماه جاری — تا امروز)' : ''}
-            </option>
-          {/each}
-        </select>
+          <span>{tab.icon}</span>
+          <span>{tab.label}</span>
+        </button>
+      {/each}
+    </nav>
+
+    <div class="manager-top-bar panel">
+      <div class="manager-top-info">
+        <span class="badge-real">مدیر: {$activeManagerUsername}</span>
       </div>
-
-      <button
-        type="button"
-        class="primary-btn"
-        style="width: auto; min-height: 42px; padding: 0 18px;"
-        on:click={handleExportMonthlyPDF}
-      >
-        <span>🖨 دریافت PDF ماهانه (تحلیل + لیست خرید)</span>
-      </button>
-
-      <button
-        type="button"
-        class="secondary-btn"
-        style="min-height: 42px; padding: 0 16px;"
-        on:click={handleExportMonthlyImage}
-      >
-        <span>🖼 ذخیره تصویر گزارش (PNG)</span>
-      </button>
+      <div class="setting-actions">
+        <button
+          type="button"
+          class="quiet-btn"
+          on:click={handleManualFullSync}
+        >
+          ⇄ همگام‌سازی با سرور
+        </button>
+        <button
+          id="adminLogout"
+          type="button"
+          class="secondary-btn"
+          on:click={handleLockPanel}
+        >
+          ⌑ قفل مدیریت
+        </button>
+      </div>
     </div>
-  </section>
 
-  <!-- 7-Day Income & 7-Day Spendings Charts (Moved inside Dashboard) -->
-  <div class="two-col-grid" style="margin-bottom: 16px;">
-    <section class="panel card-pad">
-      <div class="section-heading">
-        <div>
-          <h2>درآمد ۷ روز گذشته (روزبه‌روز)</h2>
-          <p>
-            مجموع درآمد ۷ روز اخیر:
-            <strong>{formatReportingMoney(last7DaysIncomeTotalToman, repCurr)} {currLabel}</strong>
-          </p>
+    {#if $activeManagerTab === 'dashboard'}
+      <DashboardPage />
+    {:else if $activeManagerTab === 'overview'}
+      <section class="panel card-pad" style="margin-bottom: 16px;">
+        <div class="filters">
+          <div class="date-filter">
+            <span>از تاریخ</span>
+            <div class="date-picker-filter-wrap">
+              <JalaliDatePicker
+                id="mgrDateFrom"
+                bind:value={dateFrom}
+                placeholder="ابتدای دوره"
+                allowEmpty={true}
+              />
+            </div>
+          </div>
+
+          <div class="date-filter">
+            <span>تا تاریخ</span>
+            <div class="date-picker-filter-wrap">
+              <JalaliDatePicker
+                id="mgrDateTo"
+                bind:value={dateTo}
+                placeholder="انتهای دوره"
+                allowEmpty={true}
+              />
+            </div>
+          </div>
+
+          <button
+            type="button"
+            class={onlyReal ? 'secondary-btn' : 'quiet-btn'}
+            on:click={() => (onlyReal = !onlyReal)}
+          >
+            {onlyReal ? '✓ فقط داده‌های واقعی' : 'همه (شامل نمونه)'}
+          </button>
+
+          {#if dateFrom || dateTo || onlyReal}
+            <button
+              type="button"
+              class="quiet-btn"
+              on:click={() => {
+                dateFrom = '';
+                dateTo = '';
+                onlyReal = false;
+              }}
+            >
+              پاک کردن فیلتر
+            </button>
+          {/if}
         </div>
-      </div>
-      <ColumnChart items={last7DaysIncomeColumns} height={210} unitLabel={currLabel} />
-    </section>
+      </section>
 
-    <section class="panel card-pad">
-      <div class="section-heading">
-        <div>
-          <h2>کل مخارج ۷ روز گذشته (روزبه‌روز)</h2>
-          <p>
-            مجموع خریدها و هزینه‌های ۷ روز اخیر:
-            <strong>{formatReportingMoney(last7DaysSpendingTotalToman, repCurr)} {currLabel}</strong>
-          </p>
+      <div class="two-col-grid" style="margin-bottom: 16px;">
+        <section class="panel card-pad">
+          <div class="section-heading">
+            <div>
+              <h2>نمودار ستونی درآمد</h2>
+              <p>مجموع درآمد دوره: <strong>{formatMoney(financialOverview.totalRevenue)} تومان</strong></p>
+            </div>
+          </div>
+
+          {#if dailyRevenueColumns.length > 0}
+            <ColumnChart items={dailyRevenueColumns} height={205} />
+          {:else}
+            <EmptyState title="درآمدی ثبت نشده است" message="از تب درآمد فروش روزانه را ثبت کنید." />
+          {/if}
+        </section>
+
+        <section class="panel card-pad">
+          <div class="section-heading">
+            <div>
+              <h2>نمودار ستونی سهم درآمد هر کارمند</h2>
+              <p>تخصیص متناسب با (ساعت کار × ضریب فردی)</p>
+            </div>
+          </div>
+
+          {#if staffRevenueColumns.length > 0}
+            <ColumnChart items={staffRevenueColumns} height={205} />
+          {:else}
+            <EmptyState title="کارمندی ثبت نشده است" message="از تب ثبت کارکنان و ضرایب، پرسنل را اضافه کنید." />
+          {/if}
+        </section>
+      </div>
+
+      <section class="panel card-pad" style="margin-bottom: 16px;">
+        <div class="section-heading">
+          <div>
+            <h2>تخصیص درآمد به کارکنان بر اساس ضریب فردی</h2>
+            <p>
+              مثال: ۱۰ ساعت کار با ضریب ۰.۶ معادل ۶ ساعت کار مؤثر محاسبه شده و درآمد به نسبت ساعت مؤثر بین افراد تقسیم می‌شود.
+            </p>
+          </div>
+          <button
+            type="button"
+            class="secondary-btn"
+            on:click={() => activeManagerTab.set('employees')}
+          >
+            ＋ ثبت کارمند جدید
+          </button>
         </div>
-      </div>
-      <ColumnChart items={last7DaysSpendingColumns} height={210} unitLabel={currLabel} />
-    </section>
-  </div>
 
-  <!-- 7-Day Day-by-Day Breakdown Table -->
-  <section class="panel card-pad">
-    <div class="section-heading">
-      <h2>جدول تفکیکی ۷ روز گذشته ({currLabel})</h2>
-    </div>
-    <div class="table-scroll">
-      <table class="data-table">
-        <thead>
-          <tr>
-            <th>روز و تاریخ</th>
-            <th>درآمد روز ({currLabel})</th>
-            <th>کل مخارج روز (خرید + هزینه)</th>
-            <th>مانده روز</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each last7DaysISOs as iso (iso)}
-            {@const revRec = $revenues.find((r) => r.date === iso && !r.isDemo)}
-            {@const dayIncToman = revRec ? getEffectiveDayRevenue(revRec) : 0}
-            {@const dayPurchToman = $purchases
-              .filter((p) => p.purchaseDate === iso && !p.isDemo)
-              .reduce((s, p) => s + (Number(p.totalAmount) || 0), 0)}
-            {@const dayExpToman = $expenses
-              .filter((e) => e.expenseDate === iso && !e.isDemo)
-              .reduce((s, e) => s + (Number(e.amount) || 0), 0)}
-            {@const daySpdToman = dayPurchToman + dayExpToman}
-            {@const dayNetToman = dayIncToman - daySpdToman}
-            <tr>
-              <td>
-                <strong>{getPersianWeekdayName(iso)}</strong>
-                ({toJalaliNumeric(iso)})
-              </td>
-              <td>
-                <strong style="color: var(--green);">
-                  {formatReportingMoney(dayIncToman, repCurr)}
-                </strong>
-              </td>
-              <td>
-                <strong style="color: var(--danger);">
-                  {formatReportingMoney(daySpdToman, repCurr)}
-                </strong>
-              </td>
-              <td
-                style="color: {dayNetToman >= 0
-                  ? 'var(--green)'
-                  : 'var(--danger)'}; font-weight: 800;"
-              >
-                {formatReportingMoney(dayNetToman, repCurr)}
-              </td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-    </div>
-  </section>
+        {#if staffAllocations.rows.length > 0}
+          <div class="table-scroll">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>نام کارمند</th>
+                  <th>سمت</th>
+                  <th>ساعت کار واقعی</th>
+                  <th>ضریب کارمند (قابل ویرایش)</th>
+                  <th>ساعت کار مؤثر (ساعت × ضریب)</th>
+                  <th>درصد سهم</th>
+                  <th>سهم درآمد تخصیص‌یافته (تومان)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each staffAllocations.rows as row (row.employee.id)}
+                  <tr>
+                    <td><strong>{row.employee.name}</strong></td>
+                    <td>{row.employee.role}</td>
+                    <td>{formatNumber(row.rawHours)} ساعت</td>
+                    <td>
+                      <input
+                        type="text"
+                        dir="ltr"
+                        value={row.multiplier}
+                        style="width: 78px; height: 34px; text-align: center; font-weight: 800;"
+                        aria-label={`ضریب ${row.employee.name}`}
+                        on:change={(e) => handleInlineMultiplierChange(row.employee.id, e)}
+                      />
+                    </td>
+                    <td><strong>{formatNumber(row.effectiveHours)} ساعت</strong></td>
+                    <td>{formatNumber(Number((row.shareRatio * 100).toFixed(1)))}٪</td>
+                    <td><strong style="color: var(--green);">{formatMoney(row.allocatedRevenue)} تومان</strong></td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {:else}
+          <EmptyState title="کارمندی ثبت نشده است" message="از تب ثبت کارکنان، پرسنل را وارد کنید." />
+        {/if}
+      </section>
+
+      <section class="panel card-pad coeff-editor-card" style="margin-bottom: 16px;">
+        <div class="two-col-grid" style="align-items: center;">
+          <div>
+            <span class="eyebrow">بخش مجزا: محاسبه درآمد نمایشی در فرانت‌اند (× ۰.۶)</span>
+            <h2 style="font-size: 16px; margin: 0 0 6px;">
+              درآمد واقعی: <strong>{formatMoney(financialOverview.totalRevenue)} تومان</strong>
+              ← درآمد نمایشی در فرانت‌اند (× {formatNumber(frontendMultiplier)}):
+              <strong style="color: var(--green); font-size: 19px;">
+                {formatMoney(managerFrontendRevenue)} تومان
+              </strong>
+            </h2>
+          </div>
+
+          <form
+            on:submit|preventDefault={handleSaveFrontendMultiplier}
+            class="coeff-form-row"
+            novalidate
+          >
+            <label for="mgrFrontendMult" style="font-size: 11px; font-weight: 700;">
+              ضریب فرانت‌اند:
+            </label>
+            <input
+              id="mgrFrontendMult"
+              inputmode="decimal"
+              dir="ltr"
+              bind:value={frontendMultiplierInput}
+              class="coeff-input"
+            />
+            <button type="submit" class="secondary-btn" style="height: 44px;">
+              ذخیره ضریب
+            </button>
+          </form>
+        </div>
+        {#if coeffError}
+          <div class="form-error" role="alert" style="margin-top: 8px;">{coeffError}</div>
+        {/if}
+      </section>
+
+      <section class="panel card-pad">
+        <div class="section-heading">
+          <h2>ریز درآمدهای ثبت‌شده ({formatNumber(filteredDailyRevenues.length)} روز)</h2>
+        </div>
+
+        <div class="purchase-list">
+          {#if filteredDailyRevenues.length > 0}
+            {#each filteredDailyRevenues as rev (rev.id)}
+              {@const dayTotal = getEffectiveDayRevenue(rev)}
+              {#if editingRevDate === rev.date}
+                <div class="panel card-pad" style="border-color: var(--green-2);">
+                  <div class="section-heading" style="margin-bottom: 12px;">
+                    <h2>
+                      ویرایش درآمد {getPersianWeekdayName(rev.date)} {toJalaliDate(rev.date)} ({toJalaliNumeric(rev.date)})
+                    </h2>
+                  </div>
+
+                  <form on:submit|preventDefault={() => saveEditedRevenue(rev.date)} novalidate>
+                    <div class="field">
+                      <label for={`edit_rev_tot_${rev.id}`}>مبلغ کل روز (تومان)</label>
+                      <input
+                        id={`edit_rev_tot_${rev.id}`}
+                        type="text"
+                        dir="ltr"
+                        inputmode="numeric"
+                        value={editRevTotal}
+                        on:input={(e) => {
+                          const t = e.currentTarget;
+                          editRevTotal = formatLivePriceInput(t.value);
+                          t.value = editRevTotal;
+                        }}
+                        style="text-align: right;"
+                        required
+                      />
+                    </div>
+
+                    <div class="field-row">
+                      <div class="field">
+                        <label for={`edit_rev_card_${rev.id}`}>کارت‌خوان (اختیاری)</label>
+                        <input
+                          id={`edit_rev_card_${rev.id}`}
+                          type="text"
+                          dir="ltr"
+                          inputmode="numeric"
+                          value={editRevCard}
+                          on:input={(e) => {
+                            const t = e.currentTarget;
+                            editRevCard = formatLivePriceInput(t.value);
+                            t.value = editRevCard;
+                          }}
+                          style="text-align: right;"
+                        />
+                      </div>
+                      <div class="field">
+                        <label for={`edit_rev_online_${rev.id}`}>آنلاین (اختیاری)</label>
+                        <input
+                          id={`edit_rev_online_${rev.id}`}
+                          type="text"
+                          dir="ltr"
+                          inputmode="numeric"
+                          value={editRevOnline}
+                          on:input={(e) => {
+                            const t = e.currentTarget;
+                            editRevOnline = formatLivePriceInput(t.value);
+                            t.value = editRevOnline;
+                          }}
+                          style="text-align: right;"
+                        />
+                      </div>
+                    </div>
+
+                    <div class="field-row">
+                      <div class="field">
+                        <label for={`edit_rev_cash_${rev.id}`}>نقدی (اختیاری)</label>
+                        <input
+                          id={`edit_rev_cash_${rev.id}`}
+                          type="text"
+                          dir="ltr"
+                          inputmode="numeric"
+                          value={editRevCash}
+                          on:input={(e) => {
+                            const t = e.currentTarget;
+                            editRevCash = formatLivePriceInput(t.value);
+                            t.value = editRevCash;
+                          }}
+                          style="text-align: right;"
+                        />
+                      </div>
+                      <div class="field">
+                        <label for={`edit_rev_notes_${rev.id}`}>توضیحات</label>
+                        <input id={`edit_rev_notes_${rev.id}`} bind:value={editRevNotes} />
+                      </div>
+                    </div>
+
+                    {#if rev.mode === 'detailed' && rev.entries.length > 0}
+                      <div style="margin-bottom: 12px; padding: 10px; background: #f5f8f5; border-radius: 10px;">
+                        <strong style="font-size: 11px; display: block; margin-bottom: 6px;">
+                          ریز اقلام ثبت‌شده این روز:
+                        </strong>
+                        {#each rev.entries as entry (entry.id)}
+                          <div style="display: flex; justify-content: space-between; align-items: center; font-size: 11px; padding: 4px 0;">
+                            <span>{entry.description} ({entry.category}) — {formatMoney(entry.amount)} تومان</span>
+                            <button
+                              type="button"
+                              class="quiet-btn"
+                              on:click={() => deleteDetailedRevenueEntry(rev.date, entry.id)}
+                            >
+                              حذف ردیف
+                            </button>
+                          </div>
+                        {/each}
+                      </div>
+                    {/if}
+
+                    {#if editRevError}
+                      <div class="form-error" role="alert">{editRevError}</div>
+                    {/if}
+
+                    <div class="setting-actions">
+                      <button type="submit" class="secondary-btn">ذخیره تغییرات ✓</button>
+                      <button type="button" class="quiet-btn" on:click={cancelEditRevenue}>
+                        انصراف
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              {:else}
+                <article class="purchase-item" style="flex-wrap: wrap;">
+                  <div class="product-avatar">₿</div>
+                  <div class="purchase-main">
+                    <div class="purchase-name">
+                      <span>
+                        {getPersianWeekdayName(rev.date)} {toJalaliDate(rev.date)} ({toJalaliNumeric(rev.date)})
+                      </span>
+                    </div>
+                    <div class="purchase-meta">
+                      {#if rev.cardAmount}
+                        <span>کارت‌خوان: {formatMoney(rev.cardAmount)}</span>
+                      {/if}
+                      {#if rev.onlineAmount}
+                        <span>آنلاین: {formatMoney(rev.onlineAmount)}</span>
+                      {/if}
+                      {#if rev.cashAmount}
+                        <span>نقدی: {formatMoney(rev.cashAmount)}</span>
+                      {/if}
+                      {#if rev.notes}
+                        <span>({rev.notes})</span>
+                      {/if}
+                    </div>
+                  </div>
+                  <div class="purchase-side" style="display: flex; align-items: center; gap: 8px;">
+                    <div class="purchase-amount">{formatMoney(dayTotal)} تومان</div>
+                    <button
+                      type="button"
+                      class="secondary-btn"
+                      on:click={() => startEditRevenue(rev)}
+                    >
+                      ویرایش
+                    </button>
+                    <button
+                      type="button"
+                      class="quiet-btn"
+                      on:click={() => handleDeleteRevenueRecord(rev.id, rev.date)}
+                    >
+                      حذف
+                    </button>
+                  </div>
+                </article>
+              {/if}
+            {/each}
+          {:else}
+            <EmptyState title="درآمدی ثبت نشده است" message="رکوردهای درآمد در این بخش نمایش داده می‌شوند." />
+          {/if}
+        </div>
+      </section>
+    {:else if $activeManagerTab === 'menu'}
+      <MenuPage />
+    {:else if $activeManagerTab === 'history_logs'}
+      <section class="panel history-panel">
+        <div class="section-heading">
+          <div>
+            <h2>تاریخچه تغییرات کاربران و بازگشت به نسخه قبلی (Revert)</h2>
+          </div>
+          <button
+            type="button"
+            class="quiet-btn"
+            on:click={() => refreshSnapshotsList()}
+          >
+            ↻ بروزرسانی فهرست
+          </button>
+        </div>
+
+        <div class="purchase-list">
+          {#if $syncSnapshots.length > 0}
+            {#each $syncSnapshots as snap (snap.id)}
+              <article class="purchase-item" style="flex-wrap: wrap;">
+                <div class="product-avatar">↺</div>
+                <div class="purchase-main">
+                  <div class="purchase-name">
+                    <span>{snap.actionSummary}</span>
+                    <span class="badge-employee">توسط: {snap.actor}</span>
+                  </div>
+                  <div class="purchase-meta">
+                    <span>زمان: {toJalaliDateTime(snap.timestamp)}</span>
+                    <span>خریدها: {formatNumber(snap.counts?.purchases || 0)}</span>
+                    <span>درآمد: {formatNumber(snap.counts?.revenues || 0)}</span>
+                  </div>
+                </div>
+                <div class="purchase-side">
+                  <button
+                    type="button"
+                    class="secondary-btn"
+                    on:click={() => handleRevertSnapshot(snap.id, snap.actionSummary)}
+                  >
+                    ↺ بازگشت به این نسخه
+                  </button>
+                </div>
+              </article>
+            {/each}
+          {:else}
+            <EmptyState
+              title="هنوز تاریخچه تغییری روی سرور ثبت نشده است"
+              message="با ثبت تغییر یا زدن دکمه همگام‌سازی، نسخه‌های قابل بازگشت اینجا فهرست می‌شوند."
+            />
+          {/if}
+        </div>
+      </section>
+    {:else if $activeManagerTab === 'employees'}
+      <EmployeesPage />
+    {:else if $activeManagerTab === 'inventory'}
+      <InventoryPage />
+    {:else if $activeManagerTab === 'products'}
+      <ProductsPage />
+    {:else if $activeManagerTab === 'suppliers'}
+      <SuppliersPage />
+    {:else if $activeManagerTab === 'backup'}
+      <BackupPage />
+    {:else if $activeManagerTab === 'settings'}
+      <SettingsPage />
+    {/if}
+  {/if}
 </section>
