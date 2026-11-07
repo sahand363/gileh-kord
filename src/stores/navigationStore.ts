@@ -1,5 +1,6 @@
 import { writable } from 'svelte/store';
 import type { AppPage } from '../models/types';
+import { isManagerUnlocked } from '../services/ManagerAuthService';
 
 export type { AppPage };
 
@@ -58,6 +59,7 @@ export const activeManagerTab = writable<ManagerSubTab>('dashboard');
 function resolveRoute(rawPage: string): AppPage {
   const clean = rawPage.replace('#', '').trim() as AppPage;
   if (clean === 'history') {
+    isManagerUnlocked.set(false);
     return 'entry';
   }
   if (MANAGER_PROTECTED_SUBTABS.has(clean as ManagerSubTab)) {
@@ -65,8 +67,12 @@ function resolveRoute(rawPage: string): AppPage {
     return 'manager';
   }
   if (PUBLIC_PAGES.has(clean)) {
+    if (clean !== 'manager') {
+      isManagerUnlocked.set(false);
+    }
     return clean;
   }
+  isManagerUnlocked.set(false);
   return 'entry';
 }
 
@@ -81,6 +87,7 @@ export const currentPage = writable<AppPage>(getInitialPage());
 
 export function navigateTo(page: AppPage | ManagerSubTab): void {
   if (page === 'history') {
+    isManagerUnlocked.set(false);
     currentPage.set('entry');
     if (typeof window !== 'undefined') {
       setTimeout(() => {
@@ -104,6 +111,12 @@ export function navigateTo(page: AppPage | ManagerSubTab): void {
   }
 
   if (!PUBLIC_PAGES.has(page as AppPage)) return;
+
+  // Leaving Manager automatically locks the Manager gate so it asks for password next time
+  if (page !== 'manager') {
+    isManagerUnlocked.set(false);
+  }
+
   currentPage.set(page as AppPage);
   if (typeof window !== 'undefined') {
     if (window.location.hash !== `#${page}`) {
