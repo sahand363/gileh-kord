@@ -14,6 +14,16 @@
   <button
     type="button"
     class="nav-item"
+    class:active={$currentPage === 'dashboard'}
+    on:click={() => selectPage('dashboard')}
+  >
+    <span class="nav-icon">⊞</span>
+    <span>پیشخوان</span>
+  </button>
+
+  <button
+    type="button"
+    class="nav-item"
     class:active={$currentPage === 'entry'}
     on:click={() => selectPage('entry')}
   >
@@ -48,6 +58,6 @@
     on:click={() => selectPage('manager')}
   >
     <span class="nav-icon">⌑</span>
-    <span>پنل مدیریت</span>
+    <span>مدیریت</span>
   </button>
 </nav>
