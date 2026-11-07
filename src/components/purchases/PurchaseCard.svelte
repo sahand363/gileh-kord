@@ -3,6 +3,7 @@
   import {
     formatMoney,
     formatNumber,
+    formatLivePriceInput,
     parseNumericInput,
     toJalaliDate,
     toJalaliNumeric
@@ -41,7 +42,7 @@
     editProductName = purchase.productName;
     editQuantity = String(purchase.quantity);
     editUnit = purchase.unit;
-    editPrice = String(purchase.totalAmount);
+    editPrice = formatLivePriceInput(purchase.totalAmount);
     editDate = purchase.purchaseDate;
     editEmployeeId = purchase.employeeId || '';
     editSupplier = purchase.supplierName || '';
@@ -49,6 +50,12 @@
     editNotes = purchase.notes || '';
     editError = '';
     isEditing = true;
+  }
+
+  function handleEditPriceInput(e: Event) {
+    const target = e.currentTarget as HTMLInputElement;
+    editPrice = formatLivePriceInput(target.value);
+    target.value = editPrice;
   }
 
   async function saveEdit() {
@@ -125,7 +132,16 @@
       <div class="field-row">
         <div class="field">
           <label for={`edit_price_${purchase.id}`}>مبلغ کل (تومان)</label>
-          <input id={`edit_price_${purchase.id}`} inputmode="numeric" bind:value={editPrice} required />
+          <input
+            id={`edit_price_${purchase.id}`}
+            type="text"
+            dir="ltr"
+            inputmode="numeric"
+            value={editPrice}
+            on:input={handleEditPriceInput}
+            style="text-align: right;"
+            required
+          />
         </div>
         <div class="field">
           <label for={`edit_date_${purchase.id}`}>تاریخ خرید</label>
