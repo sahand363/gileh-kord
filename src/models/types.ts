@@ -19,6 +19,8 @@ export type AppPage =
   | 'timesheets'
   | 'revenue'
   | 'manager'
+  | 'menu'
+  | 'history_logs'
   | 'products'
   | 'suppliers'
   | 'inventory'
@@ -54,7 +56,7 @@ export interface Employee {
   phone?: string;
   notes?: string;
   isActive: boolean;
-  performanceCoefficient: number; // Staff multiplier (e.g. 0.6, 1.0, 1.2)
+  performanceCoefficient: number;
   expectedSchedule?: WeeklyExpectedSchedule;
   isDemo?: boolean;
   createdAt: string;
@@ -69,7 +71,7 @@ export interface Purchase {
   unit: string;
   totalAmount: number;
   currency: 'IRT';
-  purchaseDate: string; // YYYY-MM-DD
+  purchaseDate: string;
   employeeId?: string;
   employeeNameSnapshot?: string;
   supplierId?: string;
@@ -113,8 +115,8 @@ export interface InventoryItem {
   currentStock: number;
   minStockThreshold: number;
   unit: string;
-  alertEnabled?: boolean; // Optional per-product shortage alert checkbox
-  lastUpdated: string; // YYYY-MM-DD
+  alertEnabled?: boolean;
+  lastUpdated: string;
   isDemo?: boolean;
 }
 
@@ -202,6 +204,41 @@ export interface TimesheetEntry {
   updatedAt: string;
 }
 
+export const MENU_CATEGORIES = [
+  'غذای اصلی و کباب‌ها',
+  'خورشت‌های محلی گیلانی و کردی',
+  'پیش‌غذا و مخلفات',
+  'نوشیدنی‌ها',
+  'دسر و سایر'
+] as const;
+
+export type MenuCategory = (typeof MENU_CATEGORIES)[number] | string;
+
+export interface MenuItem {
+  id: string;
+  name: string;
+  category: MenuCategory;
+  price: number; // In Toman
+  isAvailable: boolean;
+  description?: string;
+  isDemo?: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SyncSnapshotMeta {
+  id: string;
+  timestamp: string;
+  actor: string;
+  actionSummary: string;
+  counts: {
+    purchases: number;
+    revenues: number;
+    employees: number;
+    menuItems: number;
+  };
+}
+
 export interface ManagerAuthRecord {
   key: 'manager_credentials';
   username: string;
@@ -219,8 +256,8 @@ export interface ApplicationSettings {
   serverAddress: string;
   defaultUnit: string;
   currency: 'IRT';
-  reportingCurrency?: ReportingCurrency; // 'TOMAN' (default) or 'RIAL' (1 Toman = 10 Rial for display only)
-  backendSyncEnabled?: boolean; // Enables syncing with Go SQLite backend while keeping IndexedDB fallback
+  reportingCurrency?: ReportingCurrency;
+  backendSyncEnabled?: boolean;
   lastSelectedEmployeeId: string;
   globalRevenueCoefficient: number;
   showDemoBadges: boolean;
@@ -239,6 +276,7 @@ export interface BackupData {
   employees?: Employee[];
   revenues?: RevenueDayRecord[];
   timesheets?: TimesheetEntry[];
+  menuItems?: MenuItem[];
   settings: ApplicationSettings;
 }
 
