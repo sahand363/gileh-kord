@@ -11,6 +11,7 @@ import type {
   Employee,
   Expense,
   InventoryItem,
+  MenuItem,
   RevenueDayRecord,
   Supplier,
   TimesheetEntry
@@ -34,6 +35,7 @@ export class BackupService {
       employees,
       revenues,
       timesheets,
+      menuItems,
       settings
     ] = await Promise.all([
       purchaseRepository.getAll(),
@@ -44,6 +46,7 @@ export class BackupService {
       this.getStoreItems<Employee>('employees'),
       this.getStoreItems<RevenueDayRecord>('revenues'),
       this.getStoreItems<TimesheetEntry>('timesheets'),
+      this.getStoreItems<MenuItem>('menu_items'),
       settingsRepository.getSettings()
     ]);
 
@@ -58,14 +61,11 @@ export class BackupService {
       employees,
       revenues,
       timesheets,
+      menuItems,
       settings
     };
   }
 
-  /**
-   * Validates and atomically restores all application stores inside a single
-   * readwrite transaction. If validation or any write fails, existing data is preserved.
-   */
   public async restoreBackup(rawPayload: unknown): Promise<BackupData> {
     const validation = validateBackupPayload(rawPayload);
     if (!validation.isValid || !validation.normalizedBackup) {
@@ -86,6 +86,7 @@ export class BackupService {
         await requestToPromise(stores['employees'].clear());
         await requestToPromise(stores['revenues'].clear());
         await requestToPromise(stores['timesheets'].clear());
+        await requestToPromise(stores['menu_items'].clear());
 
         for (const emp of backup.employees || []) {
           await requestToPromise(stores['employees'].put(emp));
@@ -96,7 +97,7 @@ export class BackupService {
         }
 
         for (const purchase of backup.purchases) {
-          await requestToPromise(stores['purchases'].add(purchase));
+          await requestToPromise(stores['purchases'].put(purchase));
         }
 
         for (const supplier of backup.suppliers || []) {
@@ -117,6 +118,10 @@ export class BackupService {
 
         for (const ts of backup.timesheets || []) {
           await requestToPromise(stores['timesheets'].put(ts));
+        }
+
+        for (const menu of backup.menuItems || []) {
+          await requestToPromise(stores['menu_items'].put(menu));
         }
 
         await requestToPromise(
