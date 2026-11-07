@@ -4,6 +4,8 @@ import type {
   Employee,
   Expense,
   InventoryItem,
+  MenuCategory,
+  MenuItem,
   PaymentMethod,
   Product,
   Purchase,
@@ -12,6 +14,7 @@ import type {
   RevenueItemEntry,
   RevenueRecordingMode,
   Supplier,
+  SyncSnapshotMeta,
   TimesheetEditLog,
   TimesheetEntry,
   WeeklyExpectedSchedule
@@ -25,6 +28,8 @@ import {
 } from '../services/repositories/SettingsRepository';
 import { ALL_STORES, dbClient, requestToPromise } from '../services/db';
 import { createInitialDemoDataset } from '../services/demoData';
+import { backupService } from '../services/BackupService';
+import { apiClient, type ServerSyncMeta } from '../services/api/apiClient';
 import { getTodayISODate, normalizeProductKey } from '../utils/formatters';
 import {
   buildPublicRevenueView,
@@ -38,7 +43,10 @@ import {
   createDefaultWeeklySchedule
 } from '../utils/timesheetUtils';
 import { generateId } from '../utils/uuid';
-import { managerAuthService } from '../services/ManagerAuthService';
+import {
+  managerAuthService,
+  activeManagerUsername
+} from '../services/ManagerAuthService';
 
 export const purchases = writable<Purchase[]>([]);
 export const products = writable<Product[]>([]);
@@ -48,6 +56,9 @@ export const expenses = writable<Expense[]>([]);
 export const employees = writable<Employee[]>([]);
 export const revenues = writable<RevenueDayRecord[]>([]);
 export const timesheets = writable<TimesheetEntry[]>([]);
+export const menuItems = writable<MenuItem[]>([]);
+export const syncSnapshots = writable<SyncSnapshotMeta[]>([]);
+export const pendingServerUpdate = writable<ServerSyncMeta | null>(null);
 export const appSettings = writable<ApplicationSettings>({ ...DEFAULT_SETTINGS });
 export const isLoading = writable<boolean>(false);
 export const dbError = writable<string | null>(null);
@@ -83,11 +94,164 @@ async function readStoreAll<T>(storeName: string): Promise<T[]> {
   });
 }
 
+/**
+ * Strips any leftover `isDemo: true` records from IndexedDB if real user data is present.
+ */
+async function autoStripDemoIfRealDataExists(): Promise<void> {
+  await dbClient.executeTransaction([...ALL_STORES], 'readwrite', async (stores) => {
+    const checkStores = [
+      'purchases',
+      'products',
+      'suppliers',
+      'inventory',
+      'expenses',
+      'employees',
+      'revenues',
+      'timesheets'
+    ] as const;
+
+    let hasAnyRealRecord = false;
+    let hasAnyDemoRecord = false;
+
+    for (const name of checkStores) {
+      const items = (await requestToPromise(stores[name].getAll())) as Array<{
+        id: string;
+        isDemo?: boolean;
+      }>;
+      for (const item of items) {
+        if (item.isDemo) {
+          hasAnyDemoRecord = true;
+        } else {
+          hasAnyRealRecord = true;
+        }
+      }
+    }
+
+    if (hasAnyRealRecord && hasAnyDemoRecord) {
+      for (const name of checkStores) {
+        const items = (await requestToPromise(stores[name].getAll())) as Array<{
+          id: string;
+          isDemo?: boolean;
+        }>;
+        for (const item of items) {
+          if (item.isDemo) {
+            await requestToPromise(stores[name].delete(item.id));
+          }
+        }
+      }
+    }
+  });
+}
+
+/**
+ * Pushes the entire current browser state (Purchases, Revenues, Timesheets, Employees, Menu, etc.)
+ * to the server and records an audit snapshot that can be reverted from the Manager Dashboard.
+ */
+export async function syncLocalStateToServer(actionSummary: string): Promise<void> {
+  if (!apiClient.isEnabled()) return;
+  try {
+    await autoStripDemoIfRealDataExists();
+    const backup = await backupService.exportBackup();
+    const actor = get(activeManagerUsername) || 'کاربر';
+    const res = await apiClient.pushFullStateToServer(backup, actor, actionSummary);
+    if (res && res.updatedAt) {
+      const saved = await settingsRepository.saveSettings({
+        lastSyncAt: res.updatedAt,
+        demoSeedInitialized: true
+      });
+      appSettings.set(saved);
+      pendingServerUpdate.set(null);
+      await refreshSnapshotsList();
+    }
+  } catch {
+    // Offline or test environment: local IndexedDB remains intact
+  }
+}
+
+export async function refreshSnapshotsList(): Promise<void> {
+  if (!apiClient.isEnabled()) return;
+  try {
+    const list = await apiClient.listSnapshots();
+    syncSnapshots.set(list);
+  } catch {
+    // Ignore when offline
+  }
+}
+
+/**
+ * Checks if the server has newer data than this browser.
+ * If this browser has only demo/empty data or an older `lastSyncAt`, sets `pendingServerUpdate`
+ * so the UI asks the user whether they want to pull the latest updated data.
+ */
+export async function checkForServerUpdates(): Promise<void> {
+  if (!apiClient.isEnabled()) return;
+  try {
+    const meta = await apiClient.getSyncMeta();
+    if (!meta || !meta.updatedAt) return;
+
+    const settings = await settingsRepository.getSettings();
+    const localPurchases = get(purchases);
+    const onlyHasDemoOrEmpty =
+      localPurchases.length === 0 || localPurchases.every((p) => p.isDemo);
+
+    if (
+      !settings.lastSyncAt ||
+      meta.updatedAt > settings.lastSyncAt ||
+      onlyHasDemoOrEmpty
+    ) {
+      pendingServerUpdate.set(meta);
+    }
+  } catch {
+    // Ignore if offline
+  }
+}
+
+export async function acceptServerUpdate(): Promise<void> {
+  isLoading.set(true);
+  try {
+    const remote = await apiClient.pullFullStateFromServer();
+    if (remote && remote.state) {
+      await backupService.restoreBackup(remote.state);
+      const saved = await settingsRepository.saveSettings({
+        lastSyncAt: remote.updatedAt,
+        demoSeedInitialized: true
+      });
+      appSettings.set(saved);
+      pendingServerUpdate.set(null);
+      await loadPurchases(false);
+    }
+  } finally {
+    isLoading.set(false);
+  }
+}
+
+export function dismissServerUpdatePrompt(): void {
+  pendingServerUpdate.set(null);
+}
+
+export async function revertServerToSnapshot(snapshotId: string): Promise<void> {
+  const actor = get(activeManagerUsername) || 'مدیر';
+  const res = await apiClient.revertToSnapshot(snapshotId, actor);
+  if (res && res.state) {
+    await backupService.restoreBackup(res.state);
+    const saved = await settingsRepository.saveSettings({
+      lastSyncAt: res.updatedAt,
+      demoSeedInitialized: true
+    });
+    appSettings.set(saved);
+    pendingServerUpdate.set(null);
+    await loadPurchases(false);
+    await refreshSnapshotsList();
+  }
+}
+
 export async function loadPurchases(autoSeedDemoIfFirstRun = false): Promise<void> {
   isLoading.set(true);
   dbError.set(null);
   try {
     await managerAuthService.checkInitialized();
+    await autoStripDemoIfRealDataExists();
+
     const settings = await settingsRepository.getSettings();
     const [
       purchasesList,
@@ -97,7 +261,8 @@ export async function loadPurchases(autoSeedDemoIfFirstRun = false): Promise<voi
       expensesList,
       employeesList,
       revenuesList,
-      timesheetsList
+      timesheetsList,
+      menuItemsList
     ] = await Promise.all([
       purchaseRepository.getAll(),
       productRepository.getAll(),
@@ -106,15 +271,29 @@ export async function loadPurchases(autoSeedDemoIfFirstRun = false): Promise<voi
       readStoreAll<Expense>('expenses'),
       readStoreAll<Employee>('employees'),
       readStoreAll<RevenueDayRecord>('revenues'),
-      readStoreAll<TimesheetEntry>('timesheets')
+      readStoreAll<TimesheetEntry>('timesheets'),
+      readStoreAll<MenuItem>('menu_items')
     ]);
 
     if (
       autoSeedDemoIfFirstRun &&
       !settings.demoSeedInitialized &&
       purchasesList.length === 0 &&
-      employeesList.length === 0
+      employeesList.length === 0 &&
+      revenuesList.length === 0
     ) {
+      // Check if the server already has real data before seeding demo data!
+      if (apiClient.isEnabled()) {
+        const meta = await apiClient.getSyncMeta();
+        if (meta && meta.updatedAt) {
+          pendingServerUpdate.set(meta);
+          const updatedSettings = await settingsRepository.saveSettings({
+            demoSeedInitialized: true
+          });
+          appSettings.set(updatedSettings);
+          return;
+        }
+      }
       await loadDemoDataset();
       return;
     }
@@ -144,7 +323,15 @@ export async function loadPurchases(autoSeedDemoIfFirstRun = false): Promise<voi
           b.date.localeCompare(a.date) || b.clockIn.localeCompare(a.clockIn)
       )
     );
+    menuItems.set(
+      menuItemsList.sort((a, b) => a.category.localeCompare(b.category) || a.name.localeCompare(b.name))
+    );
     appSettings.set(settings);
+
+    if (autoSeedDemoIfFirstRun) {
+      void checkForServerUpdates();
+      void refreshSnapshotsList();
+    }
   } catch (err) {
     const message =
       err instanceof Error
@@ -224,7 +411,8 @@ export async function clearDemoDataset(): Promise<void> {
         'expenses',
         'employees',
         'revenues',
-        'timesheets'
+        'timesheets',
+        'menu_items'
       ] as const;
 
       for (const name of storeNames) {
@@ -266,6 +454,7 @@ export async function updateGlobalRevenueCoefficient(
     globalRevenueCoefficient: cleanCoeff
   });
   appSettings.set(saved);
+  void syncLocalStateToServer(`تغییر ضریب فرانت‌اند به ${cleanCoeff}`);
   return saved;
 }
 
@@ -311,6 +500,7 @@ export async function addEmployee(input: {
   }
 
   await loadPurchases(false);
+  void syncLocalStateToServer(`افزودن کارمند: ${emp.name}`);
   return emp;
 }
 
@@ -377,6 +567,7 @@ export async function updateEmployee(
   });
 
   await loadPurchases(false);
+  void syncLocalStateToServer(`ویرایش اطلاعات/ضریب کارمند: ${updatedEmp.name}`);
   return updatedEmp;
 }
 
@@ -502,6 +693,7 @@ export async function addPurchase(data: {
   );
 
   await loadPurchases(false);
+  void syncLocalStateToServer(`ثبت خرید: ${purchase.productName}`);
   return purchase;
 }
 
@@ -536,6 +728,7 @@ export async function updatePurchase(
   });
 
   await loadPurchases(false);
+  void syncLocalStateToServer(`ویرایش خرید: ${updated.productName}`);
   return updated;
 }
 
@@ -579,6 +772,7 @@ export async function saveDailyTotalRevenue(input: {
   });
 
   await loadPurchases(false);
+  void syncLocalStateToServer(`ثبت درآمد روزانه (${input.date})`);
   return savedRecord;
 }
 
@@ -639,6 +833,7 @@ export async function addDetailedRevenueEntry(input: {
   });
 
   await loadPurchases(false);
+  void syncLocalStateToServer(`ثبت ردیف فروش (${input.date})`);
   return savedRecord;
 }
 
@@ -663,6 +858,7 @@ export async function switchRevenueDayMode(
   });
 
   await loadPurchases(false);
+  void syncLocalStateToServer(`تغییر حالت درآمد روز (${date})`);
 }
 
 export async function deleteDetailedRevenueEntry(
@@ -687,6 +883,7 @@ export async function deleteDetailedRevenueEntry(
   });
 
   await loadPurchases(false);
+  void syncLocalStateToServer(`حذف ردیف فروش (${date})`);
 }
 
 export async function deleteRevenueDayRecord(id: string): Promise<void> {
@@ -694,6 +891,7 @@ export async function deleteRevenueDayRecord(id: string): Promise<void> {
     await requestToPromise(stores['revenues'].delete(id));
   });
   await loadPurchases(false);
+  void syncLocalStateToServer(`حذف رکورد درآمد (${id})`);
 }
 
 export async function addTimesheetEntry(input: {
@@ -745,6 +943,7 @@ export async function addTimesheetEntry(input: {
   });
 
   await loadPurchases(false);
+  void syncLocalStateToServer(`ثبت تایم‌شیت (${entry.date})`);
   return entry;
 }
 
@@ -809,6 +1008,7 @@ export async function updateTimesheetEntry(
   });
 
   await loadPurchases(false);
+  void syncLocalStateToServer(`ویرایش تایم‌شیت (${updatedEntry.date})`);
   return updatedEntry;
 }
 
@@ -817,6 +1017,97 @@ export async function deleteTimesheetEntry(id: string): Promise<void> {
     await requestToPromise(stores['timesheets'].delete(id));
   });
   await loadPurchases(false);
+  void syncLocalStateToServer('حذف رکورد تایم‌شیت');
+}
+
+// ============================================================================
+// Restaurant Menu Operations (Editable inside Manager Tab)
+// ============================================================================
+
+export async function addMenuItem(input: {
+  name: string;
+  category: MenuCategory;
+  price: number;
+  isAvailable?: boolean;
+  description?: string;
+}): Promise<MenuItem> {
+  const cleanName = input.name.trim();
+  if (!cleanName) throw new Error('نام آیتم منو الزامی است.');
+  if (!(input.price >= 0)) throw new Error('قیمت منو نامعتبر است.');
+
+  const now = new Date().toISOString();
+  const item: MenuItem = {
+    id: generateId('menu'),
+    name: cleanName,
+    category: input.category.trim() || 'غذای اصلی و کباب‌ها',
+    price: Math.round(input.price),
+    isAvailable: input.isAvailable !== false,
+    description: input.description?.trim() || undefined,
+    isDemo: false,
+    createdAt: now,
+    updatedAt: now
+  };
+
+  await dbClient.executeTransaction('menu_items', 'readwrite', async (stores) => {
+    await requestToPromise(stores['menu_items'].put(item));
+  });
+
+  await loadPurchases(false);
+  void syncLocalStateToServer(`افزودن به منو: ${item.name}`);
+  return item;
+}
+
+export async function updateMenuItem(
+  id: string,
+  updates: Partial<{
+    name: string;
+    category: MenuCategory;
+    price: number;
+    isAvailable: boolean;
+    description: string;
+  }>
+): Promise<MenuItem> {
+  let updated!: MenuItem;
+  await dbClient.executeTransaction('menu_items', 'readwrite', async (stores) => {
+    const existing = (await requestToPromise(
+      stores['menu_items'].get(id)
+    )) as MenuItem | undefined;
+    if (!existing) throw new Error('آیتم منو یافت نشد.');
+
+    updated = {
+      ...existing,
+      name: updates.name !== undefined ? updates.name.trim() || existing.name : existing.name,
+      category:
+        updates.category !== undefined
+          ? updates.category.trim() || existing.category
+          : existing.category,
+      price:
+        updates.price !== undefined && updates.price >= 0
+          ? Math.round(updates.price)
+          : existing.price,
+      isAvailable:
+        updates.isAvailable !== undefined ? updates.isAvailable : existing.isAvailable,
+      description:
+        updates.description !== undefined
+          ? updates.description.trim() || undefined
+          : existing.description,
+      updatedAt: new Date().toISOString()
+    };
+
+    await requestToPromise(stores['menu_items'].put(updated));
+  });
+
+  await loadPurchases(false);
+  void syncLocalStateToServer(`ویرایش آیتم منو: ${updated.name}`);
+  return updated;
+}
+
+export async function deleteMenuItem(id: string): Promise<void> {
+  await dbClient.executeTransaction('menu_items', 'readwrite', async (stores) => {
+    await requestToPromise(stores['menu_items'].delete(id));
+  });
+  await loadPurchases(false);
+  void syncLocalStateToServer('حذف آیتم از منو');
 }
 
 export async function addSupplier(input: {
@@ -843,6 +1134,7 @@ export async function addSupplier(input: {
   });
 
   await loadPurchases(false);
+  void syncLocalStateToServer(`افزودن تأمین‌کننده: ${newSupplier.name}`);
   return newSupplier;
 }
 
@@ -864,6 +1156,7 @@ export async function updateInventoryStock(
     await requestToPromise(stores['inventory'].put(updated));
   });
   await loadPurchases(false);
+  void syncLocalStateToServer('بروزرسانی موجودی انبار');
 }
 
 export async function toggleInventoryAlert(
@@ -882,6 +1175,7 @@ export async function toggleInventoryAlert(
     await requestToPromise(stores['inventory'].put(updated));
   });
   await loadPurchases(false);
+  void syncLocalStateToServer('تغییر وضعیت هشدار موجودی انبار');
 }
 
 export async function addInventoryItem(input: {
@@ -907,6 +1201,7 @@ export async function addInventoryItem(input: {
     await requestToPromise(stores['inventory'].put(item));
   });
   await loadPurchases(false);
+  void syncLocalStateToServer(`افزودن به انبار: ${item.productName}`);
 }
 
 export async function addExpense(input: {
@@ -932,6 +1227,7 @@ export async function addExpense(input: {
   });
 
   await loadPurchases(false);
+  void syncLocalStateToServer(`ثبت هزینه: ${expense.title}`);
   return expense;
 }
 
