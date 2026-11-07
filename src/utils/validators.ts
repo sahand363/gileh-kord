@@ -4,6 +4,7 @@ import type {
   Employee,
   Expense,
   InventoryItem,
+  MenuItem,
   Product,
   Purchase,
   RevenueDayRecord,
@@ -354,6 +355,17 @@ export function validateBackupPayload(raw: unknown): BackupValidationResult {
       )
     : [];
 
+  const validatedMenuItems: MenuItem[] = Array.isArray(data.menuItems)
+    ? (data.menuItems as MenuItem[]).filter(
+        (m) =>
+          m &&
+          typeof m.id === 'string' &&
+          typeof m.name === 'string' &&
+          m.name.trim() &&
+          Number(m.price) >= 0
+      )
+    : [];
+
   const rawSettings =
     data.settings && typeof data.settings === 'object'
       ? (data.settings as Partial<ApplicationSettings>)
@@ -398,6 +410,7 @@ export function validateBackupPayload(raw: unknown): BackupValidationResult {
       employees: validatedEmployees,
       revenues: validatedRevenues,
       timesheets: validatedTimesheets,
+      menuItems: validatedMenuItems,
       settings: validatedSettings
     }
   };
