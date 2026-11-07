@@ -1,9 +1,26 @@
 import { writable } from 'svelte/store';
-import type { BackupData, Product, Purchase } from '../../models/types';
+import type {
+  BackupData,
+  Product,
+  Purchase,
+  SyncSnapshotMeta
+} from '../../models/types';
 
 export type BackendConnectionState = 'disconnected' | 'checking' | 'connected';
 
 export const backendStatus = writable<BackendConnectionState>('disconnected');
+
+export interface ServerSyncMeta {
+  updatedAt: string | null;
+  lastActor: string;
+  lastAction: string;
+  counts: {
+    purchases: number;
+    revenues: number;
+    employees: number;
+    menuItems: number;
+  };
+}
 
 export class ApiClient {
   private baseUrl = '';
@@ -30,7 +47,7 @@ export class ApiClient {
   private async request<T>(
     path: string,
     init?: RequestInit,
-    timeoutMs = 4500
+    timeoutMs = 5000
   ): Promise<T> {
     if (typeof fetch === 'undefined') {
       throw new Error('Fetch API is not available in this environment.');
@@ -79,6 +96,76 @@ export class ApiClient {
       backendStatus.set('disconnected');
       return false;
     }
+  }
+
+  public async getSyncMeta(): Promise<ServerSyncMeta | null> {
+    try {
+      return await this.request<ServerSyncMeta>('/api/sync/meta', {
+        method: 'GET'
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  public async pullFullStateFromServer(): Promise<{
+    updatedAt: string;
+    state: BackupData;
+  }> {
+    return this.request<{ updatedAt: string; state: BackupData }>(
+      '/api/sync/state',
+      { method: 'GET' },
+      12000
+    );
+  }
+
+  public async pushFullStateToServer(
+    backup: BackupData,
+    actor: string,
+    actionSummary: string
+  ): Promise<{
+    ok: boolean;
+    updatedAt: string;
+    snapshotId: string;
+  }> {
+    return this.request(
+      '/api/sync/push',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          actor,
+          actionSummary,
+          state: backup
+        })
+      },
+      12000
+    );
+  }
+
+  public async listSnapshots(): Promise<SyncSnapshotMeta[]> {
+    const res = await this.request<{ items: SyncSnapshotMeta[] }>(
+      '/api/sync/history',
+      { method: 'GET' }
+    );
+    return res.items || [];
+  }
+
+  public async revertToSnapshot(
+    snapshotId: string,
+    actor: string
+  ): Promise<{
+    ok: boolean;
+    updatedAt: string;
+    state: BackupData;
+  }> {
+    return this.request(
+      '/api/sync/revert',
+      {
+        method: 'POST',
+        body: JSON.stringify({ snapshotId, actor })
+      },
+      12000
+    );
   }
 
   public async listProducts(query = ''): Promise<Product[]> {
@@ -160,10 +247,14 @@ export class ApiClient {
     importedEmployees: number;
     importedPurchases: number;
   }> {
-    return this.request('/api/import/backup', {
-      method: 'POST',
-      body: JSON.stringify(backup)
-    }, 15000);
+    return this.request(
+      '/api/import/backup',
+      {
+        method: 'POST',
+        body: JSON.stringify(backup)
+      },
+      15000
+    );
   }
 }
 
