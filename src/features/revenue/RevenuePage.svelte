@@ -7,6 +7,7 @@
   import { showToast } from '../../stores/toastStore';
   import {
     formatMoney,
+    formatLivePriceInput,
     getTodayISODate,
     parseNumericInput,
     toJalaliDate,
@@ -46,7 +47,7 @@
     const q = parseNumericInput(entryQuantity);
     const up = parseNumericInput(entryUnitPrice);
     if (!isNaN(q) && q > 0 && !isNaN(up) && up > 0) {
-      entryAmount = String(Math.round(q * up));
+      entryAmount = formatLivePriceInput(Math.round(q * up));
     }
   }
 
@@ -178,9 +179,17 @@
             <div class="input-wrap price-wrap">
               <input
                 id="dailyRevTotal"
+                type="text"
+                dir="ltr"
                 inputmode="numeric"
-                bind:value={dailyTotalAmount}
-                placeholder="مثلاً ۱۸٬۵۰۰٬۰۰۰"
+                value={dailyTotalAmount}
+                on:input={(e) => {
+                  const t = e.currentTarget;
+                  dailyTotalAmount = formatLivePriceInput(t.value);
+                  t.value = dailyTotalAmount;
+                }}
+                placeholder="4،000،000"
+                style="text-align: right;"
                 required
               />
               <span class="currency">تومان</span>
@@ -190,18 +199,54 @@
           <div class="field-row">
             <div class="field">
               <label for="revCard">کارت‌خوان (اختیاری)</label>
-              <input id="revCard" inputmode="numeric" bind:value={cardAmount} />
+              <input
+                id="revCard"
+                type="text"
+                dir="ltr"
+                inputmode="numeric"
+                value={cardAmount}
+                on:input={(e) => {
+                  const t = e.currentTarget;
+                  cardAmount = formatLivePriceInput(t.value);
+                  t.value = cardAmount;
+                }}
+                style="text-align: right;"
+              />
             </div>
             <div class="field">
               <label for="revOnline">آنلاین (اختیاری)</label>
-              <input id="revOnline" inputmode="numeric" bind:value={onlineAmount} />
+              <input
+                id="revOnline"
+                type="text"
+                dir="ltr"
+                inputmode="numeric"
+                value={onlineAmount}
+                on:input={(e) => {
+                  const t = e.currentTarget;
+                  onlineAmount = formatLivePriceInput(t.value);
+                  t.value = onlineAmount;
+                }}
+                style="text-align: right;"
+              />
             </div>
           </div>
 
           <div class="field-row">
             <div class="field">
               <label for="revCash">نقدی (اختیاری)</label>
-              <input id="revCash" inputmode="numeric" bind:value={cashAmount} />
+              <input
+                id="revCash"
+                type="text"
+                dir="ltr"
+                inputmode="numeric"
+                value={cashAmount}
+                on:input={(e) => {
+                  const t = e.currentTarget;
+                  cashAmount = formatLivePriceInput(t.value);
+                  t.value = cashAmount;
+                }}
+                style="text-align: right;"
+              />
             </div>
             <div class="field">
               <label for="revDailyNotes">توضیحات</label>
@@ -252,7 +297,19 @@
             </div>
             <div class="field">
               <label for="revUnitPrice">فی واحد (اختیاری)</label>
-              <input id="revUnitPrice" inputmode="numeric" bind:value={entryUnitPrice} />
+              <input
+                id="revUnitPrice"
+                type="text"
+                dir="ltr"
+                inputmode="numeric"
+                value={entryUnitPrice}
+                on:input={(e) => {
+                  const t = e.currentTarget;
+                  entryUnitPrice = formatLivePriceInput(t.value);
+                  t.value = entryUnitPrice;
+                }}
+                style="text-align: right;"
+              />
             </div>
           </div>
 
@@ -263,8 +320,16 @@
             <div class="input-wrap price-wrap">
               <input
                 id="revItemAmount"
+                type="text"
+                dir="ltr"
                 inputmode="numeric"
-                bind:value={entryAmount}
+                value={entryAmount}
+                on:input={(e) => {
+                  const t = e.currentTarget;
+                  entryAmount = formatLivePriceInput(t.value);
+                  t.value = entryAmount;
+                }}
+                style="text-align: right;"
                 required
               />
               <span class="currency">تومان</span>
@@ -296,7 +361,6 @@
     </aside>
   </div>
 
-  <!-- Recent Dates Entered ONLY (Does NOT display actual revenue amounts) -->
   <section class="recent-section">
     <div class="section-heading">
       <h2>آخرین تاریخ‌های ثبت‌شده</h2>
