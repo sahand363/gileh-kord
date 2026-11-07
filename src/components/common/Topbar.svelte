@@ -1,5 +1,10 @@
 <script lang="ts">
-  import { toJalaliDate, toJalaliNumeric, getTodayISODate, formatNumber } from '../../utils/formatters';
+  import {
+    toJalaliDate,
+    toJalaliNumeric,
+    getTodayISODate,
+    formatNumber
+  } from '../../utils/formatters';
   import {
     currentPage,
     navigateTo,
@@ -8,18 +13,36 @@
   } from '../../stores/navigationStore';
   import {
     dashboardSummary,
+    appSettings,
     clearDemoDataset,
     loadDemoDataset
   } from '../../stores/purchaseStore';
+  import { settingsRepository } from '../../services/repositories/SettingsRepository';
   import { runtimeState } from '../../services/pwaService';
+  import { backendStatus } from '../../services/api/apiClient';
   import { showToast } from '../../stores/toastStore';
+  import type { ReportingCurrency } from '../../models/types';
 
   $: todayISO = getTodayISODate();
   $: todayJalali = `${toJalaliDate(todayISO)} (${toJalaliNumeric(todayISO)})`;
+  $: currentRepCurrency = ($appSettings.reportingCurrency || 'TOMAN') as ReportingCurrency;
 
   function handleNav(page: AppPage, event?: MouseEvent) {
     event?.preventDefault();
     navigateTo(page);
+  }
+
+  async function toggleReportingCurrency() {
+    const next: ReportingCurrency = currentRepCurrency === 'TOMAN' ? 'RIAL' : 'TOMAN';
+    const saved = await settingsRepository.saveSettings({
+      reportingCurrency: next
+    });
+    appSettings.set(saved);
+    showToast(
+      next === 'RIAL'
+        ? 'واحد نمایش گزارش‌ها به ریال (۱ تومان = ۱۰ ریال) تغییر یافت.'
+        : 'واحد نمایش گزارش‌ها به تومان تغییر یافت.'
+    );
   }
 
   async function handleClearDemo() {
@@ -42,35 +65,34 @@
   >
     <span class="brand-mark">گ</span>
     <span>
-      <strong>گیله‌کُرد</strong>
-      <small>مدیریت جامع خرید و تدارکات رستوران</small>
+      <strong>{$appSettings.restaurantName || 'گیله‌کُرد'}</strong>
+      <small>{$appSettings.branchName || 'مدیریت جامع خرید و تدارکات رستوران'}</small>
     </span>
   </a>
 
   <div class="topbar-meta">
+    <button
+      type="button"
+      class="currency-toggle-pill"
+      on:click={toggleReportingCurrency}
+      title="تغییر واحد نمایش مبالغ (تومان / ریال) بدون تغییر داده‌های ذخیره‌شده"
+    >
+      <span>واحد نمایش:</span>
+      <strong>{currentRepCurrency === 'RIAL' ? 'ریال (×۱۰)' : 'تومان'}</strong>
+    </button>
+
     <span
       class="conn-pill"
       class:offline={!$runtimeState.isOnline}
       title={$runtimeState.swMessage}
     >
       <span class="status-dot" class:muted={!$runtimeState.isOnline}></span>
-      {#if $runtimeState.isOnline}
+      {#if !$runtimeState.isOnline}
+        <span>آفلاین | ذخیره در دستگاه</span>
+      {:else if $backendStatus === 'connected'}
+        <span>سرور SQLite متصل</span>
+      {:else}
         <span>آنلاین | حافظه محلی فعال</span>
-      {:else}
-        <span>آفلاین | ذخیره در دستگاه فعال</span>
-      {/if}
-    </span>
-
-    <span
-      class="conn-pill"
-      title={$runtimeState.swMessage}
-    >
-      {#if $runtimeState.swStatus === 'active'}
-        <span>کش آفلاین فعال (HTTPS)</span>
-      {:else if $runtimeState.accessMode === 'http-ip'}
-        <span>حالت HTTP IP</span>
-      {:else}
-        <span>IndexedDB فعال</span>
       {/if}
     </span>
 
@@ -95,15 +117,6 @@
 </nav>
 
 <div class="demo-banner">
-  {#if !$runtimeState.isOnline}
-    <div class="demo-banner-box" style="margin-bottom: 8px; background: #eef5f0; border-color: #cfe0d4; color: #173d32;">
-      <span>
-        <strong>وضعیت آفلاین (قطع اینترنت):</strong>
-        شما به اینترنت متصل نیستید، اما ثبت خرید و مشاهده اطلاعات از طریق پایگاه داده محلی دستگاه (IndexedDB) بدون محدودیت کار می‌کند.
-      </span>
-    </div>
-  {/if}
-
   {#if $dashboardSummary.demoCount > 0}
     <div class="demo-banner-box">
       <span>
@@ -122,7 +135,7 @@
   {:else if $dashboardSummary.totalPurchasesCount === 0}
     <div class="demo-banner-box">
       <span>
-        پایگاه داده خالی است. می‌توانید اولین خرید واقعی خود را ثبت کنید یا داده‌های نمونه آزمایشی را برای مشاهده کامل صفحات بارگذاری نمایید.
+        پایگاه داده خالی است. می‌توانید اولین خرید واقعی خود را ثبت کنید یا داده‌های نمونه آزمایشی را بارگذاری نمایید.
       </span>
       <div class="demo-banner-actions">
         <button type="button" class="secondary-btn" on:click={handleRestoreDemo}>
