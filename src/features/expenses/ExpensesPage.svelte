@@ -1,6 +1,10 @@
-<!-- در src/features/expenses/ExpensesPage.svelte خط import را به این صورت آپدیت کنید: -->
 <script lang="ts">
-  import { expenses, addExpense } from '../../stores/purchaseStore';
+  import {
+    expenses,
+    addExpense,
+    updateExpense,
+    deleteExpense
+  } from '../../stores/purchaseStore';
   import { showToast } from '../../stores/toastStore';
   import {
     formatMoney,
@@ -13,7 +17,7 @@
   } from '../../utils/formatters';
   import { getPersianWeekdayName } from '../../utils/jalali';
   import { calculateExpensesTotal } from '../../utils/calculations';
-  import type { ExpenseCategory } from '../../models/types';
+  import type { Expense, ExpenseCategory } from '../../models/types';
   import EmptyState from '../../components/common/EmptyState.svelte';
   import JalaliDatePicker from '../../components/common/JalaliDatePicker.svelte';
 
@@ -36,12 +40,22 @@
   let notes = '';
   let formError = '';
 
+  // Inline Editing State
+  let editingId: string | null = null;
+  let editTitle = '';
+  let editCategory: ExpenseCategory | string = 'حمل و نقل';
+  let editAmount = '';
+  let editDate = '';
+  let editNotes = '';
+  let editError = '';
+
   $: filteredExpenses = $expenses.filter((exp) => {
     const q = searchQuery.trim().toLocaleLowerCase('fa-IR');
     const matchesSearch =
       !q ||
       exp.title.toLocaleLowerCase('fa-IR').includes(q) ||
-      exp.category.toLocaleLowerCase('fa-IR').includes(q);
+      exp.category.toLocaleLowerCase('fa-IR').includes(q) ||
+      (exp.notes && exp.notes.toLocaleLowerCase('fa-IR').includes(q));
     const matchesCat = !selectedCategory || exp.category === selectedCategory;
     return matchesSearch && matchesCat;
   });
@@ -74,6 +88,57 @@
     expenseDate = getTodayISODate();
     notes = '';
     showToast('هزینه جدید ثبت شد.');
+  }
+
+  function startEdit(exp: Expense) {
+    editingId = exp.id;
+    editTitle = exp.title;
+    editCategory = exp.category;
+    editAmount = formatLivePriceInput(exp.amount);
+    editDate = exp.expenseDate;
+    editNotes = exp.notes || '';
+    editError = '';
+  }
+
+  function cancelEdit() {
+    editingId = null;
+    editError = '';
+  }
+
+  async function saveEdit(id: string) {
+    editError = '';
+    if (!editTitle.trim()) {
+      editError = 'عنوان هزینه الزامی است.';
+      return;
+    }
+
+    const parsedAmount = parseNumericInput(editAmount);
+    if (isNaN(parsedAmount) || parsedAmount <= 0) {
+      editError = 'مبلغ هزینه باید عددی بزرگ‌تر از صفر باشد.';
+      return;
+    }
+
+    try {
+      await updateExpense(id, {
+        title: editTitle,
+        category: editCategory,
+        amount: parsedAmount,
+        expenseDate: editDate,
+        notes: editNotes
+      });
+      editingId = null;
+      showToast('اطلاعات هزینه با موفقیت ویرایش شد.');
+    } catch (err) {
+      editError = err instanceof Error ? err.message : 'خطا در ویرایش هزینه.';
+    }
+  }
+
+  async function handleDelete(exp: Expense) {
+    if (!window.confirm(`حذف هزینه «${exp.title}» به مبلغ ${formatMoney(exp.amount)} تومان؟`)) {
+      return;
+    }
+    await deleteExpense(exp.id);
+    showToast('ردیف هزینه حذف شد.');
   }
 </script>
 
@@ -162,26 +227,112 @@
     <div class="purchase-list" style="margin-bottom: 18px;">
       {#if filteredExpenses.length > 0}
         {#each filteredExpenses as exp (exp.id)}
-          <article class="purchase-item">
-            <div class="product-avatar">¤</div>
-            <div class="purchase-main">
-              <div class="purchase-name">
-                <span>{exp.title}</span>
-              </div>
-              <div class="purchase-meta">
-                <span>سرفصل: {exp.category}</span>
-                {#if exp.notes}
-                  <span>({exp.notes})</span>
+          {#if editingId === exp.id}
+            <div class="panel card-pad" style="border-color: var(--green-2);">
+              <form on:submit|preventDefault={() => saveEdit(exp.id)} novalidate>
+                <div class="field-row">
+                  <div class="field">
+                    <label for={`edit_exp_title_${exp.id}`}>عنوان هزینه</label>
+                    <input
+                      id={`edit_exp_title_${exp.id}`}
+                      bind:value={editTitle}
+                      required
+                    />
+                  </div>
+                  <div class="field">
+                    <label for={`edit_exp_cat_${exp.id}`}>سرفصل هزینه</label>
+                    <select id={`edit_exp_cat_${exp.id}`} bind:value={editCategory}>
+                      {#each EXPENSE_CATEGORIES as cat}
+                        <option value={cat}>{cat}</option>
+                      {/each}
+                    </select>
+                  </div>
+                </div>
+
+                <div class="field-row">
+                  <div class="field">
+                    <label for={`edit_exp_amt_${exp.id}`}>مبلغ (تومان)</label>
+                    <input
+                      id={`edit_exp_amt_${exp.id}`}
+                      type="text"
+                      dir="ltr"
+                      inputmode="numeric"
+                      value={editAmount}
+                      on:input={(e) => {
+                        const t = e.currentTarget;
+                        editAmount = formatLivePriceInput(t.value);
+                        t.value = editAmount;
+                      }}
+                      style="text-align: right;"
+                      required
+                    />
+                  </div>
+                  <div class="field">
+                    <label for={`edit_exp_date_${exp.id}`}>تاریخ پرداخت</label>
+                    <JalaliDatePicker
+                      id={`edit_exp_date_${exp.id}`}
+                      bind:value={editDate}
+                    />
+                  </div>
+                </div>
+
+                <div class="field">
+                  <label for={`edit_exp_notes_${exp.id}`}>توضیحات</label>
+                  <input
+                    id={`edit_exp_notes_${exp.id}`}
+                    bind:value={editNotes}
+                    placeholder="توضیحات..."
+                  />
+                </div>
+
+                {#if editError}
+                  <div class="form-error" role="alert">{editError}</div>
                 {/if}
-              </div>
+
+                <div class="setting-actions">
+                  <button type="submit" class="secondary-btn">ذخیره تغییرات ✓</button>
+                  <button type="button" class="quiet-btn" on:click={cancelEdit}>
+                    انصراف
+                  </button>
+                </div>
+              </form>
             </div>
-            <div class="purchase-side">
-              <div class="purchase-amount">{formatMoney(exp.amount)} تومان</div>
-              <div class="purchase-date">
-                {getPersianWeekdayName(exp.expenseDate)} {toJalaliDate(exp.expenseDate)} ({toJalaliNumeric(exp.expenseDate)})
+          {:else}
+            <article class="purchase-item" style="flex-wrap: wrap;">
+              <div class="product-avatar">¤</div>
+              <div class="purchase-main">
+                <div class="purchase-name">
+                  <span>{exp.title}</span>
+                  <span class="badge-employee">{exp.category}</span>
+                </div>
+                <div class="purchase-meta">
+                  <span>
+                    {getPersianWeekdayName(exp.expenseDate)} {toJalaliDate(exp.expenseDate)} ({toJalaliNumeric(exp.expenseDate)})
+                  </span>
+                  {#if exp.notes}
+                    <span>({exp.notes})</span>
+                  {/if}
+                </div>
               </div>
-            </div>
-          </article>
+              <div class="purchase-side" style="display: flex; align-items: center; gap: 8px;">
+                <div class="purchase-amount">{formatMoney(exp.amount)} تومان</div>
+                <button
+                  type="button"
+                  class="secondary-btn"
+                  on:click={() => startEdit(exp)}
+                >
+                  ویرایش
+                </button>
+                <button
+                  type="button"
+                  class="quiet-btn"
+                  on:click={() => handleDelete(exp)}
+                >
+                  حذف
+                </button>
+              </div>
+            </article>
+          {/if}
         {/each}
       {:else}
         <EmptyState
