@@ -22,13 +22,20 @@ export interface NavSectionMeta {
 }
 
 export const NAV_SECTIONS: NavSectionMeta[] = [
+  { id: 'dashboard', label: 'پیشخوان', shortLabel: 'پیشخوان', icon: '⊞', primary: true },
   { id: 'entry', label: 'ثبت خرید', shortLabel: 'ثبت خرید', icon: '＋', primary: true },
   { id: 'timesheets', label: 'تایم‌شیت', shortLabel: 'تایم‌شیت', icon: '◷', primary: true },
   { id: 'revenue', label: 'درآمد', shortLabel: 'درآمد', icon: '₿', primary: true },
   { id: 'manager', label: 'پنل مدیریت', shortLabel: 'مدیریت', icon: '⌑', primary: true }
 ];
 
-const PUBLIC_PAGES = new Set<AppPage>(['entry', 'timesheets', 'revenue', 'manager']);
+const PUBLIC_PAGES = new Set<AppPage>([
+  'dashboard',
+  'entry',
+  'timesheets',
+  'revenue',
+  'manager'
+]);
 
 const MANAGER_PROTECTED_SUBTABS = new Set<ManagerSubTab>([
   'overview',
@@ -71,10 +78,12 @@ export function navigateTo(page: AppPage | ManagerSubTab): void {
   if (page === 'history') {
     currentPage.set('entry');
     if (typeof window !== 'undefined') {
-      const historyEl = document.getElementById('embeddedPurchaseHistory');
-      if (historyEl) {
-        historyEl.scrollIntoView({ behavior: 'smooth' });
-      }
+      setTimeout(() => {
+        const historyEl = document.getElementById('embeddedPurchaseHistory');
+        if (historyEl) {
+          historyEl.scrollIntoView({ behavior: 'smooth' });
+        }
+      }, 60);
     }
     return;
   }
