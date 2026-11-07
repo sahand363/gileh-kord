@@ -1,9 +1,11 @@
+<!-- در src/features/expenses/ExpensesPage.svelte خط import را به این صورت آپدیت کنید: -->
 <script lang="ts">
   import { expenses, addExpense } from '../../stores/purchaseStore';
   import { showToast } from '../../stores/toastStore';
   import {
     formatMoney,
     formatNumber,
+    formatLivePriceInput,
     toJalaliDate,
     toJalaliNumeric,
     getTodayISODate,
@@ -80,7 +82,6 @@
     <h1 id="expensesTitle">هزینه‌ها</h1>
   </div>
 
-  <!-- Top: Expense Registration Form -->
   <section class="panel form-panel" style="max-width: 720px; margin: 0 auto 24px;">
     <div class="section-heading">
       <h2>ثبت هزینه جدید</h2>
@@ -90,7 +91,7 @@
       <div class="field-row">
         <div class="field">
           <label for="expTitle">عنوان هزینه <b class="required">*</b></label>
-          <input id="expTitle" bind:value={title} placeholder="مثلاً سرویس یخچال صنعتی" required />
+          <input id="expTitle" bind:value={title} placeholder="مثلاً سرویس دستگاه اسپرسوساز" required />
         </div>
 
         <div class="field">
@@ -109,9 +110,17 @@
           <div class="input-wrap price-wrap">
             <input
               id="expAmount"
+              type="text"
+              dir="ltr"
               inputmode="numeric"
-              bind:value={amount}
-              placeholder="مثلاً ۸۵۰٬۰۰۰"
+              value={amount}
+              on:input={(e) => {
+                const t = e.currentTarget;
+                amount = formatLivePriceInput(t.value);
+                t.value = amount;
+              }}
+              placeholder="850،000"
+              style="text-align: right;"
               required
             />
             <span class="currency">تومان</span>
@@ -144,7 +153,6 @@
     </form>
   </section>
 
-  <!-- Bottom: Expense List & Search Bar at the Bottom -->
   <section class="panel history-panel">
     <div class="history-summary" style="margin-top: 0; border-top: 0; padding-top: 0;">
       <span>{formatNumber(filteredExpenses.length)} ردیف هزینه</span>
@@ -183,7 +191,6 @@
       {/if}
     </div>
 
-    <!-- Search Bar Moved to the Bottom -->
     <div class="filters" style="border-top: 1px solid var(--line); padding-top: 14px;">
       <div class="search-box">
         <span>⌕</span>
