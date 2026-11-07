@@ -6,12 +6,7 @@
     getTodayISODate,
     formatNumber
   } from '../../utils/formatters';
-  import {
-    currentPage,
-    navigateTo,
-    NAV_SECTIONS,
-    type AppPage
-  } from '../../stores/navigationStore';
+  import { navigateTo, type AppPage } from '../../stores/navigationStore';
   import {
     dashboardSummary,
     appSettings,
@@ -43,8 +38,8 @@
     appSettings.set(saved);
     showToast(
       next === 'RIAL'
-        ? 'واحد نمایش گزارش‌ها به ریال (۱ تومان = ۱۰ ریال) تغییر یافت.'
-        : 'واحد نمایش گزارش‌ها به تومان تغییر یافت.'
+        ? 'واحد به ریال (×۱۰) تغییر یافت.'
+        : 'واحد به تومان تغییر یافت.'
     );
   }
 
@@ -64,13 +59,9 @@
     class="brand"
     href="#entry"
     on:click={(e) => handleNav('entry', e)}
-    aria-label="گیله‌کرد، صفحه ثبت خرید"
+    aria-label="گیله‌کرد"
   >
-    <span class="brand-mark">گ</span>
-    <span>
-      <strong>{$appSettings.restaurantName || 'گیله‌کُرد'}</strong>
-      <small>{$appSettings.branchName || 'شعبه مرکزی'}</small>
-    </span>
+    <strong>گیله‌کُرد</strong>
   </a>
 
   <div class="topbar-meta">
@@ -79,8 +70,8 @@
       class="currency-toggle-pill"
       on:click={toggleReportingCurrency}
     >
-      <span>واحد نمایش:</span>
-      <strong>{currentRepCurrency === 'RIAL' ? 'ریال (×۱۰)' : 'تومان'}</strong>
+      <span>واحد:</span>
+      <strong>{currentRepCurrency === 'RIAL' ? 'ریال' : 'تومان'}</strong>
     </button>
 
     <span
@@ -100,22 +91,6 @@
     <span class="today-label">{todayJalali}</span>
   </div>
 </header>
-
-<nav class="section-ribbon" aria-label="بخش‌های سامانه">
-  <div class="section-ribbon-inner">
-    {#each NAV_SECTIONS as sec (sec.id)}
-      <button
-        type="button"
-        class="ribbon-item"
-        class:active={$currentPage === sec.id}
-        on:click={() => handleNav(sec.id)}
-      >
-        <span class="ribbon-icon">{sec.icon}</span>
-        <span>{sec.label}</span>
-      </button>
-    {/each}
-  </div>
-</nav>
 
 <div class="demo-banner">
   {#if $pendingServerUpdate}
