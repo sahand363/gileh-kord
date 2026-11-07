@@ -9,7 +9,6 @@ import { apiClient } from './services/api/apiClient';
 
 initNetworkListeners();
 
-// Enable Go backend API sync on the same origin (falls back to IndexedDB if offline)
 apiClient.configure({ baseUrl: '', enabled: true });
 void apiClient.checkHealth();
 
