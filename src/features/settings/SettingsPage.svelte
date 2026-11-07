@@ -1,163 +1,194 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { settingsRepository } from '../../services/repositories/SettingsRepository';
   import {
-    DEFAULT_SETTINGS,
-    settingsRepository
-  } from '../../services/repositories/SettingsRepository';
-  import { appSettings } from '../../stores/purchaseStore';
-  import { runtimeState } from '../../services/pwaService';
+    appSettings,
+    loadPurchases,
+    syncLocalStateToServer
+  } from '../../stores/purchaseStore';
   import {
     managerAuthService,
-    isManagerUnlocked
+    activeManagerUsername
   } from '../../services/ManagerAuthService';
-  import { activeManagerTab, navigateTo } from '../../stores/navigationStore';
   import { showToast } from '../../stores/toastStore';
-  import { MEASUREMENT_UNITS, type ApplicationSettings } from '../../models/types';
+  import { MEASUREMENT_UNITS, type ReportingCurrency } from '../../models/types';
 
-  let currentSettings: ApplicationSettings = { ...DEFAULT_SETTINGS };
+  let restaurantName = 'گیله‌کُرد';
+  let defaultUnit = 'کیلوگرم';
+  let reportingCurrency: ReportingCurrency = 'TOMAN';
+  let showDemoBadges = true;
 
-  let masterUsername = '';
-  let masterPassword = '';
-  let loginError = '';
+  let currentPassword = '';
+  let newUsername = '';
+  let newPassword = '';
+  let passError = '';
 
   onMount(async () => {
-    currentSettings = await settingsRepository.getSettings();
-    appSettings.set(currentSettings);
+    const s = await settingsRepository.getSettings();
+    restaurantName = s.restaurantName || 'گیله‌کُرد';
+    defaultUnit = s.defaultUnit || 'کیلوگرم';
+    reportingCurrency = (s.reportingCurrency || 'TOMAN') as ReportingCurrency;
+    showDemoBadges = s.showDemoBadges;
+    newUsername = $activeManagerUsername || 'admin';
   });
 
-  async function saveConfig() {
-    const saved = await settingsRepository.saveSettings(currentSettings);
-    currentSettings = saved;
+  async function handleSaveGeneralSettings() {
+    const saved = await settingsRepository.saveSettings({
+      restaurantName: restaurantName.trim() || 'گیله‌کُرد',
+      defaultUnit,
+      reportingCurrency,
+      showDemoBadges
+    });
     appSettings.set(saved);
-    showToast('تنظیمات ذخیره شد.');
+    await loadPurchases(false);
+    void syncLocalStateToServer('بروزرسانی تنظیمات کافه');
+    showToast('تنظیمات کافه با موفقیت ذخیره شد.');
   }
 
-  async function handleBottomManagerAccess() {
-    loginError = '';
-    if ($isManagerUnlocked) {
-      activeManagerTab.set('overview');
-      navigateTo('manager');
-      return;
-    }
-    const res = await managerAuthService.login(masterUsername, masterPassword);
+  async function handleChangeLocalCredentials() {
+    passError = '';
+    const res = await managerAuthService.changePassword(
+      currentPassword,
+      newPassword,
+      newUsername
+    );
     if (!res.success) {
-      loginError = res.error || 'نام کاربری یا رمز عبور نادرست است.';
+      passError = res.error || 'خطا در تغییر رمز عبور.';
       return;
     }
-    masterPassword = '';
-    activeManagerTab.set('overview');
-    navigateTo('manager');
-    showToast('بخش مدیریت باز شد.');
+    currentPassword = '';
+    newPassword = '';
+    showToast('رمز عبور محلی بروزرسانی شد (برای تغییر رمز اصلی سرور از منوی sudo gk گزینه ۸ استفاده کنید).');
+  }
+
+  function handleFullDeviceLogout() {
+    if (!window.confirm('آیا مایلید از حساب کاربری این دستگاه خارج شوید و کوکی ۳۰ روزه پاک شود؟')) {
+      return;
+    }
+    managerAuthService.logoutWholeApp();
+    showToast('خروج کامل از دستگاه انجام شد.');
   }
 </script>
 
 <section class="page active" aria-labelledby="settingsTitle">
   <div class="page-heading">
-    <h1 id="settingsTitle">تنظیمات</h1>
+    <div>
+      <p class="eyebrow">پیکربندی عمومی و نشست کاربری</p>
+      <h1 id="settingsTitle">تنظیمات</h1>
+    </div>
   </div>
 
   <div class="settings-grid">
     <section class="panel setting-card">
       <div class="setting-icon">⚙</div>
       <div class="setting-content">
-        <h3>مشخصات رستوران و واحد پیش‌فرض</h3>
-        <div class="field-row" style="max-width: 560px; margin-bottom: 12px;">
-          <div class="field" style="margin-bottom: 0;">
-            <label for="restName">نام رستوران</label>
-            <input id="restName" bind:value={currentSettings.restaurantName} on:change={saveConfig} />
+        <h3>مشخصات کافه و واحدهای پیش‌فرض</h3>
+        <p>تنظیم نام مجموعه، واحد پیش‌فرض ثبت خرید و واحد نمایش مبالغ.</p>
+
+        <form on:submit|preventDefault={handleSaveGeneralSettings} novalidate>
+          <div class="field-row">
+            <div class="field">
+              <label for="setCafeName">نام مجموعه</label>
+              <input id="setCafeName" bind:value={restaurantName} placeholder="گیله‌کُرد" />
+            </div>
+
+            <div class="field">
+              <label for="setDefUnit">واحد پیش‌فرض خرید</label>
+              <select id="setDefUnit" bind:value={defaultUnit}>
+                {#each MEASUREMENT_UNITS as u}
+                  <option value={u}>{u}</option>
+                {/each}
+              </select>
+            </div>
           </div>
-          <div class="field" style="margin-bottom: 0;">
-            <label for="defaultUnit">واحد پیش‌فرض خرید</label>
-            <select
-              id="defaultUnit"
-              bind:value={currentSettings.defaultUnit}
-              on:change={saveConfig}
-            >
-              {#each MEASUREMENT_UNITS as itemUnit}
-                <option value={itemUnit}>{itemUnit}</option>
-              {/each}
-            </select>
+
+          <div class="field-row">
+            <div class="field">
+              <label for="setRepCurr">واحد پول گزارش‌ها</label>
+              <select id="setRepCurr" bind:value={reportingCurrency}>
+                <option value="TOMAN">تومان (پیش‌فرض)</option>
+                <option value="RIAL">ریال (۱ تومان = ۱۰ ریال)</option>
+              </select>
+            </div>
+
+            <div class="field" style="display: flex; align-items: center; padding-top: 22px;">
+              <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; margin: 0;">
+                <input
+                  type="checkbox"
+                  bind:checked={showDemoBadges}
+                  style="width: 18px; height: 18px; min-height: 18px;"
+                />
+                <span>نمایش برچسب «ثبت واقعی» روی فاکتورها</span>
+              </label>
+            </div>
           </div>
-        </div>
-        <div class="setting-actions">
-          <button
-            type="button"
-            class={currentSettings.showDemoBadges ? 'secondary-btn' : 'quiet-btn'}
-            on:click={() => {
-              currentSettings.showDemoBadges = !currentSettings.showDemoBadges;
-              saveConfig();
-            }}
-          >
-            {currentSettings.showDemoBadges
-              ? '✓ نمایش برچسب تفکیک «نمونه آزمایشی / ثبت واقعی» فعال'
-              : 'نمایش برچسب تفکیک غیرفعال'}
+
+          <button type="submit" class="primary-btn" style="max-width: 240px;">
+            <span>ذخیره تنظیمات</span>
+            <span class="btn-arrow">←</span>
           </button>
-        </div>
+        </form>
       </div>
     </section>
 
     <section class="panel setting-card">
-      <div class="setting-icon">⟳</div>
+      <div class="setting-icon">🔑</div>
       <div class="setting-content">
-        <h3>وضعیت شبکه و حافظه محلی</h3>
-        <div class="sync-status">
-          <span class="status-dot" class:muted={!$runtimeState.isOnline}></span>
-          <span>{$runtimeState.isOnline ? 'آنلاین — حافظه محلی فعال' : 'آفلاین — ذخیره در دستگاه فعال'}</span>
-        </div>
+        <h3>بروزرسانی رمز عبور کش آفلاین</h3>
+        <p>
+          توجه: برای افزودن مدیر جدید یا تغییر رمز اصلی سرور، در ترمینال SSH دستور <code>sudo gk</code> را زده و <strong>گزینه ۸</strong> را انتخاب کنید.
+        </p>
+
+        <form on:submit|preventDefault={handleChangeLocalCredentials} novalidate>
+          <div class="field-row">
+            <div class="field">
+              <label for="setMgrUser">نام کاربری</label>
+              <input id="setMgrUser" bind:value={newUsername} autocomplete="username" />
+            </div>
+            <div class="field">
+              <label for="setCurPass">رمز عبور فعلی</label>
+              <input
+                id="setCurPass"
+                type="password"
+                bind:value={currentPassword}
+                autocomplete="current-password"
+              />
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="setNewPass">رمز عبور جدید</label>
+            <input
+              id="setNewPass"
+              type="password"
+              bind:value={newPassword}
+              autocomplete="new-password"
+            />
+          </div>
+
+          {#if passError}
+            <div class="form-error" role="alert">{passError}</div>
+          {/if}
+
+          <button type="submit" class="secondary-btn">
+            بروزرسانی رمز عبور محلی
+          </button>
+        </form>
       </div>
     </section>
 
-    <!-- Bottom of Settings Tab: Input Link Leading to the Management Section -->
-    <section class="panel setting-card" style="border-color: var(--green-2); background: #f8fbf9;">
+    <section class="panel setting-card">
       <div class="setting-icon">⌑</div>
       <div class="setting-content">
-        <h3>ورود به بخش مدیریت (با نام کاربری و رمز عبور SSH)</h3>
-        {#if $isManagerUnlocked}
-          <p>دسترسی مدیریت فعال است.</p>
-          <button
-            type="button"
-            class="primary-btn"
-            style="max-width: 280px;"
-            on:click={() => {
-              activeManagerTab.set('overview');
-              navigateTo('manager');
-            }}
-          >
-            <span>مشاهده بخش مدیریت</span>
-            <span class="btn-arrow">←</span>
+        <h3>نشست فعال در این دستگاه</h3>
+        <p>
+          در صورتی که می‌خواهید کوکی ۳۰ روزه ورود اول در این مرورگر پاک شود و برنامه به صفحه ورود اولیه برگردد، از دکمه زیر استفاده کنید.
+        </p>
+        <div class="setting-actions">
+          <button type="button" class="quiet-btn" on:click={handleFullDeviceLogout}>
+            خروج کامل از حساب در این دستگاه
           </button>
-        {:else}
-          <form on:submit|preventDefault={handleBottomManagerAccess} novalidate>
-            <div class="field-row" style="max-width: 520px; margin-bottom: 10px;">
-              <div class="field" style="margin-bottom: 0;">
-                <label for="settingsMgrUser">نام کاربری مستر</label>
-                <input
-                  id="settingsMgrUser"
-                  bind:value={masterUsername}
-                  placeholder="نام کاربری SSH"
-                  required
-                />
-              </div>
-              <div class="field" style="margin-bottom: 0;">
-                <label for="settingsMgrPass">رمز عبور مستر</label>
-                <input
-                  id="settingsMgrPass"
-                  type="password"
-                  bind:value={masterPassword}
-                  placeholder="رمز عبور SSH"
-                  required
-                />
-              </div>
-            </div>
-            {#if loginError}
-              <div class="form-error" role="alert">{loginError}</div>
-            {/if}
-            <button type="submit" class="primary-btn" style="max-width: 260px;">
-              <span>ورود به بخش مدیریت</span>
-              <span class="btn-arrow">←</span>
-            </button>
-          </form>
-        {/if}
+        </div>
       </div>
     </section>
   </div>
