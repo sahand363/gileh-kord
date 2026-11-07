@@ -74,20 +74,17 @@ export function getJalaliMonthLength(jy: number, jm: number): number {
   return jalaali.jalaaliMonthLength(jy, jm);
 }
 
-/**
- * Returns the Persian weekday index (0 = شنبه / Saturday ... 6 = جمعه / Friday)
- * from a YYYY-MM-DD Gregorian ISO date at local noon (immune to DST/midnight drift).
- */
 export function getPersianWeekdayIndex(isoDate: string): PersianWeekdayIndex | null {
   if (!isValidGregorianISODate(isoDate)) return null;
   const [gy, gm, gd] = isoDate.split('-').map(Number);
-  const dt = new Date(gy, gm - 1, gd, 12, 0, 0);
+  const dt = new Date(gy, mIndex(gm), gd, 12, 0, 0);
   return ((dt.getDay() + 1) % 7) as PersianWeekdayIndex;
 }
 
-/**
- * Returns the full Persian weekday name (e.g. 'سه‌شنبه') for a YYYY-MM-DD ISO date.
- */
+function mIndex(gm: number): number {
+  return gm - 1;
+}
+
 export function getPersianWeekdayName(isoDate: string): string {
   const idx = getPersianWeekdayIndex(isoDate);
   if (idx === null) return '';
@@ -99,6 +96,16 @@ export function formatJalaliLong(isoDate: string): string {
   if (!parts) return '';
   const monthName = JALALI_MONTH_NAMES[parts.jm - 1] || '';
   return `${faDigitFormatter.format(parts.jd)} ${monthName} ${faDigitFormatter.format(parts.jy)}`;
+}
+
+/**
+ * Formats YYYY-MM-DD as '۱۶ آبان' (without repeating the year)
+ */
+export function formatJalaliDayMonth(isoDate: string): string {
+  const parts = isoToJalaliParts(isoDate);
+  if (!parts) return '';
+  const monthName = JALALI_MONTH_NAMES[parts.jm - 1] || '';
+  return `${faDigitFormatter.format(parts.jd)} ${monthName}`;
 }
 
 export function formatJalaliNumeric(isoDate: string): string {
