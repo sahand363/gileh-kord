@@ -1,134 +1,684 @@
 <script lang="ts">
   import {
     purchases,
-    todayPurchasesStats,
-    dashboardSummary,
-    recentPurchases
+    expenses,
+    revenues,
+    employeeByIdMap,
+    resolvePurchaseEmployeeName,
+    appSettings
   } from '../../stores/purchaseStore';
-  import { navigateTo } from '../../stores/navigationStore';
+  import { showToast } from '../../stores/toastStore';
   import {
-    formatMoney,
+    formatReportingMoney,
+    getCurrencyLabel,
     formatNumber,
     toJalaliDate,
     toJalaliNumeric,
     getTodayISODate
   } from '../../utils/formatters';
-  import { getPersianWeekdayName } from '../../utils/jalali';
-  import PurchaseCard from '../../components/purchases/PurchaseCard.svelte';
-  import EmptyState from '../../components/common/EmptyState.svelte';
+  import {
+    formatJalaliDayMonth,
+    formatJalaliYearMonthLabel,
+    getJalaliMonthLength,
+    getJalaliYearMonthKey,
+    getPersianWeekdayName,
+    isoToJalaliParts
+  } from '../../utils/jalali';
+  import {
+    getEffectiveDayRevenue,
+    sortPurchasesDescending
+  } from '../../utils/calculations';
+  import type { ReportingCurrency } from '../../models/types';
   import ColumnChart, { type ColumnChartItem } from '../../components/common/ColumnChart.svelte';
 
   const todayISO = getTodayISODate();
-  const todayJalali = `${getPersianWeekdayName(todayISO)} ${toJalaliDate(todayISO)}`;
+  const currentMonthKey = getJalaliYearMonthKey(todayISO);
+  const todayJalali = `${getPersianWeekdayName(todayISO)} ${formatJalaliDayMonth(todayISO)} (${toJalaliNumeric(todayISO)})`;
 
-  $: purchaseByDateColumns = (() => {
-    const map = new Map<string, { date: string; total: number; count: number }>();
-    for (const purchase of $purchases) {
-      const item = map.get(purchase.purchaseDate) || { date: purchase.purchaseDate, total: 0, count: 0 };
-      item.total += purchase.totalAmount;
-      item.count += 1;
-      map.set(purchase.purchaseDate, item);
+  $: repCurr = ($appSettings.reportingCurrency || 'TOMAN') as ReportingCurrency;
+  $: currLabel = getCurrencyLabel(repCurr);
+  $: scaleMultiplier = repCurr === 'RIAL' ? 10 : 1;
+
+  // Build exact last 7 calendar days (oldest to newest: 6 days ago .. today)
+  $: last7DaysISOs = (() => {
+    const days: string[] = [];
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      days.push(getTodayISODate(d));
     }
-    return Array.from(map.values())
-      .sort((a, b) => a.date.localeCompare(b.date))
-      .slice(-7)
-      .map((item): ColumnChartItem => ({
-        id: `purchase-${item.date}`,
-        label: getPersianWeekdayName(item.date),
-        subLabel: toJalaliNumeric(item.date).slice(5),
-        value: item.total,
-        tone: 'primary'
-      }));
+    return days;
   })();
 
-  $: recentCount = $recentPurchases.length;
-  $: lowStockCount = $dashboardSummary.lowStockItems.length;
+  // Chart 1: Last 7 Days Income Day-by-Day
+  $: last7DaysIncomeColumns = last7DaysISOs.map((iso): ColumnChartItem => {
+    const revRec = $revenues.find((r) => r.date === iso && !r.isDemo);
+    const incomeVal = revRec ? getEffectiveDayRevenue(revRec) : 0;
+    return {
+      id: `inc7_${iso}`,
+      label: getPersianWeekdayName(iso),
+      subLabel: toJalaliNumeric(iso).slice(5),
+      value: incomeVal * scaleMultiplier,
+      tone: 'primary'
+    };
+  });
+
+  $: last7DaysIncomeTotalToman = last7DaysISOs.reduce((sum, iso) => {
+    const revRec = $revenues.find((r) => r.date === iso && !r.isDemo);
+    return sum + (revRec ? getEffectiveDayRevenue(revRec) : 0);
+  }, 0);
+
+  // Chart 2: Last 7 Days All Spendings Day-by-Day (Purchases + Expenses)
+  $: last7DaysSpendingColumns = last7DaysISOs.map((iso): ColumnChartItem => {
+    const dayPurchSum = $purchases
+      .filter((p) => p.purchaseDate === iso && !p.isDemo)
+      .reduce((s, p) => s + (Number(p.totalAmount) || 0), 0);
+    const dayExpSum = $expenses
+      .filter((e) => e.expenseDate === iso && !e.isDemo)
+      .reduce((s, e) => s + (Number(e.amount) || 0), 0);
+    return {
+      id: `spd7_${iso}`,
+      label: getPersianWeekdayName(iso),
+      subLabel: toJalaliNumeric(iso).slice(5),
+      value: (dayPurchSum + dayExpSum) * scaleMultiplier,
+      tone: 'danger'
+    };
+  });
+
+  $: last7DaysSpendingTotalToman = last7DaysISOs.reduce((sum, iso) => {
+    const dayPurchSum = $purchases
+      .filter((p) => p.purchaseDate === iso && !p.isDemo)
+      .reduce((s, p) => s + (Number(p.totalAmount) || 0), 0);
+    const dayExpSum = $expenses
+      .filter((e) => e.expenseDate === iso && !e.isDemo)
+      .reduce((s, e) => s + (Number(e.amount) || 0), 0);
+    return sum + dayPurchSum + dayExpSum;
+  }, 0);
+
+  // Available Jalali months across purchases, revenues, and expenses (plus current month)
+  $: availableMonths = (() => {
+    const set = new Set<string>();
+    if (currentMonthKey) set.add(currentMonthKey);
+    for (const p of $purchases) {
+      if (!p.isDemo) {
+        const ym = getJalaliYearMonthKey(p.purchaseDate);
+        if (ym) set.add(ym);
+      }
+    }
+    for (const r of $revenues) {
+      if (!r.isDemo) {
+        const ym = getJalaliYearMonthKey(r.date);
+        if (ym) set.add(ym);
+      }
+    }
+    for (const e of $expenses) {
+      if (!e.isDemo) {
+        const ym = getJalaliYearMonthKey(e.expenseDate);
+        if (ym) set.add(ym);
+      }
+    }
+    return Array.from(set).sort((a, b) => b.localeCompare(a));
+  })();
+
+  let selectedExportMonth = currentMonthKey;
+  $: if (!selectedExportMonth && availableMonths.length > 0) {
+    selectedExportMonth = availableMonths[0];
+  }
+
+  // Monthly Report Data for Selected Month (automatically handles mid-month up to today)
+  $: monthlyReportData = (() => {
+    const ym = selectedExportMonth || currentMonthKey;
+    const isCurrentMonth = ym === currentMonthKey;
+    const todayParts = isoToJalaliParts(todayISO);
+    const [jyStr, jmStr] = (ym || '1405/08').split('/');
+    const jy = Number(jyStr) || 1405;
+    const jm = Number(jmStr) || 8;
+    const totalDaysInMonth = getJalaliMonthLength(jy, jm);
+    const elapsedDays =
+      isCurrentMonth && todayParts ? todayParts.jd : totalDaysInMonth;
+
+    const monthPurchases = sortPurchasesDescending(
+      $purchases.filter(
+        (p) =>
+          !p.isDemo &&
+          getJalaliYearMonthKey(p.purchaseDate) === ym &&
+          (!isCurrentMonth || p.purchaseDate <= todayISO)
+      )
+    );
+
+    const monthExpenses = $expenses.filter(
+      (e) =>
+        !e.isDemo &&
+        getJalaliYearMonthKey(e.expenseDate) === ym &&
+        (!isCurrentMonth || e.expenseDate <= todayISO)
+    );
+
+    const monthRevenues = $revenues.filter(
+      (r) =>
+        !r.isDemo &&
+        getJalaliYearMonthKey(r.date) === ym &&
+        (!isCurrentMonth || r.date <= todayISO)
+    );
+
+    const totalPurchasesToman = monthPurchases.reduce(
+      (s, p) => s + (Number(p.totalAmount) || 0),
+      0
+    );
+    const totalExpensesToman = monthExpenses.reduce(
+      (s, e) => s + (Number(e.amount) || 0),
+      0
+    );
+    const totalRevenueToman = monthRevenues.reduce(
+      (s, r) => s + getEffectiveDayRevenue(r),
+      0
+    );
+    const totalSpendingsToman = totalPurchasesToman + totalExpensesToman;
+    const netBalanceToman = totalRevenueToman - totalSpendingsToman;
+
+    return {
+      ym,
+      monthLabel: formatJalaliYearMonthLabel(ym),
+      isCurrentMonth,
+      elapsedDays,
+      totalDaysInMonth,
+      periodSubtitle: isCurrentMonth
+        ? `گزارش میان‌دوره: ۱ تا ${formatNumber(elapsedDays)} ${formatJalaliYearMonthLabel(ym)} (${formatNumber(elapsedDays)} روز سپری‌شده)`
+        : `گزارش کامل ماه: ۱ تا ${formatNumber(totalDaysInMonth)} ${formatJalaliYearMonthLabel(ym)}`,
+      monthPurchases,
+      monthExpenses,
+      monthRevenues,
+      totalPurchasesToman,
+      totalExpensesToman,
+      totalSpendingsToman,
+      totalRevenueToman,
+      netBalanceToman,
+      avgDailyRevenueToman:
+        elapsedDays > 0 ? Math.round(totalRevenueToman / elapsedDays) : 0,
+      avgDailySpendingToman:
+        elapsedDays > 0 ? Math.round(totalSpendingsToman / elapsedDays) : 0
+    };
+  })();
+
+  function escapeHtml(str: string): string {
+    return String(str || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  // 1. Export as Printable PDF (Vector RTL Persian report with charts & full purchase list)
+  function handleExportMonthlyPDF() {
+    const rpt = monthlyReportData;
+    const purchaseRowsHtml =
+      rpt.monthPurchases.length > 0
+        ? rpt.monthPurchases
+            .map((p, idx) => {
+              const empName = resolvePurchaseEmployeeName(p, $employeeByIdMap);
+              return `
+                <tr>
+                  <td>${formatNumber(idx + 1)}</td>
+                  <td><strong>${escapeHtml(p.productName)}</strong></td>
+                  <td>${formatNumber(p.quantity)} ${escapeHtml(p.unit)}</td>
+                  <td>${formatJalaliDayMonth(p.purchaseDate)} (${toJalaliNumeric(p.purchaseDate)})</td>
+                  <td>${escapeHtml(empName)}</td>
+                  <td>${escapeHtml(p.supplierName || '—')}</td>
+                  <td><strong>${formatReportingMoney(p.totalAmount, repCurr)} ${currLabel}</strong></td>
+                </tr>
+              `;
+            })
+            .join('')
+        : `<tr><td colspan="7" style="text-align:center; padding: 18px;">هیچ خریدی در این ماه ثبت نشده است.</td></tr>`;
+
+    const expenseRowsHtml =
+      rpt.monthExpenses.length > 0
+        ? rpt.monthExpenses
+            .map(
+              (e, idx) => `
+                <tr>
+                  <td>${formatNumber(idx + 1)}</td>
+                  <td><strong>${escapeHtml(e.title)}</strong></td>
+                  <td>${escapeHtml(e.category)}</td>
+                  <td>${formatJalaliDayMonth(e.expenseDate)} (${toJalaliNumeric(e.expenseDate)})</td>
+                  <td><strong>${formatReportingMoney(e.amount, repCurr)} ${currLabel}</strong></td>
+                </tr>
+              `
+            )
+            .join('')
+        : '';
+
+    const htmlContent = `<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <title>گزارش ماهانه گیله‌کرد — ${escapeHtml(rpt.monthLabel)}</title>
+  <style>
+    @page { size: A4 portrait; margin: 12mm; }
+    * { box-sizing: border-box; font-family: Vazirmatn, IRANSansX, Tahoma, Arial, sans-serif; }
+    body { margin: 0; padding: 0; direction: rtl; color: #1b2621; background: #fff; font-size: 11.5px; }
+    .header { background: #173f35; color: #fff; padding: 18px 22px; border-radius: 14px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .header h1 { margin: 0; font-size: 20px; }
+    .header p { margin: 5px 0 0; font-size: 11px; opacity: 0.9; }
+    .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 18px; }
+    .kpi { border: 1px solid #d5dfd8; border-radius: 12px; padding: 12px; background: #f8faf8; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .kpi span { display: block; font-size: 10px; color: #5b6b61; font-weight: bold; }
+    .kpi strong { display: block; font-size: 15px; color: #173f35; margin-top: 6px; }
+    .kpi small { display: block; font-size: 9.5px; color: #6e7d74; margin-top: 4px; }
+    h2 { font-size: 14px; color: #173f35; border-bottom: 2px solid #173f35; padding-bottom: 6px; margin: 18px 0 10px; }
+    table { width: 100%; border-collapse: collapse; font-size: 10.5px; margin-bottom: 16px; }
+    th { background: #eaf1ec; color: #173f35; padding: 8px; text-align: right; border: 1px solid #cfe0d4; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    td { padding: 7px 8px; border: 1px solid #e1e8e3; }
+    tr:nth-child(even) td { background: #fbfcfa; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .footer-sum { display: flex; justify-content: space-between; padding: 12px 16px; background: #eaf1ec; border-radius: 10px; font-weight: bold; color: #173f35; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <h1>گزارش تحلیل و فهرست خرید ماهانه — کافه گیله‌کُرد</h1>
+      <p>${escapeHtml(rpt.periodSubtitle)} | واحد مبالغ: ${escapeHtml(currLabel)}</p>
+    </div>
+    <div style="text-align: left; font-size: 11px;">
+      <div>تاریخ استخراج: ${toJalaliDate(todayISO)}</div>
+      <div>(${toJalaliNumeric(todayISO)})</div>
+    </div>
+  </div>
+
+  <div class="kpis">
+    <div class="kpi">
+      <span>مجموع درآمد ماه</span>
+      <strong>${formatReportingMoney(rpt.totalRevenueToman, repCurr)} ${currLabel}</strong>
+      <small>میانگین روزانه: ${formatReportingMoney(rpt.avgDailyRevenueToman, repCurr)} ${currLabel}</small>
+    </div>
+    <div class="kpi">
+      <span>مجموع خریدها (${formatNumber(rpt.monthPurchases.length)} فاکتور)</span>
+      <strong>${formatReportingMoney(rpt.totalPurchasesToman, repCurr)} ${currLabel}</strong>
+      <small>کالاها و ملزومات خریداری‌شده</small>
+    </div>
+    <div class="kpi">
+      <span>هزینه‌های جاری (${formatNumber(rpt.monthExpenses.length)} مورد)</span>
+      <strong>${formatReportingMoney(rpt.totalExpensesToman, repCurr)} ${currLabel}</strong>
+      <small>مجموع کل مخارج: ${formatReportingMoney(rpt.totalSpendingsToman, repCurr)} ${currLabel}</small>
+    </div>
+    <div class="kpi">
+      <span>تراز خالص ماه</span>
+      <strong style="color: ${rpt.netBalanceToman >= 0 ? '#173f35' : '#b9574d'};">
+        ${formatReportingMoney(rpt.netBalanceToman, repCurr)} ${currLabel}
+      </strong>
+      <small>درآمد منهای کل مخارج</small>
+    </div>
+  </div>
+
+  <h2>فهرست کامل اقلام خریداری‌شده در ${escapeHtml(rpt.monthLabel)} (${formatNumber(rpt.monthPurchases.length)} ردیف)</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>نام محصول</th>
+        <th>مقدار و واحد</th>
+        <th>تاریخ خرید</th>
+        <th>خرید توسط</th>
+        <th>فروشنده</th>
+        <th>مبلغ (${escapeHtml(currLabel)})</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${purchaseRowsHtml}
+    </tbody>
+  </table>
+
+  <div class="footer-sum">
+    <span>جمع کل خریدهای ${escapeHtml(rpt.monthLabel)}: ${formatNumber(rpt.monthPurchases.length)} فاکتور</span>
+    <span>${formatReportingMoney(rpt.totalPurchasesToman, repCurr)} ${currLabel}</span>
+  </div>
+
+  ${
+    rpt.monthExpenses.length > 0
+      ? `
+        <h2>فهرست هزینه‌های جاری در ${escapeHtml(rpt.monthLabel)} (${formatNumber(rpt.monthExpenses.length)} ردیف)</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>عنوان هزینه</th>
+              <th>دسته‌بندی</th>
+              <th>تاریخ</th>
+              <th>مبلغ (${escapeHtml(currLabel)})</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${expenseRowsHtml}
+          </tbody>
+        </table>
+      `
+      : ''
+  }
+
+  <script>
+    window.onload = function() {
+      setTimeout(function() {
+        window.print();
+      }, 250);
+    };
+  <\/script>
+</body>
+</html>`;
+
+    const printWin = window.open('', '_blank');
+    if (!printWin) {
+      showToast('لطفاً باز شدن پنجره پاپ‌آپ (Pop-up) را در مرورگر مجاز کنید.');
+      return;
+    }
+    printWin.document.open();
+    printWin.document.write(htmlContent);
+    printWin.document.close();
+  }
+
+  // 2. Export as High-Resolution PNG Image (Draws Analytics + Full Bought List onto Canvas)
+  function handleExportMonthlyImage() {
+    const rpt = monthlyReportData;
+    const rows = rpt.monthPurchases;
+    const rowHeight = 36;
+    const baseHeight = 410;
+    const canvasWidth = 1080;
+    const canvasHeight = Math.max(620, baseHeight + Math.max(1, rows.length) * rowHeight + 80);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = canvasWidth;
+    canvas.height = canvasHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    ctx.direction = 'rtl';
+    ctx.textBaseline = 'middle';
+
+    // Background
+    ctx.fillStyle = '#f4f2eb';
+    ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+
+    // Header Banner
+    ctx.fillStyle = '#173f35';
+    ctx.fillRect(30, 26, canvasWidth - 60, 105);
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 26px Vazirmatn, Tahoma, Arial, sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText(`گزارش ماهانه گیله‌کُرد — ${rpt.monthLabel}`, canvasWidth - 56, 62);
+
+    ctx.fillStyle = '#d6c39e';
+    ctx.font = '15px Vazirmatn, Tahoma, Arial, sans-serif';
+    ctx.fillText(
+      `${rpt.periodSubtitle}   |   واحد مبالغ: ${currLabel}`,
+      canvasWidth - 56,
+      102
+    );
+
+    // 4 Summary KPI Boxes
+    const kpiItems = [
+      {
+        title: 'مجموع درآمد ماه',
+        val: `${formatReportingMoney(rpt.totalRevenueToman, repCurr)} ${currLabel}`
+      },
+      {
+        title: `کل خریدها (${formatNumber(rows.length)} فاکتور)`,
+        val: `${formatReportingMoney(rpt.totalPurchasesToman, repCurr)} ${currLabel}`
+      },
+      {
+        title: `هزینه‌های جاری (${formatNumber(rpt.monthExpenses.length)} مورد)`,
+        val: `${formatReportingMoney(rpt.totalExpensesToman, repCurr)} ${currLabel}`
+      },
+      {
+        title: 'تراز خالص ماه',
+        val: `${formatReportingMoney(rpt.netBalanceToman, repCurr)} ${currLabel}`
+      }
+    ];
+
+    const boxW = (canvasWidth - 60 - 36) / 4;
+    kpiItems.forEach((item, i) => {
+      const x = canvasWidth - 30 - (i + 1) * boxW - i * 12;
+      const y = 150;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(x, y, boxW, 92);
+      ctx.strokeStyle = '#d5dfd8';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(x, y, boxW, 92);
+
+      ctx.fillStyle = '#627168';
+      ctx.font = 'bold 13px Vazirmatn, Tahoma, Arial, sans-serif';
+      ctx.textAlign = 'right';
+      ctx.fillText(item.title, x + boxW - 14, y + 30);
+
+      ctx.fillStyle = '#173f35';
+      ctx.font = 'bold 17px Vazirmatn, Tahoma, Arial, sans-serif';
+      ctx.fillText(item.val, x + boxW - 14, y + 66);
+    });
+
+    // Purchases Table Title
+    ctx.fillStyle = '#173f35';
+    ctx.font = 'bold 19px Vazirmatn, Tahoma, Arial, sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText(
+      `فهرست اقلام خریداری‌شده در ${rpt.monthLabel} (${formatNumber(rows.length)} مورد)`,
+      canvasWidth - 34,
+      276
+    );
+
+    // Table Header
+    const tableTop = 304;
+    ctx.fillStyle = '#eaf1ec';
+    ctx.fillRect(30, tableTop, canvasWidth - 60, 40);
+    ctx.fillStyle = '#173f35';
+    ctx.font = 'bold 14px Vazirmatn, Tahoma, Arial, sans-serif';
+
+    ctx.textAlign = 'right';
+    ctx.fillText('ردیف و نام کالا', canvasWidth - 46, tableTop + 20);
+    ctx.fillText('مقدار', canvasWidth - 380, tableTop + 20);
+    ctx.fillText('تاریخ خرید', canvasWidth - 530, tableTop + 20);
+    ctx.fillText('مسئول خرید', canvasWidth - 720, tableTop + 20);
+    ctx.textAlign = 'left';
+    ctx.fillText(`مبلغ (${currLabel})`, 48, tableTop + 20);
+
+    // Table Rows
+    if (rows.length === 0) {
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(30, tableTop + 42, canvasWidth - 60, 50);
+      ctx.fillStyle = '#77837b';
+      ctx.textAlign = 'center';
+      ctx.font = '15px Vazirmatn, Tahoma, Arial, sans-serif';
+      ctx.fillText('هیچ خریدی در این ماه ثبت نشده است.', canvasWidth / 2, tableTop + 67);
+    } else {
+      rows.forEach((p, idx) => {
+        const ry = tableTop + 42 + idx * rowHeight;
+        ctx.fillStyle = idx % 2 === 0 ? '#ffffff' : '#fafaf6';
+        ctx.fillRect(30, ry, canvasWidth - 60, rowHeight);
+
+        ctx.fillStyle = '#202b26';
+        ctx.font = '13.5px Vazirmatn, Tahoma, Arial, sans-serif';
+        ctx.textAlign = 'right';
+        ctx.fillText(
+          `${formatNumber(idx + 1)}. ${p.productName}`,
+          canvasWidth - 46,
+          ry + rowHeight / 2
+        );
+        ctx.fillText(
+          `${formatNumber(p.quantity)} ${p.unit}`,
+          canvasWidth - 380,
+          ry + rowHeight / 2
+        );
+        ctx.fillText(
+          toJalaliNumeric(p.purchaseDate),
+          canvasWidth - 530,
+          ry + rowHeight / 2
+        );
+        ctx.fillText(
+          resolvePurchaseEmployeeName(p, $employeeByIdMap),
+          canvasWidth - 720,
+          ry + rowHeight / 2
+        );
+
+        ctx.fillStyle = '#173f35';
+        ctx.font = 'bold 14px Vazirmatn, Tahoma, Arial, sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText(
+          `${formatReportingMoney(p.totalAmount, repCurr)}`,
+          48,
+          ry + rowHeight / 2
+        );
+      });
+    }
+
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `gileh-kord-report-${rpt.ym.replace('/', '-')}.png`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast(`تصویر گزارش ماه ${rpt.monthLabel} دانلود شد.`);
+    }, 'image/png');
+  }
 </script>
 
 <section class="page active dashboard-page" aria-labelledby="dashboardTitle">
+  <!-- Green Welcome Space (Preserved) -->
   <header class="dashboard-hero">
     <div>
-      <p class="eyebrow">پیشخوان عملیات رستوران</p>
+      <p class="eyebrow">پیشخوان مدیریت کافه</p>
       <h1 id="dashboardTitle">خوش آمدید به گیله‌کُرد</h1>
-      <p>وضعیت خریدها، کالاها و فعالیت روزانه رستوران در یک نگاه.</p>
+      <p>تحلیل روزبه‌روز درآمد و مخارج ۷ روز گذشته و خروجی گزارش ماهانه.</p>
     </div>
     <div class="dashboard-hero-date">▦ &nbsp; {todayJalali}</div>
   </header>
 
-  <div class="dashboard-kpis" aria-label="خلاصه وضعیت">
-    <article class="panel dashboard-kpi">
-      <div class="dashboard-kpi-head"><span>خرید امروز</span><span class="dashboard-kpi-icon">＋</span></div>
-      <div class="dashboard-kpi-value">{formatMoney($todayPurchasesStats.total)} <small>تومان</small></div>
-      <div class="dashboard-kpi-foot">{formatNumber($todayPurchasesStats.count)} فاکتور ثبت‌شده امروز</div>
-    </article>
-    <article class="panel dashboard-kpi">
-      <div class="dashboard-kpi-head"><span>مجموع خریدها</span><span class="dashboard-kpi-icon">▤</span></div>
-      <div class="dashboard-kpi-value">{formatMoney($dashboardSummary.totalPurchasesAmount)} <small>تومان</small></div>
-      <div class="dashboard-kpi-foot">در {formatNumber($dashboardSummary.totalPurchasesCount)} فاکتور ثبت‌شده</div>
-    </article>
-    <article class="panel dashboard-kpi">
-      <div class="dashboard-kpi-head"><span>کالاهای تعریف‌شده</span><span class="dashboard-kpi-icon">❖</span></div>
-      <div class="dashboard-kpi-value">{formatNumber($dashboardSummary.productsCount)} <small>قلم کالا</small></div>
-      <div class="dashboard-kpi-foot">قابل انتخاب در فرم ثبت خرید</div>
-    </article>
-    <article class="panel dashboard-kpi">
-      <div class="dashboard-kpi-head"><span>هشدار موجودی</span><span class="dashboard-kpi-icon">◫</span></div>
-      <div class="dashboard-kpi-value">{formatNumber(lowStockCount)} <small>قلم کالا</small></div>
-      <div class="dashboard-kpi-foot">{lowStockCount > 0 ? 'نیازمند بررسی و تأمین مجدد' : 'موردی برای هشدار ثبت نشده است'}</div>
-    </article>
-  </div>
+  <!-- Monthly Report Export Bar (PDF or PNG Image for any chosen month) -->
+  <section class="panel card-pad" style="margin-bottom: 16px;">
+    <div class="section-heading" style="margin-bottom: 12px;">
+      <div>
+        <h2>خروجی گزارش تحلیل ماهانه و فهرست خریدها (PDF / تصویر)</h2>
+        <p>{monthlyReportData.periodSubtitle}</p>
+      </div>
+    </div>
 
-  <section class="dashboard-quick-actions" aria-label="عملیات سریع">
-    <button class="dashboard-action" type="button" on:click={() => navigateTo('entry')}>
-      <span class="dashboard-action-icon">＋</span><span><strong>ثبت خرید جدید</strong><small>ورود سریع فاکتور و اقلام</small></span>
-    </button>
-    <button class="dashboard-action" type="button" on:click={() => navigateTo('manager')}>
-      <span class="dashboard-action-icon">◫</span><span><strong>مدیریت انبار و کالا</strong><small>بررسی موجودی و اطلاعات کالا</small></span>
-    </button>
-    <button class="dashboard-action" type="button" on:click={() => navigateTo('history')}>
-      <span class="dashboard-action-icon">◷</span><span><strong>تاریخچه خریدها</strong><small>جست‌وجو و مرور فاکتورها</small></span>
-    </button>
+    <div class="filters" style="margin-bottom: 0;">
+      <div class="date-filter">
+        <span>انتخاب ماه شمسی:</span>
+        <select
+          bind:value={selectedExportMonth}
+          style="width: auto; min-width: 185px; height: 42px; font-size: 12px; font-weight: 700;"
+          aria-label="انتخاب ماه گزارش"
+        >
+          {#each availableMonths as ym (ym)}
+            <option value={ym}>
+              {formatJalaliYearMonthLabel(ym)}
+              {ym === currentMonthKey ? '(ماه جاری — تا امروز)' : ''}
+            </option>
+          {/each}
+        </select>
+      </div>
+
+      <button
+        type="button"
+        class="primary-btn"
+        style="width: auto; min-height: 42px; padding: 0 18px;"
+        on:click={handleExportMonthlyPDF}
+      >
+        <span>🖨 دریافت PDF ماهانه (تحلیل + لیست خرید)</span>
+      </button>
+
+      <button
+        type="button"
+        class="secondary-btn"
+        style="min-height: 42px; padding: 0 16px;"
+        on:click={handleExportMonthlyImage}
+      >
+        <span>🖼 ذخیره تصویر گزارش (PNG)</span>
+      </button>
+    </div>
   </section>
 
-  <div class="dashboard-main-grid">
-    <section class="panel dashboard-panel">
-      <div class="dashboard-panel-title">
-        <div><h2>روند خریدهای اخیر</h2><p>مجموع مبالغ ثبت‌شده در هفت روز دارای خرید</p></div>
-        <button class="dashboard-link" type="button" on:click={() => navigateTo('history')}>مشاهده تاریخچه ←</button>
+  <!-- 7-Day Income & 7-Day Spendings Charts (Moved inside Dashboard) -->
+  <div class="two-col-grid" style="margin-bottom: 16px;">
+    <section class="panel card-pad">
+      <div class="section-heading">
+        <div>
+          <h2>درآمد ۷ روز گذشته (روزبه‌روز)</h2>
+          <p>
+            مجموع درآمد ۷ روز اخیر:
+            <strong>{formatReportingMoney(last7DaysIncomeTotalToman, repCurr)} {currLabel}</strong>
+          </p>
+        </div>
       </div>
-      {#if purchaseByDateColumns.length}
-        <ColumnChart items={purchaseByDateColumns} height={205} />
-      {:else}
-        <div class="dashboard-empty-note">هنوز خریدی ثبت نشده است. با ثبت اولین فاکتور، نمودار فعالیت خرید در این قسمت نمایش داده می‌شود.</div>
-      {/if}
+      <ColumnChart items={last7DaysIncomeColumns} height={210} unitLabel={currLabel} />
     </section>
 
-    <section class="panel dashboard-panel">
-      <div class="dashboard-panel-title">
-        <div><h2>وضعیت فعالیت</h2><p>نمای کلی اطلاعات ثبت‌شده در سامانه</p></div>
+    <section class="panel card-pad">
+      <div class="section-heading">
+        <div>
+          <h2>کل مخارج ۷ روز گذشته (روزبه‌روز)</h2>
+          <p>
+            مجموع خریدها و هزینه‌های ۷ روز اخیر:
+            <strong>{formatReportingMoney(last7DaysSpendingTotalToman, repCurr)} {currLabel}</strong>
+          </p>
+        </div>
       </div>
-      <div class="dashboard-list">
-        <div class="dashboard-action"><span class="dashboard-action-icon">▤</span><span><strong>{formatNumber($dashboardSummary.totalPurchasesCount)} فاکتور خرید</strong><small>ثبت‌شده در سامانه</small></span></div>
-        <div class="dashboard-action"><span class="dashboard-action-icon">❖</span><span><strong>{formatNumber($dashboardSummary.productsCount)} قلم کالا</strong><small>در فهرست کالاها</small></span></div>
-        <div class="dashboard-action"><span class="dashboard-action-icon">◫</span><span><strong>{formatNumber(lowStockCount)} هشدار موجودی</strong><small>نیازمند توجه</small></span></div>
-      </div>
-      <p class="dashboard-footnote">این بخش فقط داده‌های موجود در سامانه را نمایش می‌دهد و عدد مالی تخمینی تولید نمی‌کند.</p>
+      <ColumnChart items={last7DaysSpendingColumns} height={210} unitLabel={currLabel} />
     </section>
   </div>
 
-  <section class="panel dashboard-panel">
-    <div class="dashboard-panel-title">
-      <div><h2>آخرین خریدها</h2><p>آخرین فاکتورهای ثبت‌شده در سامانه</p></div>
-      <button class="dashboard-link" type="button" on:click={() => navigateTo('history')}>همه خریدها ←</button>
+  <!-- 7-Day Day-by-Day Breakdown Table -->
+  <section class="panel card-pad">
+    <div class="section-heading">
+      <h2>جدول تفکیکی ۷ روز گذشته ({currLabel})</h2>
     </div>
-    {#if recentCount > 0}
-      <div class="dashboard-list">
-        {#each $recentPurchases as purchase (purchase.id)}
-          <PurchaseCard {purchase} />
-        {/each}
-      </div>
-    {:else}
-      <EmptyState title="هنوز خریدی ثبت نشده است" message="با ثبت اولین فاکتور، سوابق خرید در این قسمت نمایش داده می‌شوند." />
-    {/if}
+    <div class="table-scroll">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>روز و تاریخ</th>
+            <th>درآمد روز ({currLabel})</th>
+            <th>کل مخارج روز (خرید + هزینه)</th>
+            <th>مانده روز</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each last7DaysISOs as iso (iso)}
+            {@const revRec = $revenues.find((r) => r.date === iso && !r.isDemo)}
+            {@const dayIncToman = revRec ? getEffectiveDayRevenue(revRec) : 0}
+            {@const dayPurchToman = $purchases
+              .filter((p) => p.purchaseDate === iso && !p.isDemo)
+              .reduce((s, p) => s + (Number(p.totalAmount) || 0), 0)}
+            {@const dayExpToman = $expenses
+              .filter((e) => e.expenseDate === iso && !e.isDemo)
+              .reduce((s, e) => s + (Number(e.amount) || 0), 0)}
+            {@const daySpdToman = dayPurchToman + dayExpToman}
+            {@const dayNetToman = dayIncToman - daySpdToman}
+            <tr>
+              <td>
+                <strong>{getPersianWeekdayName(iso)}</strong>
+                ({toJalaliNumeric(iso)})
+              </td>
+              <td>
+                <strong style="color: var(--green);">
+                  {formatReportingMoney(dayIncToman, repCurr)}
+                </strong>
+              </td>
+              <td>
+                <strong style="color: var(--danger);">
+                  {formatReportingMoney(daySpdToman, repCurr)}
+                </strong>
+              </td>
+              <td
+                style="color: {dayNetToman >= 0
+                  ? 'var(--green)'
+                  : 'var(--danger)'}; font-weight: 800;"
+              >
+                {formatReportingMoney(dayNetToman, repCurr)}
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
   </section>
 </section>
