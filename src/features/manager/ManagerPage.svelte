@@ -28,6 +28,7 @@
   import {
     formatMoney,
     formatNumber,
+    getTodayISODate,
     parseNumericInput,
     toJalaliDate,
     toJalaliDateTime,
@@ -44,7 +45,7 @@
   import JalaliDatePicker from '../../components/common/JalaliDatePicker.svelte';
   import ColumnChart, { type ColumnChartItem } from '../../components/common/ColumnChart.svelte';
 
-  // Nested Management Sub-Modules (All stay inside ManagerPage)
+  // Nested Management Sub-Modules
   import MenuPage from '../menu/MenuPage.svelte';
   import EmployeesPage from '../employees/EmployeesPage.svelte';
   import ExpensesPage from '../expenses/ExpensesPage.svelte';
@@ -56,13 +57,14 @@
 
   const MANAGER_TABS: Array<{ id: ManagerSubTab; label: string; icon: string }> = [
     { id: 'overview', label: 'درآمد و سهم کارکنان', icon: '₿' },
-    { id: 'menu', label: 'منوی رستوران', icon: '🍽' },
-    { id: 'history_logs', label: 'تاریخچه تغییرات و بازگشت', icon: '↺' },
+    { id: 'analytics', label: 'تحلیل ۷ روزه', icon: '↗' },
+    { id: 'menu', label: 'منوی کافه', icon: '☕' },
     { id: 'employees', label: 'ثبت کارکنان و ضرایب', icon: '♟' },
     { id: 'expenses', label: 'هزینه‌ها', icon: '¤' },
     { id: 'inventory', label: 'انبار', icon: '◫' },
     { id: 'products', label: 'کالاها', icon: '❖' },
     { id: 'suppliers', label: 'تأمین‌کنندگان', icon: '◈' },
+    { id: 'history_logs', label: 'تاریخچه و بازگشت', icon: '↺' },
     { id: 'backup', label: 'پشتیبان‌گیری', icon: '⇧' },
     { id: 'settings', label: 'تنظیمات', icon: '⚙' }
   ];
@@ -88,6 +90,51 @@
     frontendMultiplierInput = String($appSettings.globalRevenueCoefficient ?? 0.6);
     void refreshSnapshotsList();
   });
+
+  // Build array of the exact last 7 calendar days (oldest to newest: 6 days ago .. today)
+  $: last7DaysISOs = (() => {
+    const days: string[] = [];
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      days.push(getTodayISODate(d));
+    }
+    return days;
+  })();
+
+  // Analytics Chart 1: Last 7 Days Income Day-by-Day
+  $: last7DaysIncomeColumns = last7DaysISOs.map((iso): ColumnChartItem => {
+    const revRec = $revenues.find((r) => r.date === iso && (!onlyReal || !r.isDemo));
+    const incomeVal = revRec ? getEffectiveDayRevenue(revRec) : 0;
+    return {
+      id: `inc7_${iso}`,
+      label: getPersianWeekdayName(iso),
+      subLabel: toJalaliNumeric(iso).slice(5),
+      value: incomeVal,
+      tone: 'primary'
+    };
+  });
+
+  $: last7DaysIncomeTotal = last7DaysIncomeColumns.reduce((s, c) => s + c.value, 0);
+
+  // Analytics Chart 2: Last 7 Days All Spendings Day-by-Day (Purchases + Expenses)
+  $: last7DaysSpendingColumns = last7DaysISOs.map((iso): ColumnChartItem => {
+    const dayPurchSum = $purchases
+      .filter((p) => p.purchaseDate === iso && (!onlyReal || !p.isDemo))
+      .reduce((s, p) => s + (Number(p.totalAmount) || 0), 0);
+    const dayExpSum = $expenses
+      .filter((e) => e.expenseDate === iso && (!onlyReal || !e.isDemo))
+      .reduce((s, e) => s + (Number(e.amount) || 0), 0);
+    return {
+      id: `spd7_${iso}`,
+      label: getPersianWeekdayName(iso),
+      subLabel: toJalaliNumeric(iso).slice(5),
+      value: dayPurchSum + dayExpSum,
+      tone: 'danger'
+    };
+  });
+
+  $: last7DaysSpendingTotal = last7DaysSpendingColumns.reduce((s, c) => s + c.value, 0);
 
   $: filteredDailyRevenues = filterRevenueRecords(
     $revenues,
@@ -255,31 +302,8 @@
       </form>
     </div>
   {:else}
-    <div class="manager-top-bar panel">
-      <div class="manager-top-info">
-        <span class="badge-real">مدیر: {$activeManagerUsername}</span>
-        <strong>بخش مدیریت</strong>
-      </div>
-      <div class="setting-actions">
-        <button
-          type="button"
-          class="quiet-btn"
-          on:click={handleManualFullSync}
-        >
-          ⇄ ارسال فوری داده‌های این گوشی به سرور
-        </button>
-        <button
-          id="adminLogout"
-          type="button"
-          class="secondary-btn"
-          on:click={handleLockPanel}
-        >
-          ⌑ قفل مدیریت
-        </button>
-      </div>
-    </div>
-
-    <nav class="manager-subnav" aria-label="بخش‌های پنل مدیریت">
+    <!-- Top Menu inside Manager (directly under the main header) -->
+    <nav class="manager-subnav" aria-label="منوی مدیریت">
       {#each MANAGER_TABS as tab (tab.id)}
         <button
           type="button"
@@ -298,7 +322,89 @@
       {/each}
     </nav>
 
-    {#if $activeManagerTab === 'overview'}
+    <div class="manager-top-bar panel">
+      <div class="manager-top-info">
+        <span class="badge-real">مدیر: {$activeManagerUsername}</span>
+      </div>
+      <div class="setting-actions">
+        <button
+          type="button"
+          class="quiet-btn"
+          on:click={handleManualFullSync}
+        >
+          ⇄ همگام‌سازی با سرور
+        </button>
+        <button
+          id="adminLogout"
+          type="button"
+          class="secondary-btn"
+          on:click={handleLockPanel}
+        >
+          ⌑ قفل مدیریت
+        </button>
+      </div>
+    </div>
+
+    {#if $activeManagerTab === 'analytics'}
+      <!-- New Analytics Tab: Last 7 Days Income & Last 7 Days Spendings -->
+      <div class="two-col-grid" style="margin-bottom: 16px;">
+        <section class="panel card-pad">
+          <div class="section-heading">
+            <div>
+              <h2>درآمد ۷ روز گذشته (روزبه‌روز)</h2>
+              <p>مجموع درآمد ۷ روز اخیر: <strong>{formatMoney(last7DaysIncomeTotal)} تومان</strong></p>
+            </div>
+          </div>
+          <ColumnChart items={last7DaysIncomeColumns} height={215} />
+        </section>
+
+        <section class="panel card-pad">
+          <div class="section-heading">
+            <div>
+              <h2>کل مخارج ۷ روز گذشته (روزبه‌روز)</h2>
+              <p>مجموع خریدها و هزینه‌های ۷ روز اخیر: <strong>{formatMoney(last7DaysSpendingTotal)} تومان</strong></p>
+            </div>
+          </div>
+          <ColumnChart items={last7DaysSpendingColumns} height={215} />
+        </section>
+      </div>
+
+      <section class="panel card-pad">
+        <div class="section-heading">
+          <h2>جدول تفکیکی ۷ روز گذشته</h2>
+        </div>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>روز و تاریخ</th>
+                <th>درآمد روز (تومان)</th>
+                <th>کل مخارج روز (خرید + هزینه)</th>
+                <th>مانده روز</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each last7DaysISOs as iso, idx (iso)}
+                {@const dayInc = last7DaysIncomeColumns[idx].value}
+                {@const daySpd = last7DaysSpendingColumns[idx].value}
+                {@const dayNet = dayInc - daySpd}
+                <tr>
+                  <td>
+                    <strong>{getPersianWeekdayName(iso)}</strong>
+                    ({toJalaliNumeric(iso)})
+                  </td>
+                  <td><strong style="color: var(--green);">{formatMoney(dayInc)}</strong></td>
+                  <td><strong style="color: var(--danger);">{formatMoney(daySpd)}</strong></td>
+                  <td style="color: {dayNet >= 0 ? 'var(--green)' : 'var(--danger)'}; font-weight: 800;">
+                    {formatMoney(dayNet)}
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    {:else if $activeManagerTab === 'overview'}
       <section class="panel card-pad" style="margin-bottom: 16px;">
         <div class="filters">
           <div class="date-filter">
@@ -452,9 +558,6 @@
                 {formatMoney(managerFrontendRevenue)} تومان
               </strong>
             </h2>
-            <p style="margin: 0; font-size: 11px; color: var(--muted);">
-              درآمد کل در ضریب <strong>{formatNumber(frontendMultiplier)}</strong> ضرب شده و عدد حاصل ({formatMoney(managerFrontendRevenue)} تومان) به عنوان درآمد در فرانت‌اند نمایش داده می‌شود.
-            </p>
           </div>
 
           <form
@@ -520,14 +623,10 @@
     {:else if $activeManagerTab === 'menu'}
       <MenuPage />
     {:else if $activeManagerTab === 'history_logs'}
-      <!-- Update History & Revert Back Section -->
       <section class="panel history-panel">
         <div class="section-heading">
           <div>
             <h2>تاریخچه تغییرات کاربران و بازگشت به نسخه قبلی (Revert)</h2>
-            <p>
-              هر بار که اطلاعاتی ثبت یا ویرایش می‌شود، یک نسخه پشتیبان لحظه‌ای روی سرور ذخیره می‌گردد تا در صورت اشتباه بتوانید با یک کلیک به وضعیت قبلی برگردید.
-            </p>
           </div>
           <button
             type="button"
@@ -551,9 +650,7 @@
                   <div class="purchase-meta">
                     <span>زمان: {toJalaliDateTime(snap.timestamp)}</span>
                     <span>خریدها: {formatNumber(snap.counts?.purchases || 0)}</span>
-                    <span>روزهای درآمد: {formatNumber(snap.counts?.revenues || 0)}</span>
-                    <span>کارکنان: {formatNumber(snap.counts?.employees || 0)}</span>
-                    <span>منو: {formatNumber(snap.counts?.menuItems || 0)}</span>
+                    <span>درآمد: {formatNumber(snap.counts?.revenues || 0)}</span>
                   </div>
                 </div>
                 <div class="purchase-side">
@@ -570,7 +667,7 @@
           {:else}
             <EmptyState
               title="هنوز تاریخچه تغییری روی سرور ثبت نشده است"
-              message="با زدن دکمه «ارسال فوری داده‌های این گوشی به سرور» در بالا یا ثبت اولین خرید/درآمد، نسخه‌های قابل بازگشت اینجا فهرست می‌شوند."
+              message="با ثبت تغییر یا زدن دکمه همگام‌سازی، نسخه‌های قابل بازگشت اینجا فهرست می‌شوند."
             />
           {/if}
         </div>
