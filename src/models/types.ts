@@ -211,14 +211,18 @@ export interface ManagerAuthRecord {
   updatedAt: string;
 }
 
+export type ReportingCurrency = 'TOMAN' | 'RIAL';
+
 export interface ApplicationSettings {
   restaurantName: string;
   branchName: string;
   serverAddress: string;
   defaultUnit: string;
   currency: 'IRT';
+  reportingCurrency?: ReportingCurrency; // 'TOMAN' (default) or 'RIAL' (1 Toman = 10 Rial for display only)
+  backendSyncEnabled?: boolean; // Enables syncing with Go SQLite backend while keeping IndexedDB fallback
   lastSelectedEmployeeId: string;
-  globalRevenueCoefficient: number; // Default 0.6 for manager's frontend revenue display
+  globalRevenueCoefficient: number;
   showDemoBadges: boolean;
   demoSeedInitialized: boolean;
   lastSyncAt: string | null;
