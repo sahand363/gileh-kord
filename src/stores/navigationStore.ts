@@ -4,6 +4,7 @@ import type { AppPage } from '../models/types';
 export type { AppPage };
 
 export type ManagerSubTab =
+  | 'dashboard'
   | 'overview'
   | 'analytics'
   | 'menu'
@@ -25,7 +26,6 @@ export interface NavSectionMeta {
 }
 
 export const NAV_SECTIONS: NavSectionMeta[] = [
-  { id: 'dashboard', label: 'پیشخوان', shortLabel: 'پیشخوان', icon: '⊞', primary: true },
   { id: 'entry', label: 'ثبت خرید', shortLabel: 'ثبت خرید', icon: '＋', primary: true },
   { id: 'timesheets', label: 'تایم‌شیت', shortLabel: 'تایم‌شیت', icon: '◷', primary: true },
   { id: 'revenue', label: 'درآمد', shortLabel: 'درآمد', icon: '₿', primary: true },
@@ -33,7 +33,6 @@ export const NAV_SECTIONS: NavSectionMeta[] = [
 ];
 
 const PUBLIC_PAGES = new Set<AppPage>([
-  'dashboard',
   'entry',
   'timesheets',
   'revenue',
@@ -41,6 +40,7 @@ const PUBLIC_PAGES = new Set<AppPage>([
 ]);
 
 const MANAGER_PROTECTED_SUBTABS = new Set<ManagerSubTab>([
+  'dashboard',
   'overview',
   'analytics',
   'menu',
@@ -54,7 +54,8 @@ const MANAGER_PROTECTED_SUBTABS = new Set<ManagerSubTab>([
   'settings'
 ]);
 
-export const activeManagerTab = writable<ManagerSubTab>('overview');
+// Default first tab inside Manager is 'dashboard' (پیشخوان)
+export const activeManagerTab = writable<ManagerSubTab>('dashboard');
 
 function resolveRoute(rawPage: string): AppPage {
   const clean = rawPage.replace('#', '').trim() as AppPage;
