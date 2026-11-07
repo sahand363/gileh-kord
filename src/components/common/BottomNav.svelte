@@ -24,11 +24,11 @@
   <button
     type="button"
     class="nav-item"
-    class:active={$currentPage === 'timesheets'}
-    on:click={() => selectPage('timesheets')}
+    class:active={$currentPage === 'expenses'}
+    on:click={() => selectPage('expenses')}
   >
-    <span class="nav-icon">◷</span>
-    <span>تایم‌شیت</span>
+    <span class="nav-icon">¤</span>
+    <span>هزینه‌ها</span>
   </button>
 
   <button
@@ -39,6 +39,16 @@
   >
     <span class="nav-icon">₿</span>
     <span>درآمد</span>
+  </button>
+
+  <button
+    type="button"
+    class="nav-item"
+    class:active={$currentPage === 'timesheets'}
+    on:click={() => selectPage('timesheets')}
+  >
+    <span class="nav-icon">◷</span>
+    <span>تایم‌شیت</span>
   </button>
 
   <button
