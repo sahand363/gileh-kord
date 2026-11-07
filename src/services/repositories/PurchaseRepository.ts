@@ -1,4 +1,5 @@
 import { dbClient, requestToPromise } from '../db';
+import { apiClient } from '../api/apiClient';
 import type { Product, Purchase, PurchaseFilterCriteria } from '../../models/types';
 import { normalizeProductKey } from '../../utils/formatters';
 import { filterPurchases, sortPurchasesDescending } from '../../utils/calculations';
@@ -32,6 +33,19 @@ export interface UpdatePurchaseInput {
 
 export class PurchaseRepository {
   public async getAll(): Promise<Purchase[]> {
+    if (apiClient.isEnabled()) {
+      try {
+        const remoteItems = await apiClient.listPurchases({ pageSize: 500 });
+        await this.replaceAllLocal(remoteItems);
+        return sortPurchasesDescending(remoteItems);
+      } catch {
+        // Fallback to local IndexedDB when offline
+      }
+    }
+    return this.getAllLocal();
+  }
+
+  private async getAllLocal(): Promise<Purchase[]> {
     return dbClient.executeTransaction('purchases', 'readonly', async (stores) => {
       const items = (await requestToPromise(stores['purchases'].getAll())) as Purchase[];
       return sortPurchasesDescending(items || []);
@@ -62,6 +76,38 @@ export class PurchaseRepository {
   public async createPurchaseWithProduct(
     input: CreatePurchaseInput
   ): Promise<{ purchase: Purchase; product: Product }> {
+    if (apiClient.isEnabled()) {
+      try {
+        const remoteRes = await apiClient.createPurchase({
+          productName: input.productName,
+          quantity: input.quantity,
+          unit: input.unit,
+          totalAmount: Math.round(input.totalAmount),
+          purchaseDate: input.purchaseDate,
+          employeeId: input.employeeId,
+          employeeNameSnapshot: input.employeeNameSnapshot,
+          supplierName: input.supplierName,
+          invoiceNumber: input.invoiceNumber,
+          notes: input.notes
+        });
+
+        await dbClient.executeTransaction(
+          ['purchases', 'products'],
+          'readwrite',
+          async (stores) => {
+            if (remoteRes.product) {
+              await requestToPromise(stores['products'].put(remoteRes.product));
+            }
+            await requestToPromise(stores['purchases'].put(remoteRes.purchase));
+          }
+        );
+
+        return remoteRes;
+      } catch {
+        // Fall through to local IndexedDB transaction if offline
+      }
+    }
+
     const cleanName = input.productName.trim().replace(/\s+/g, ' ');
     const normalizedKey = normalizeProductKey(cleanName);
     const now = new Date().toISOString();
@@ -144,6 +190,31 @@ export class PurchaseRepository {
     id: string,
     updates: UpdatePurchaseInput
   ): Promise<Purchase> {
+    if (apiClient.isEnabled()) {
+      try {
+        const remoteUpdated = await apiClient.updatePurchase(id, {
+          productName: updates.productName,
+          quantity: updates.quantity,
+          unit: updates.unit,
+          totalAmount: Math.round(updates.totalAmount),
+          purchaseDate: updates.purchaseDate,
+          employeeId: updates.employeeId,
+          employeeNameSnapshot: updates.employeeNameSnapshot,
+          supplierName: updates.supplierName,
+          invoiceNumber: updates.invoiceNumber,
+          notes: updates.notes
+        });
+
+        await dbClient.executeTransaction('purchases', 'readwrite', async (stores) => {
+          await requestToPromise(stores['purchases'].put(remoteUpdated));
+        });
+
+        return remoteUpdated;
+      } catch {
+        // Fallback to local update if offline
+      }
+    }
+
     const cleanName = updates.productName.trim().replace(/\s+/g, ' ');
     const normalizedKey = normalizeProductKey(cleanName);
     const now = new Date().toISOString();
@@ -229,11 +300,15 @@ export class PurchaseRepository {
   }
 
   public async replaceAll(purchases: Purchase[]): Promise<void> {
+    await this.replaceAllLocal(purchases);
+  }
+
+  private async replaceAllLocal(purchases: Purchase[]): Promise<void> {
     await dbClient.executeTransaction('purchases', 'readwrite', async (stores) => {
       const store = stores['purchases'];
       await requestToPromise(store.clear());
       for (const item of purchases) {
-        await requestToPromise(store.add(item));
+        await requestToPromise(store.put(item));
       }
     });
   }
