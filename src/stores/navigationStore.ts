@@ -6,11 +6,9 @@ export type { AppPage };
 export type ManagerSubTab =
   | 'dashboard'
   | 'overview'
-  | 'analytics'
   | 'menu'
   | 'history_logs'
   | 'employees'
-  | 'expenses'
   | 'inventory'
   | 'products'
   | 'suppliers'
@@ -27,26 +25,26 @@ export interface NavSectionMeta {
 
 export const NAV_SECTIONS: NavSectionMeta[] = [
   { id: 'entry', label: 'ثبت خرید', shortLabel: 'ثبت خرید', icon: '＋', primary: true },
-  { id: 'timesheets', label: 'تایم‌شیت', shortLabel: 'تایم‌شیت', icon: '◷', primary: true },
+  { id: 'expenses', label: 'هزینه‌ها', shortLabel: 'هزینه‌ها', icon: '¤', primary: true },
   { id: 'revenue', label: 'درآمد', shortLabel: 'درآمد', icon: '₿', primary: true },
+  { id: 'timesheets', label: 'تایم‌شیت', shortLabel: 'تایم‌شیت', icon: '◷', primary: true },
   { id: 'manager', label: 'پنل مدیریت', shortLabel: 'مدیریت', icon: '⌑', primary: true }
 ];
 
 const PUBLIC_PAGES = new Set<AppPage>([
   'entry',
-  'timesheets',
+  'expenses',
   'revenue',
+  'timesheets',
   'manager'
 ]);
 
 const MANAGER_PROTECTED_SUBTABS = new Set<ManagerSubTab>([
   'dashboard',
   'overview',
-  'analytics',
   'menu',
   'history_logs',
   'employees',
-  'expenses',
   'inventory',
   'products',
   'suppliers',
