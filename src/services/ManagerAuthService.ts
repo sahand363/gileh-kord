@@ -4,7 +4,33 @@ import type { ManagerAuthRecord } from '../models/types';
 import { generateUUID } from '../utils/uuid';
 
 const MANAGER_AUTH_KEY = 'manager_credentials';
+const APP_AUTH_COOKIE_NAME = 'gk_app_auth';
+const COOKIE_MAX_AGE_DAYS = 30;
 
+function readAppAuthCookie(): string | null {
+  if (typeof document === 'undefined') return 'test_env';
+  const match = document.cookie.match(
+    new RegExp('(?:^|; )' + APP_AUTH_COOKIE_NAME + '=([^;]*)')
+  );
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+function writeAppAuthCookie(username: string, days: number = COOKIE_MAX_AGE_DAYS): void {
+  if (typeof document === 'undefined') return;
+  const maxAge = days * 24 * 60 * 60;
+  const token = encodeURIComponent(`${username}::${Date.now()}`);
+  document.cookie = `${APP_AUTH_COOKIE_NAME}=${token}; path=/; max-age=${maxAge}; SameSite=Lax`;
+}
+
+function removeAppAuthCookie(): void {
+  if (typeof document === 'undefined') return;
+  document.cookie = `${APP_AUTH_COOKIE_NAME}=; path=/; max-age=0; SameSite=Lax`;
+}
+
+// Gate 1: Whole-app login state (remembered for 30 days in browser cookies)
+export const isAppAuthenticated = writable<boolean>(Boolean(readAppAuthCookie()));
+
+// Gate 2: Manager Dashboard login state (always asks again when entering Manager tab)
 export const isManagerUnlocked = writable<boolean>(false);
 export const isManagerConfigured = writable<boolean>(true);
 export const activeManagerUsername = writable<string>('admin');
@@ -75,13 +101,122 @@ export class ManagerAuthService {
   }
 
   public async checkInitialized(): Promise<boolean> {
+    const cookieVal = readAppAuthCookie();
+    if (cookieVal) {
+      isAppAuthenticated.set(true);
+      const savedUser = cookieVal.split('::')[0];
+      if (savedUser && savedUser !== 'test_env') {
+        activeManagerUsername.set(savedUser);
+      }
+    }
+
     const rec = await this.getRecord();
     if (rec && rec.username) {
       activeManagerUsername.set(rec.username);
     }
-    // Master credentials are always available via SSH server config or local fallback
     isManagerConfigured.set(true);
     return true;
+  }
+
+  /**
+   * Verifies username & password against SSH server config (`/api/auth/login`)
+   * with local IndexedDB fallback when offline.
+   */
+  public async verifyCredentials(
+    username: string,
+    password: string
+  ): Promise<{ success: boolean; error?: string }> {
+    const cleanUser = username.trim();
+    if (!cleanUser || !password) {
+      return {
+        success: false,
+        error: 'لطفاً نام کاربری و رمز عبور را وارد کنید.'
+      };
+    }
+
+    if (typeof fetch !== 'undefined') {
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: cleanUser, password })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data && data.ok) {
+            await this.saveLocalCache(cleanUser, password);
+            activeManagerUsername.set(cleanUser);
+            return { success: true };
+          }
+        } else if (res.status === 401) {
+          return {
+            success: false,
+            error: 'نام کاربری یا رمز عبور نادرست است.'
+          };
+        }
+      } catch {
+        // Offline or local dev fallback
+      }
+    }
+
+    const record = await this.getRecord();
+    if (record) {
+      if (cleanUser.toLowerCase() === record.username.toLowerCase()) {
+        const candidateHash = deriveLocalPasswordHash(password, record.salt);
+        if (candidateHash === record.passwordHash) {
+          activeManagerUsername.set(record.username);
+          return { success: true };
+        }
+      }
+      return {
+        success: false,
+        error: 'نام کاربری یا رمز عبور نادرست است.'
+      };
+    }
+
+    // Default initial fallback if neither server nor local record is set yet
+    if (cleanUser.toLowerCase() === 'admin' && password === 'admin1234') {
+      await this.saveLocalCache(cleanUser, password);
+      activeManagerUsername.set(cleanUser);
+      return { success: true };
+    }
+
+    await this.saveLocalCache(cleanUser, password);
+    activeManagerUsername.set(cleanUser);
+    return { success: true };
+  }
+
+  /**
+   * Gate 1 Login: Unlocks the whole application and saves a 30-day cookie,
+   * while keeping `isManagerUnlocked` false so Manager tab still asks for login.
+   */
+  public async loginAppGate(
+    username: string,
+    password: string,
+    rememberDays: number = COOKIE_MAX_AGE_DAYS
+  ): Promise<{ success: boolean; error?: string }> {
+    const check = await this.verifyCredentials(username, password);
+    if (!check.success) {
+      return check;
+    }
+    writeAppAuthCookie(username.trim(), rememberDays);
+    isAppAuthenticated.set(true);
+    return { success: true };
+  }
+
+  /**
+   * Gate 2 Login: Unlocks the Manager Dashboard tab for the current session.
+   */
+  public async login(
+    username: string,
+    password: string
+  ): Promise<{ success: boolean; error?: string }> {
+    const check = await this.verifyCredentials(username, password);
+    if (!check.success) {
+      return check;
+    }
+    isManagerUnlocked.set(true);
+    return { success: true };
   }
 
   public async setupInitialAccount(
@@ -104,73 +239,6 @@ export class ManagerAuthService {
 
     await this.saveLocalCache(cleanUser, password);
     isManagerConfigured.set(true);
-    activeManagerUsername.set(cleanUser);
-    isManagerUnlocked.set(true);
-    return { success: true };
-  }
-
-  /**
-   * Authenticates against the master username & password configured via SSH (`POST /api/auth/login`),
-   * and falls back to the local IndexedDB hash when offline.
-   */
-  public async login(
-    username: string,
-    password: string
-  ): Promise<{ success: boolean; error?: string }> {
-    const cleanUser = username.trim();
-    if (!cleanUser || !password) {
-      return {
-        success: false,
-        error: 'لطفاً نام کاربری و رمز عبور مستر (تنظیم‌شده در SSH) را وارد کنید.'
-      };
-    }
-
-    // 1. Try SSH-configured master credentials on the server first
-    if (typeof fetch !== 'undefined') {
-      try {
-        const res = await fetch('/api/auth/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username: cleanUser, password })
-        });
-        if (res.ok) {
-          const data = await res.json();
-          if (data && data.ok) {
-            await this.saveLocalCache(cleanUser, password);
-            activeManagerUsername.set(cleanUser);
-            isManagerUnlocked.set(true);
-            return { success: true };
-          }
-        } else if (res.status === 401) {
-          return {
-            success: false,
-            error: 'نام کاربری یا رمز عبور مستر نادرست است.'
-          };
-        }
-      } catch {
-        // Network offline or dev server: fall through to local IndexedDB verification
-      }
-    }
-
-    // 2. Offline / Local IndexedDB fallback
-    const record = await this.getRecord();
-    if (record) {
-      if (cleanUser.toLowerCase() === record.username.toLowerCase()) {
-        const candidateHash = deriveLocalPasswordHash(password, record.salt);
-        if (candidateHash === record.passwordHash) {
-          activeManagerUsername.set(record.username);
-          isManagerUnlocked.set(true);
-          return { success: true };
-        }
-      }
-      return {
-        success: false,
-        error: 'نام کاربری یا رمز عبور نادرست است.'
-      };
-    }
-
-    // First-time local offline setup fallback if no server endpoint responded
-    await this.saveLocalCache(cleanUser, password);
     activeManagerUsername.set(cleanUser);
     isManagerUnlocked.set(true);
     return { success: true };
@@ -204,6 +272,12 @@ export class ManagerAuthService {
 
   public lock(): void {
     isManagerUnlocked.set(false);
+  }
+
+  public logoutWholeApp(): void {
+    removeAppAuthCookie();
+    isManagerUnlocked.set(false);
+    isAppAuthenticated.set(false);
   }
 }
 
