@@ -12,7 +12,6 @@
   import BottomNav from './components/common/BottomNav.svelte';
   import Toast from './components/common/Toast.svelte';
 
-  import DashboardPage from './features/dashboard/DashboardPage.svelte';
   import PurchaseEntryPage from './features/purchases/PurchaseEntryPage.svelte';
   import TimesheetsPage from './features/timesheets/TimesheetsPage.svelte';
   import RevenuePage from './features/revenue/RevenuePage.svelte';
@@ -55,15 +54,11 @@
 </script>
 
 {#if !$isAppAuthenticated}
-  <!-- First Login Gate: Whole-App Entry (Saved in 30-Day Cookie) -->
   <div class="app-auth-gate">
     <div class="panel login-panel">
-      <div class="brand-mark" style="margin: 0 auto 14px; width: 52px; height: 52px; font-size: 24px;">
-        گ
-      </div>
-      <h1 style="font-size: 21px; margin: 0; color: var(--green);">ورود به سامانه گیله‌کُرد</h1>
+      <h1 style="font-size: 22px; margin: 0; color: var(--green);">گیله‌کُرد</h1>
       <p style="color: var(--muted); font-size: 12px; margin: 8px 0 20px; line-height: 1.8;">
-        نام کاربری و رمز عبور خود را وارد کنید. ورود اول شما به مدت ۳۰ روز در کوکی مرورگر ذخیره می‌ماند.
+        نام کاربری و رمز عبور خود را وارد کنید.
       </p>
 
       <form on:submit|preventDefault={handleAppGateLogin} novalidate>
@@ -101,7 +96,7 @@
               }}
               style="width: 18px; height: 18px; min-height: 18px;"
             />
-            <span>به خاطر سپردن ورود در این دستگاه به مدت ۳۰ روز</span>
+            <span>به خاطر سپردن ورود به مدت ۳۰ روز</span>
           </label>
         </div>
 
@@ -122,9 +117,7 @@
     <Topbar />
 
     <main class="main-wrap">
-      {#if $currentPage === 'dashboard'}
-        <DashboardPage />
-      {:else if $currentPage === 'entry'}
+      {#if $currentPage === 'entry'}
         <PurchaseEntryPage />
       {:else if $currentPage === 'timesheets'}
         <TimesheetsPage />
