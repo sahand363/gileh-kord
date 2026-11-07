@@ -3,25 +3,55 @@
     purchases,
     todayPurchasesStats,
     dashboardSummary,
-    recentPurchases
+    recentPurchases,
+    appSettings
   } from '../../stores/purchaseStore';
-  import { navigateTo, NAV_SECTIONS } from '../../stores/navigationStore';
+  import { navigateTo } from '../../stores/navigationStore';
   import {
-    formatMoney,
+    formatReportingMoney,
+    getCurrencyLabel,
     formatNumber,
     toJalaliDate,
     toJalaliNumeric,
     getTodayISODate
   } from '../../utils/formatters';
-  import { getPersianWeekdayName } from '../../utils/jalali';
+  import {
+    formatJalaliYearMonthLabel,
+    getJalaliYearMonthKey,
+    getPersianWeekdayName
+  } from '../../utils/jalali';
+  import {
+    calculatePurchaseStats,
+    getTopPurchasedProducts
+  } from '../../utils/calculations';
+  import type { ReportingCurrency } from '../../models/types';
   import PurchaseCard from '../../components/purchases/PurchaseCard.svelte';
   import EmptyState from '../../components/common/EmptyState.svelte';
   import ColumnChart, { type ColumnChartItem } from '../../components/common/ColumnChart.svelte';
 
   const todayISO = getTodayISODate();
+  const currentMonthKey = getJalaliYearMonthKey(todayISO);
+  const currentMonthLabel = formatJalaliYearMonthLabel(currentMonthKey);
   const todayJalali = `${getPersianWeekdayName(todayISO)} ${toJalaliDate(todayISO)}`;
 
-  // Build a 7-day purchase activity column chart (Zero revenue mentioned on public dashboard)
+  $: repCurr = ($appSettings.reportingCurrency || 'TOMAN') as ReportingCurrency;
+  $: currLabel = getCurrencyLabel(repCurr);
+  $: scaleMultiplier = repCurr === 'RIAL' ? 10 : 1;
+
+  // Monthly purchase overview (current Jalali month)
+  $: currentMonthPurchases = $purchases.filter(
+    (p) => getJalaliYearMonthKey(p.purchaseDate) === currentMonthKey
+  );
+  $: monthlyPurchaseStats = calculatePurchaseStats(currentMonthPurchases);
+
+  // Frequently purchased products
+  $: frequentProducts = getTopPurchasedProducts($purchases, 5);
+  $: maxProductAmount =
+    frequentProducts.length > 0 && frequentProducts[0].totalAmount > 0
+      ? frequentProducts[0].totalAmount
+      : 1;
+
+  // 7-day purchase column chart
   $: purchaseByDateColumns = (() => {
     const map = new Map<string, { date: string; total: number; count: number }>();
     for (const p of $purchases) {
@@ -43,7 +73,7 @@
           id: `purch_day_${d.date}`,
           label: getPersianWeekdayName(d.date),
           subLabel: toJalaliNumeric(d.date).slice(5),
-          value: d.total,
+          value: d.total * scaleMultiplier,
           tone: 'primary'
         })
       );
@@ -51,90 +81,171 @@
 </script>
 
 <section class="page active" aria-labelledby="dashboardTitle">
-  <div class="page-heading">
-    <div>
-      <p class="eyebrow">نمای سریع موبایل و دسکتاپ</p>
-      <h1 id="dashboardTitle">پیشخوان گیله‌کُرد</h1>
-      <p class="subheading">خلاصه وضعیت خریدهای روزانه، کالاها و هشدارهای موجودی انبار.</p>
+  <!-- Refined Welcome & Quick Action Hero -->
+  <div class="dashboard-hero panel">
+    <div class="hero-main">
+      <p class="eyebrow">پیشخوان عملیاتی تدارکات • {todayJalali}</p>
+      <h1 id="dashboardTitle">{$appSettings.restaurantName || 'رستوران گیله‌کُرد'}</h1>
+      <p class="subheading">
+        نمای لحظه‌ای خریدهای روزانه، مرور تدارکات ماه {currentMonthLabel} و اقلام پرمصرف آشپزخانه (واحد گزارش: <strong>{currLabel}</strong>).
+      </p>
     </div>
-    <div class="heading-date">
-      <span class="calendar-icon">▦</span>
-      <span>{todayJalali}</span>
+
+    <div class="hero-actions">
+      <button type="button" class="primary-btn hero-cta" on:click={() => navigateTo('entry')}>
+        <span>＋ ثبت خرید جدید</span>
+      </button>
+      <button type="button" class="secondary-btn" on:click={() => navigateTo('products')}>
+        ❖ کالاها
+      </button>
+      <button type="button" class="quiet-btn" on:click={() => navigateTo('history')}>
+        ▤ تاریخچه خریدها
+      </button>
     </div>
   </div>
 
+  <!-- 4 Financial & Operational Summary Cards -->
   <div class="kpi-grid">
     <section class="panel kpi-card">
       <div class="card-topline">
         <span class="mini-icon">＋</span>
-        <span>خرید امروز</span>
+        <span>مجموع خرید امروز</span>
       </div>
-      <div class="kpi-value">{formatMoney($todayPurchasesStats.total)} <small>تومان</small></div>
-      <div class="kpi-sub">{formatNumber($todayPurchasesStats.count)} فاکتور امروز</div>
+      <div class="kpi-value">
+        {formatReportingMoney($todayPurchasesStats.total, repCurr)}
+        <small>{currLabel}</small>
+      </div>
+      <div class="kpi-sub">
+        {formatNumber($todayPurchasesStats.count)} فاکتور ثبت‌شده در {toJalaliDate(todayISO)}
+      </div>
     </section>
 
     <section class="panel kpi-card">
       <div class="card-topline">
-        <span class="mini-icon">▤</span>
-        <span>کل فاکتورهای خرید</span>
+        <span class="mini-icon">▦</span>
+        <span>مرور خرید ماه ({currentMonthLabel})</span>
       </div>
-      <div class="kpi-value">{formatNumber($dashboardSummary.totalPurchasesCount)} <small>فاکتور</small></div>
-      <div class="kpi-sub">مجموع کل: {formatMoney($dashboardSummary.totalPurchasesAmount)} تومان</div>
+      <div class="kpi-value">
+        {formatReportingMoney(monthlyPurchaseStats.total, repCurr)}
+        <small>{currLabel}</small>
+      </div>
+      <div class="kpi-sub">
+        {formatNumber(monthlyPurchaseStats.count)} فاکتور | میانگین: {formatReportingMoney(monthlyPurchaseStats.average, repCurr)} {currLabel}
+      </div>
     </section>
 
     <section class="panel kpi-card">
       <div class="card-topline">
         <span class="mini-icon">❖</span>
-        <span>کالاهای ثبت‌شده</span>
+        <span>کالاها و کل تدارکات</span>
       </div>
       <div class="kpi-value">
-        {formatNumber($dashboardSummary.productsCount)} <small>قلم کالا</small>
+        {formatNumber($dashboardSummary.productsCount)}
+        <small>قلم کالا</small>
       </div>
-      <div class="kpi-sub">آماده پیشنهاد خودکار در فرم خرید</div>
+      <div class="kpi-sub">
+        در {formatNumber($dashboardSummary.totalPurchasesCount)} فاکتور ثبت‌شده
+      </div>
     </section>
 
-    <section class="panel kpi-card">
+    <section class="panel kpi-card" class:alert-card={$dashboardSummary.lowStockItems.length > 0}>
       <div class="card-topline">
         <span class="mini-icon">◫</span>
-        <span>هشدار کسری انبار</span>
+        <span>هشدار کسری موجودی</span>
       </div>
       <div class="kpi-value">
-        {formatNumber($dashboardSummary.lowStockItems.length)} <small>قلم کالا</small>
+        {formatNumber($dashboardSummary.lowStockItems.length)}
+        <small>قلم کالا</small>
       </div>
-      <div class="kpi-sub">نیازمند تأمین و سفارش مجدد</div>
+      <div class="kpi-sub">
+        {$dashboardSummary.lowStockItems.length > 0
+          ? 'نیازمند بررسی و سفارش مجدد'
+          : 'موجودی اقلام دارای هشدار کافی است'}
+      </div>
     </section>
   </div>
 
-  <!-- Operational Purchases Column Chart (No revenue displayed) -->
-  <section class="panel card-pad" style="margin-bottom: 16px;">
-    <div class="section-heading">
-      <div>
-        <h2>نمودار ستونی خریدهای اخیر</h2>
-        <p>مجموع مبالغ خرید روزهای اخیر به تاریخ شمسی</p>
+  <!-- Two-Column Analytics: Compact Purchase Chart & Frequently Purchased Products -->
+  <div class="two-col-grid" style="margin-bottom: 18px;">
+    <section class="panel card-pad">
+      <div class="section-heading">
+        <div>
+          <h2>روند خریدهای اخیر ({currLabel})</h2>
+          <p>مجموع خرید روزهای اخیر به تاریخ شمسی</p>
+        </div>
+        <button type="button" class="text-btn" on:click={() => navigateTo('history')}>
+          تاریخچه کامل <span>←</span>
+        </button>
       </div>
-      <button type="button" class="text-btn" on:click={() => navigateTo('history')}>
-        تاریخچه خریدها <span>←</span>
-      </button>
-    </div>
 
-    {#if purchaseByDateColumns.length > 0}
-      <ColumnChart items={purchaseByDateColumns} height={180} />
-    {:else}
-      <EmptyState
-        title="خریدی ثبت نشده است"
-        message="پس از ثبت خرید، نمودار ستونی خریدهای روزانه در این قسمت نمایش داده می‌شود."
-      />
-    {/if}
-  </section>
+      {#if purchaseByDateColumns.length > 0}
+        <ColumnChart
+          items={purchaseByDateColumns}
+          height={185}
+          unitLabel={currLabel}
+        />
+      {:else}
+        <EmptyState
+          title="هنوز خریدی ثبت نشده است"
+          message="پس از ثبت اولین فاکتور خرید، نمودار روند روزانه در این بخش ترسیم می‌شود."
+        />
+      {/if}
+    </section>
 
-  <section class="panel card-pad" style="margin-bottom: 16px;">
+    <section class="panel card-pad">
+      <div class="section-heading">
+        <div>
+          <h2>پرتکرارترین و پرهزینه‌ترین کالاها</h2>
+          <p>اقلام اصلی تدارکات آشپزخانه بر پایه حجم خرید</p>
+        </div>
+        <button type="button" class="text-btn" on:click={() => navigateTo('products')}>
+          فهرست کالاها <span>←</span>
+        </button>
+      </div>
+
+      {#if frequentProducts.length > 0}
+        <div class="freq-products-list">
+          {#each frequentProducts as prod (prod.productName)}
+            <div class="bar-row">
+              <div class="bar-labels">
+                <strong>
+                  {prod.productName}
+                  <small style="color: var(--muted); font-weight: 500;">
+                    ({formatNumber(prod.count)} مرتبه)
+                  </small>
+                </strong>
+                <span>{formatReportingMoney(prod.totalAmount, repCurr)} {currLabel}</span>
+              </div>
+              <div class="bar-track">
+                <div
+                  class="bar-fill"
+                  style="width: {Math.max(
+                    8,
+                    Math.round((prod.totalAmount / maxProductAmount) * 100)
+                  )}%;"
+                ></div>
+              </div>
+            </div>
+          {/each}
+        </div>
+      {:else}
+        <EmptyState
+          title="کالایی ثبت نشده است"
+          message="با ثبت فاکتورهای خرید، اقلام پرمصرف رستوران به صورت خودکار رتبه‌بندی می‌شوند."
+        />
+      {/if}
+    </section>
+  </div>
+
+  <!-- Recent Purchases Section -->
+  <section class="panel card-pad">
     <div class="section-heading">
       <div>
-        <h2>آخرین خریدها</h2>
-        <p>بروزرسانی زنده پس از هر ثبت خرید</p>
+        <h2>آخرین خریدهای ثبت‌شده</h2>
+        <p>امکان ویرایش مستقیم هر فاکتور از طریق دکمه «ویرایش»</p>
       </div>
       <button type="button" class="secondary-btn" on:click={() => navigateTo('entry')}>
-        ＋ ثبت خرید
+        ＋ ثبت خرید جدید
       </button>
     </div>
 
@@ -146,32 +257,9 @@
       {:else}
         <EmptyState
           title="هنوز خریدی ثبت نشده است"
-          message="از بخش ثبت خرید اولین فاکتور خود را وارد کنید."
+          message="از دکمه بالا اولین فاکتور خرید روزانه را ثبت کنید."
         />
       {/if}
-    </div>
-  </section>
-
-  <section class="recent-section">
-    <div class="section-heading">
-      <div>
-        <h2>دسترسی سریع</h2>
-        <p>تب‌های اصلی برنامه</p>
-      </div>
-    </div>
-    <div class="quick-nav-grid">
-      {#each NAV_SECTIONS as sec (sec.id)}
-        <button
-          type="button"
-          class="quick-nav-btn"
-          on:click={() => navigateTo(sec.id)}
-        >
-          <span class="quick-nav-icon">{sec.icon}</span>
-          <div>
-            <strong style="font-size: 12px; display: block;">{sec.label}</strong>
-          </div>
-        </button>
-      {/each}
     </div>
   </section>
 </section>
