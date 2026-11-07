@@ -1,11 +1,11 @@
 <script lang="ts">
   import {
-    toJalaliDate,
     toJalaliNumeric,
     toJalaliDateTime,
     getTodayISODate,
     formatNumber
   } from '../../utils/formatters';
+  import { formatJalaliDayMonth } from '../../utils/jalali';
   import { navigateTo, type AppPage } from '../../stores/navigationStore';
   import {
     dashboardSummary,
@@ -22,8 +22,9 @@
   import type { ReportingCurrency } from '../../models/types';
 
   $: todayISO = getTodayISODate();
-  $: todayJalali = `${toJalaliDate(todayISO)} (${toJalaliNumeric(todayISO)})`;
+  $: todayJalali = `${formatJalaliDayMonth(todayISO)} (${toJalaliNumeric(todayISO)})`;
   $: currentRepCurrency = ($appSettings.reportingCurrency || 'TOMAN') as ReportingCurrency;
+  $: isConnected = $runtimeState.isOnline && $backendStatus === 'connected';
 
   function handleNav(page: AppPage, event?: MouseEvent) {
     event?.preventDefault();
@@ -65,6 +66,8 @@
   </a>
 
   <div class="topbar-meta">
+    <span class="today-label">{todayJalali}</span>
+
     <button
       type="button"
       class="currency-toggle-pill"
@@ -75,20 +78,12 @@
     </button>
 
     <span
-      class="conn-pill"
-      class:offline={!$runtimeState.isOnline}
-    >
-      <span class="status-dot" class:muted={!$runtimeState.isOnline}></span>
-      {#if !$runtimeState.isOnline}
-        <span>آفلاین</span>
-      {:else if $backendStatus === 'connected'}
-        <span>سرور متصل</span>
-      {:else}
-        <span>آنلاین</span>
-      {/if}
-    </span>
-
-    <span class="today-label">{todayJalali}</span>
+      class="conn-circle"
+      class:online={isConnected}
+      class:offline={!isConnected}
+      title={isConnected ? 'متصل به سرور' : 'عدم اتصال به سرور / آفلاین'}
+      aria-label={isConnected ? 'متصل به سرور' : 'عدم اتصال به سرور'}
+    ></span>
   </div>
 </header>
 
