@@ -128,8 +128,28 @@
 
   $: periodNetToman = periodIncomeTotalToman - periodSpendingTotalToman;
 
-  // Table rows shown newest-first for easy reading on 30-day & current-month views
-  $: tablePeriodISOs = [...activePeriodISOs].reverse();
+  // Precomputed breakdown rows (newest-first) for the table
+  $: tablePeriodRows = [...activePeriodISOs].reverse().map((iso: string) => {
+    const revRec = $revenues.find((r: RevenueDayRecord) => r.date === iso && !r.isDemo);
+    const dayIncToman = revRec ? getEffectiveDayRevenue(revRec) : 0;
+    const dayPurchToman = $purchases
+      .filter((p: Purchase) => p.purchaseDate === iso && !p.isDemo)
+      .reduce((s: number, p: Purchase) => s + (Number(p.totalAmount) || 0), 0);
+    const dayExpToman = $expenses
+      .filter((e: Expense) => e.expenseDate === iso && !e.isDemo)
+      .reduce((s: number, e: Expense) => s + (Number(e.amount) || 0), 0);
+    const daySpdToman = dayPurchToman + dayExpToman;
+    const dayNetToman = dayIncToman - daySpdToman;
+
+    return {
+      iso,
+      weekday: getPersianWeekdayName(iso),
+      jalaliNumeric: toJalaliNumeric(iso),
+      dayIncToman,
+      daySpdToman,
+      dayNetToman
+    };
+  });
 
   // Available Jalali months across purchases, revenues, and expenses (plus current month)
   $: availableMonths = (() => {
@@ -572,7 +592,6 @@
 </script>
 
 <section class="page active dashboard-page" aria-labelledby="dashboardTitle">
-  <!-- Green Welcome Space -->
   <header class="dashboard-hero">
     <div>
       <p class="eyebrow">پیشخوان مدیریت کافه</p>
@@ -582,7 +601,6 @@
     <div class="dashboard-hero-date">▦ &nbsp; {todayJalali}</div>
   </header>
 
-  <!-- Monthly Report Export Bar (PDF or PNG Image for any chosen month) -->
   <section class="panel card-pad" style="margin-bottom: 16px;">
     <div class="section-heading" style="margin-bottom: 12px;">
       <div>
@@ -628,7 +646,6 @@
     </div>
   </section>
 
-  <!-- Period Toggle Bar: 7 Days / 30 Days / Current Jalali Month -->
   <section class="panel card-pad" style="margin-bottom: 16px;">
     <div class="section-heading" style="margin-bottom: 12px;">
       <div>
@@ -670,7 +687,6 @@
     </div>
   </section>
 
-  <!-- Income & Spendings Charts for Selected Period -->
   <div class="two-col-grid" style="margin-bottom: 16px;">
     <section class="panel card-pad">
       <div class="section-heading">
@@ -699,7 +715,6 @@
     </section>
   </div>
 
-  <!-- Day-by-Day Breakdown Table for Selected Period -->
   <section class="panel card-pad">
     <div class="section-heading">
       <h2>جدول تفکیکی {periodTitle} ({currLabel})</h2>
@@ -715,40 +730,28 @@
           </tr>
         </thead>
         <tbody>
-          {#each tablePeriodISOs as iso (iso)}
-            {@const revRec = $revenues.find(
-              (r: RevenueDayRecord) => r.date === iso && !r.isDemo
-            )}
-            {@const dayIncToman = revRec ? getEffectiveDayRevenue(revRec) : 0}
-            {@const dayPurchToman = $purchases
-              .filter((p: Purchase) => p.purchaseDate === iso && !p.isDemo)
-              .reduce((s: number, p: Purchase) => s + (Number(p.totalAmount) || 0), 0)}
-            {@const dayExpToman = $expenses
-              .filter((e: Expense) => e.expenseDate === iso && !e.isDemo)
-              .reduce((s: number, e: Expense) => s + (Number(e.amount) || 0), 0)}
-            {@const daySpdToman = dayPurchToman + dayExpToman}
-            {@const dayNetToman = dayIncToman - daySpdToman}
+          {#each tablePeriodRows as row (row.iso)}
             <tr>
               <td>
-                <strong>{getPersianWeekdayName(iso)}</strong>
-                ({toJalaliNumeric(iso)})
+                <strong>{row.weekday}</strong>
+                ({row.jalaliNumeric})
               </td>
               <td>
                 <strong style="color: var(--green);">
-                  {formatReportingMoney(dayIncToman, repCurr)}
+                  {formatReportingMoney(row.dayIncToman, repCurr)}
                 </strong>
               </td>
               <td>
                 <strong style="color: var(--danger);">
-                  {formatReportingMoney(daySpdToman, repCurr)}
+                  {formatReportingMoney(row.daySpdToman, repCurr)}
                 </strong>
               </td>
               <td
-                style="color: {dayNetToman >= 0
+                style="color: {row.dayNetToman >= 0
                   ? 'var(--green)'
                   : 'var(--danger)'}; font-weight: 800;"
               >
-                {formatReportingMoney(dayNetToman, repCurr)}
+                {formatReportingMoney(row.dayNetToman, repCurr)}
               </td>
             </tr>
           {/each}
