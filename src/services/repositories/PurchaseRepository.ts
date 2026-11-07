@@ -33,16 +33,32 @@ export interface UpdatePurchaseInput {
 
 export class PurchaseRepository {
   public async getAll(): Promise<Purchase[]> {
+    const localItems = await this.getAllLocal();
+
     if (apiClient.isEnabled()) {
       try {
         const remoteItems = await apiClient.listPurchases({ pageSize: 500 });
-        await this.replaceAllLocal(remoteItems);
-        return sortPurchasesDescending(remoteItems);
+        if (remoteItems.length > 0) {
+          const merged = this.mergePurchases(localItems, remoteItems);
+          await this.replaceAllLocal(merged);
+          return merged;
+        }
       } catch {
         // Fallback to local IndexedDB when offline
       }
     }
-    return this.getAllLocal();
+    return localItems;
+  }
+
+  private mergePurchases(local: Purchase[], remote: Purchase[]): Purchase[] {
+    const map = new Map<string, Purchase>();
+    for (const item of local) {
+      map.set(item.id, item);
+    }
+    for (const item of remote) {
+      map.set(item.id, item);
+    }
+    return sortPurchasesDescending(Array.from(map.values()));
   }
 
   private async getAllLocal(): Promise<Purchase[]> {
