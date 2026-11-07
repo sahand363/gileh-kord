@@ -1,4 +1,4 @@
-/* GILEH KORD — Visual system v1.0
+/* GILEH KORD — Visual system v1.1 (Mobile-First RTL Fixed)
    Import AFTER main.css in src/main.ts. RTL-first, responsive, no framework. */
 :root {
   --green: #173f35;
@@ -19,10 +19,48 @@
   color: var(--ink);
   background: var(--canvas);
 }
-html, body { background: var(--canvas); font-family: var(--font-ui); color: var(--ink); }
+
+html, body {
+  background: var(--canvas);
+  font-family: var(--font-ui);
+  color: var(--ink);
+  max-width: 100vw;
+  overflow-x: hidden;
+}
+
 button, input, select, textarea { font-family: var(--font-ui); }
 button { transition: background .18s ease, color .18s ease, border-color .18s ease, box-shadow .18s ease, transform .18s ease; }
-.app-shell { min-height: 100vh; padding-bottom: 92px; }
+
+/* Whole-App First Login Gate */
+.app-auth-gate {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px 14px;
+  background: radial-gradient(circle at 50% 0%, #e4efe8 0%, var(--canvas) 65%);
+}
+
+/* Prevent Grid & Flex Horizontal Overflow on Mobile */
+.app-shell,
+.main-wrap,
+.page,
+.panel,
+.card-pad,
+.form-panel,
+.history-panel,
+.setting-card,
+.setting-content,
+.two-col-grid > *,
+.three-col-grid > *,
+.entry-layout > *,
+.kpi-grid > *,
+.settings-grid > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.app-shell { min-height: 100vh; padding-bottom: 92px; overflow-x: hidden; }
 .topbar { min-height: 76px; height: auto; background: rgba(255,254,250,.96); border-bottom: 1px solid var(--line); box-shadow: 0 3px 14px rgba(28,52,41,.025); }
 .brand { gap: 13px; }
 .brand-mark { width: 44px; height: 44px; border-radius: 15px; background: var(--green); box-shadow: 0 5px 13px rgba(23,63,53,.2); font-size: 23px; }
@@ -66,8 +104,8 @@ input:focus, select:focus, textarea:focus { border-color: #719987; box-shadow: 0
 .quick-nav-btn { border: 1px solid var(--line); background: #fffefa; border-radius: 15px; padding: 15px; }
 .quick-nav-btn:hover { border-color: #c8d8cc; background: #f8faf6; transform: translateY(-2px); box-shadow: var(--shadow-card); }
 .manager-top-bar { padding: 18px 21px; }
-.manager-subnav { gap: 8px; padding: 5px 0 17px; }
-.manager-tab-pill { border-radius: 12px; border: 1px solid var(--line); background: #fffefa; padding: 10px 14px; }
+.manager-subnav { gap: 8px; padding: 5px 2px 15px; width: 100%; max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.manager-tab-pill { border-radius: 12px; border: 1px solid var(--line); background: #fffefa; padding: 10px 14px; flex-shrink: 0; }
 .manager-tab-pill.active { background: var(--green); border-color: var(--green); color: white; box-shadow: 0 4px 12px rgba(23,63,53,.14); }
 .data-table th { background: #f4f5ef; color: #53645a; }
 .data-table th, .data-table td { padding: 13px 12px; }
@@ -105,28 +143,93 @@ input:focus, select:focus, textarea:focus { border-color: #719987; box-shadow: 0
 .dashboard-list { display:flex; flex-direction:column; gap:9px; }
 .dashboard-empty-note { padding:20px; border:1px dashed #dce3da; border-radius:14px; background:#fafbf8; color:#89938b; font-size:11px; text-align:center; line-height:2; }
 .dashboard-footnote { margin-top:12px; color:#8a948c; font-size:9px; }
+
 @media (max-width: 900px) {
- .dashboard-kpis { grid-template-columns:repeat(2,minmax(0,1fr)); }
- .dashboard-main-grid { grid-template-columns:1fr; }
+  .dashboard-kpis { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .dashboard-main-grid { grid-template-columns:1fr; }
 }
-@media (max-width: 600px) {
- .main-wrap { padding:18px 14px 36px; }
- .topbar { padding:10px 14px; min-height:66px; }
- .brand-mark { width:39px; height:39px; }
- .brand strong { font-size:16px; }
- .brand small { font-size:9px; }
- .topbar-meta .today-label, .topbar-meta .conn-pill:nth-child(2) { display:none; }
- .section-ribbon { display:none; }
- .demo-banner { padding:0 14px; }
- .dashboard-hero { align-items:flex-start; flex-direction:column; padding:21px; border-radius:20px; }
- .dashboard-hero h1 { font-size:22px; }
- .dashboard-hero-date { align-self:stretch; text-align:center; }
- .dashboard-kpis { gap:10px; }
- .dashboard-kpi { padding:15px; border-radius:16px; }
- .dashboard-kpi-value { font-size:19px; }
- .dashboard-panel { padding:16px; }
- .dashboard-quick-actions { grid-template-columns:1fr; }
- .dashboard-action { padding:12px; }
- .page-heading h1 { font-size:21px; }
- .card-pad { padding:16px; }
+
+@media (max-width: 640px) {
+  .main-wrap { padding: 14px 12px 96px; }
+  .topbar { padding: 10px 12px; min-height: 62px; }
+  .brand-mark { width: 38px; height: 38px; font-size: 19px; }
+  .brand strong { font-size: 15px; }
+  .brand small { font-size: 9px; }
+  .topbar-meta .today-label, .topbar-meta .conn-pill { display: none; }
+  .section-ribbon { display: none; }
+  .demo-banner { padding: 0 12px; }
+  .dashboard-hero { align-items: flex-start; flex-direction: column; padding: 18px; border-radius: 18px; }
+  .dashboard-hero h1 { font-size: 20px; }
+  .dashboard-hero-date { align-self: stretch; text-align: center; }
+  .dashboard-kpis, .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .dashboard-kpi, .kpi-card { padding: 14px; border-radius: 16px; }
+  .dashboard-kpi-value, .kpi-value { font-size: 18px; }
+  .dashboard-panel, .card-pad, .form-panel, .history-panel { padding: 15px 14px; border-radius: 16px; }
+  .dashboard-quick-actions { grid-template-columns: 1fr; }
+  .dashboard-action { padding: 12px; }
+  .page-heading h1 { font-size: 20px; }
+
+  /* Fix Filter Bar & Date Pickers on Mobile */
+  .filters {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .search-box {
+    flex: 1 1 auto;
+    width: 100%;
+  }
+  .date-filter {
+    width: 100%;
+    justify-content: space-between;
+  }
+  .date-picker-filter-wrap {
+    flex: 1;
+    min-width: 0;
+  }
+  .filters select,
+  .filters button {
+    width: 100% !important;
+    min-width: 0 !important;
+    justify-content: center;
+  }
+
+  /* Fix Backup & Settings Cards on Mobile */
+  .setting-card {
+    flex-direction: column;
+    padding: 16px 14px;
+    gap: 10px;
+  }
+  .setting-actions .primary-btn,
+  .setting-actions .secondary-btn,
+  .setting-actions .quiet-btn {
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+
+  /* Fix Purchase Item Wrapping on Mobile */
+  .purchase-item {
+    flex-direction: column;
+    align-items: stretch;
+    padding: 12px 13px;
+    gap: 10px;
+  }
+  .purchase-side {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding-top: 8px;
+    border-top: 1px dashed var(--line);
+  }
+
+  /* Fix Coefficient Form Row on Mobile */
+  .coeff-form-row {
+    flex-direction: column;
+    align-items: stretch;
+    width: 100%;
+  }
+  .coeff-input {
+    width: 100%;
+  }
 }
