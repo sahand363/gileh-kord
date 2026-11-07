@@ -1,7 +1,7 @@
 import { normalizeProductKey } from '../utils/formatters';
 
 export const DB_NAME = 'gileh_kord_db';
-export const DB_VERSION = 4;
+export const DB_VERSION = 5;
 
 export const ALL_STORES = [
   'purchases',
@@ -12,6 +12,7 @@ export const ALL_STORES = [
   'employees',
   'revenues',
   'timesheets',
+  'menu_items',
   'manager_auth',
   'settings'
 ] as const;
@@ -146,7 +147,6 @@ export class IndexedDBClient {
       }
     }
 
-    // Version 4: Employees, Revenues, Timesheets, Manager Auth, and Purchase employeeId index
     if (oldVersion < 4) {
       if (db.objectStoreNames.contains('purchases')) {
         const purchaseStore = tx.objectStore('purchases');
@@ -174,6 +174,13 @@ export class IndexedDBClient {
 
       if (!db.objectStoreNames.contains('manager_auth')) {
         db.createObjectStore('manager_auth', { keyPath: 'key' });
+      }
+    }
+
+    if (oldVersion < 5) {
+      if (!db.objectStoreNames.contains('menu_items')) {
+        const menuStore = db.createObjectStore('menu_items', { keyPath: 'id' });
+        menuStore.createIndex('category', 'category', { unique: false });
       }
     }
   }
