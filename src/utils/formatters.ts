@@ -25,10 +25,6 @@ export function formatMoney(amount: number): string {
   return persianIntegerFormatter.format(Math.round(amount));
 }
 
-/**
- * Formats a canonical Toman integer in either TOMAN or RIAL (1 Toman = 10 Rial)
- * for display/reporting only, without modifying stored data.
- */
 export function formatReportingMoney(
   tomanAmount: number,
   reportingCurrency: ReportingCurrency = 'TOMAN'
@@ -62,6 +58,22 @@ export function normalizeDigits(input: string | number | null | undefined): stri
     .replace(/٫/g, '.')
     .replace(/[٬,،\s]/g, '')
     .trim();
+}
+
+/**
+ * Formats a numeric input string live as the user types by inserting '،' every 3 digits
+ * (e.g., "4000000" -> "4،000،000").
+ */
+export function formatLivePriceInput(raw: string | number | null | undefined): string {
+  if (raw === null || raw === undefined) return '';
+  const asciiDigits = String(raw)
+    .replace(/[۰-۹]/g, (d) => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d)))
+    .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+    .replace(/[^\d]/g, '')
+    .replace(/^0+(?=\d)/, '');
+
+  if (!asciiDigits) return '';
+  return asciiDigits.replace(/\B(?=(\d{3})+(?!\d))/g, '،');
 }
 
 export function parseNumericInput(input: string | number | null | undefined): number {
