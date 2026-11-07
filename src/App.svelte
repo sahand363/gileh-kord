@@ -13,8 +13,9 @@
   import Toast from './components/common/Toast.svelte';
 
   import PurchaseEntryPage from './features/purchases/PurchaseEntryPage.svelte';
-  import TimesheetsPage from './features/timesheets/TimesheetsPage.svelte';
+  import ExpensesPage from './features/expenses/ExpensesPage.svelte';
   import RevenuePage from './features/revenue/RevenuePage.svelte';
+  import TimesheetsPage from './features/timesheets/TimesheetsPage.svelte';
   import ManagerPage from './features/manager/ManagerPage.svelte';
 
   let appUsername = 'admin';
@@ -119,10 +120,12 @@
     <main class="main-wrap">
       {#if $currentPage === 'entry'}
         <PurchaseEntryPage />
-      {:else if $currentPage === 'timesheets'}
-        <TimesheetsPage />
+      {:else if $currentPage === 'expenses'}
+        <ExpensesPage />
       {:else if $currentPage === 'revenue'}
         <RevenuePage />
+      {:else if $currentPage === 'timesheets'}
+        <TimesheetsPage />
       {:else}
         <ManagerPage />
       {/if}
