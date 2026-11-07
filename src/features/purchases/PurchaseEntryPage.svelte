@@ -16,6 +16,7 @@
   import {
     formatMoney,
     formatNumber,
+    formatLivePriceInput,
     toJalaliDate,
     getTodayISODate,
     parseNumericInput
@@ -51,7 +52,6 @@
   let lastPriceHint = '';
   let optionalOpen = false;
 
-  // Embedded Purchase History Filter State
   let searchQuery = '';
   let dateFrom = '';
   let dateTo = '';
@@ -94,6 +94,12 @@
       selectedEmployeeId = $activeEmployees[0].id;
     }
   });
+
+  function handlePriceInput(e: Event) {
+    const target = e.currentTarget as HTMLInputElement;
+    price = formatLivePriceInput(target.value);
+    target.value = price;
+  }
 
   async function handleEmployeeChange() {
     if (selectedEmployeeId) {
@@ -267,7 +273,7 @@
             on:input={handleProductInput}
             on:focus={handleProductInput}
             on:keydown={handleProductKeydown}
-            placeholder="مثلاً برنج هاشمی"
+            placeholder="مثلاً دانه قهوه عربیکا یا شیر تازه"
             required
             aria-autocomplete="list"
             aria-controls="suggestions"
@@ -337,9 +343,13 @@
           <input
             id="price"
             name="price"
+            type="text"
+            dir="ltr"
             inputmode="numeric"
-            bind:value={price}
-            placeholder="مثلاً ۲٬۵۰۰٬۰۰۰"
+            value={price}
+            on:input={handlePriceInput}
+            placeholder="4،000،000"
+            style="text-align: right;"
             required
           />
           <span class="currency">تومان</span>
@@ -415,7 +425,6 @@
     </form>
   </section>
 
-  <!-- Embedded Purchase History at the bottom of Purchase Registration -->
   <section id="embeddedPurchaseHistory" class="panel history-panel">
     <div class="section-heading">
       <h2>تاریخچه خریدها</h2>
