@@ -5,16 +5,34 @@ import { normalizeProductKey } from '../../utils/formatters';
 
 export class ProductRepository {
   public async getAll(): Promise<Product[]> {
+    const localItems = await this.getAllLocal();
+
     if (apiClient.isEnabled()) {
       try {
         const remoteItems = await apiClient.listProducts();
-        await this.replaceAllLocal(remoteItems);
-        return remoteItems;
+        if (remoteItems.length > 0) {
+          const merged = this.mergeProducts(localItems, remoteItems);
+          await this.replaceAllLocal(merged);
+          return merged;
+        }
       } catch {
-        // Gracefully fall back to local IndexedDB when offline or backend unreachable
+        // Fallback to local IndexedDB when offline or server unreachable
       }
     }
-    return this.getAllLocal();
+    return localItems;
+  }
+
+  private mergeProducts(local: Product[], remote: Product[]): Product[] {
+    const map = new Map<string, Product>();
+    for (const item of local) {
+      map.set(item.normalizedName || normalizeProductKey(item.name), item);
+    }
+    for (const item of remote) {
+      map.set(item.normalizedName || normalizeProductKey(item.name), item);
+    }
+    return Array.from(map.values()).sort((a, b) =>
+      b.lastPurchaseDate.localeCompare(a.lastPurchaseDate)
+    );
   }
 
   private async getAllLocal(): Promise<Product[]> {
@@ -30,16 +48,7 @@ export class ProductRepository {
     const clean = normalizeProductKey(query);
     if (!clean) return [];
 
-    if (apiClient.isEnabled()) {
-      try {
-        const remote = await apiClient.listProducts(clean);
-        return remote.slice(0, limit);
-      } catch {
-        // Fallback to local search
-      }
-    }
-
-    const all = await this.getAllLocal();
+    const all = await this.getAll();
     return all
       .filter((p) => {
         const norm = p.normalizedName || normalizeProductKey(p.name);
