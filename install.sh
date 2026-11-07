@@ -21,8 +21,7 @@ NGINX_DOMAIN_ENABLED="/etc/nginx/sites-enabled/${APP_NAME}-domain"
 LEGACY_NGINX_ENABLED="/etc/nginx/sites-enabled/${APP_NAME}"
 CLI_SHORTCUT="/usr/local/bin/gk"
 
-DEFAULT_PORT="3000"
-DEFAULT_DOMAIN="gilehkord.modesehramiz.ir"
+DEFAULT_DOMAIN=""
 DEFAULT_ADMIN_USER="admin"
 DEFAULT_ADMIN_PASS="admin1234"
 
@@ -50,11 +49,17 @@ require_root() {
   fi
 }
 
+generate_random_port() {
+  shuf -i 10000-60000 -n 1 2>/dev/null || echo $(( (RANDOM % 50000) + 10000 ))
+}
+
 load_or_init_config() {
   mkdir -p "${CONFIG_DIR}" "${DATA_DIR}"
   if [[ ! -f "${CONFIG_FILE}" ]]; then
+    local rand_port
+    rand_port=$(generate_random_port)
     cat > "${CONFIG_FILE}" <<EOF
-PORT=${DEFAULT_PORT}
+PORT=${rand_port}
 HOST=0.0.0.0
 DOMAIN=${DEFAULT_DOMAIN}
 GILEH_DATA_DIR=${DATA_DIR}
@@ -72,8 +77,8 @@ EOF
 
   # shellcheck disable=SC1090
   source "${CONFIG_FILE}"
-  if [[ "${DOMAIN:-_}" == "_" || -z "${DOMAIN:-}" ]]; then
-    DOMAIN="${DEFAULT_DOMAIN}"
+  if [[ "${DOMAIN:-_}" == "_" ]]; then
+    DOMAIN=""
   fi
 
   if [[ ! -f "${MANAGERS_FILE}" ]]; then
@@ -112,12 +117,14 @@ get_service_state() {
   fi
 }
 
-get_ssl_state() {
+get_real_address() {
   load_or_init_config
-  if [[ -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" ]]; then
-    echo -e "${GREEN}ACTIVE (HTTPS)${NC}"
+  local server_ip
+  server_ip=$(get_server_ip)
+  if [[ -n "${DOMAIN:-}" && -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" ]]; then
+    echo "https://${DOMAIN}/"
   else
-    echo -e "${YELLOW}HTTP ONLY${NC}"
+    echo "http://${server_ip}:${PORT}/"
   fi
 }
 
@@ -191,7 +198,7 @@ setup_systemd_service() {
   load_or_init_config
   cat > "/etc/systemd/system/${SERVICE_NAME}" <<EOF
 [Unit]
-Description=GILEH KORD Restaurant Management Web App
+Description=GILEH KORD Coffeehouse Management Web App
 After=network.target
 
 [Service]
@@ -235,7 +242,7 @@ server {
 EOF
   ln -sf "${NGINX_IP_AVAILABLE}" "${NGINX_IP_ENABLED}"
 
-  if [[ -n "${DOMAIN}" && "${DOMAIN}" != "_" ]]; then
+  if [[ -n "${DOMAIN:-}" && "${DOMAIN}" != "_" ]]; then
     if [[ -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" && -f "/etc/letsencrypt/live/${DOMAIN}/privkey.pem" ]]; then
       cat > "${NGINX_DOMAIN_AVAILABLE}" <<EOF
 server {
@@ -333,7 +340,7 @@ option_install() {
   configure_firewall
   install_cli_shortcut
   systemctl restart "${SERVICE_NAME}"
-  log_info "GILEH KORD installed and running!"
+  log_info "GILEH KORD installed! Access at: $(get_real_address)"
 }
 
 option_update() {
@@ -367,7 +374,6 @@ option_logs() {
   journalctl -u "${SERVICE_NAME}" -n 40 --no-pager
 }
 
-# Dedicated Option 8: Add or Change Manager User & Password
 option_manage_users() {
   require_root
   load_or_init_config
@@ -400,12 +406,10 @@ option_manage_users() {
         return 1
       fi
 
-      # Update primary ADMIN_USER / ADMIN_PASS in config.env
       ADMIN_USER="${NEW_USER}"
       ADMIN_PASS="${NEW_PASS}"
       save_config_file
 
-      # Also update or append in managers.conf for multi-user support
       touch "${MANAGERS_FILE}"
       grep -v "^${NEW_USER}:" "${MANAGERS_FILE}" > "${MANAGERS_FILE}.tmp" || true
       echo "${NEW_USER}:${NEW_PASS}" >> "${MANAGERS_FILE}.tmp"
@@ -436,25 +440,37 @@ option_manage_users() {
 option_configure_domain_port() {
   require_root
   load_or_init_config
-  echo -e "\nCurrent Domain : ${CYAN}${DOMAIN}${NC}"
-  echo -e "Current Port   : ${CYAN}${PORT}${NC}"
-  read -r -p "Enter domain name [${DOMAIN}]: " NEW_DOMAIN
-  read -r -p "Enter internal port [${PORT}]: " NEW_PORT
+  echo -e "\nCurrent Port   : ${CYAN}${PORT}${NC}"
+  echo -e "Current Domain : ${CYAN}${DOMAIN:-Not set}${NC}"
+  read -r -p "Enter domain name (or leave empty) [${DOMAIN}]: " NEW_DOMAIN
+  read -r -p "Enter port (or type 'random' for a new random port) [${PORT}]: " NEW_PORT
 
   DOMAIN="${NEW_DOMAIN:-$DOMAIN}"
-  PORT="${NEW_PORT:-$PORT}"
+  if [[ "${NEW_PORT:-}" == "random" ]]; then
+    PORT=$(generate_random_port)
+  else
+    PORT="${NEW_PORT:-$PORT}"
+  fi
   save_config_file
 
   setup_systemd_service
   setup_nginx_proxy
   configure_firewall
   systemctl restart "${SERVICE_NAME}"
-  log_info "Domain and port settings updated."
+  log_info "Updated! Active Address: $(get_real_address)"
 }
 
 option_setup_ssl() {
   require_root
   load_or_init_config
+  read -r -p "Enter your domain name for SSL [${DOMAIN}]: " SSL_DOMAIN
+  DOMAIN="${SSL_DOMAIN:-$DOMAIN}"
+  if [[ -z "${DOMAIN}" ]]; then
+    log_error "Domain name is required to issue an SSL certificate."
+    return 1
+  fi
+  save_config_file
+
   if ! command -v certbot >/dev/null 2>&1; then
     DEBIAN_FRONTEND=noninteractive apt-get update -y -qq
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq certbot python3-certbot-nginx
@@ -463,7 +479,7 @@ option_setup_ssl() {
   setup_nginx_proxy
   if certbot certonly --webroot -w /var/www/html -d "${DOMAIN}" --non-interactive --agree-tos --register-unsafely-without-email; then
     setup_nginx_proxy
-    log_info "SSL active at https://${DOMAIN}"
+    log_info "SSL active! Real Address is now: https://${DOMAIN}/"
   else
     log_error "Certbot failed. Verify DNS A record for ${DOMAIN}."
   fi
@@ -495,27 +511,23 @@ option_uninstall() {
 show_menu() {
   clear
   load_or_init_config
-  local server_ip
-  server_ip=$(get_server_ip)
   local status_badge
   status_badge=$(get_service_state)
-  local ssl_badge
-  ssl_badge=$(get_ssl_state)
+  local real_addr
+  real_addr=$(get_real_address)
   local managers_list
   managers_list=$(get_managers_list)
 
   echo -e "${GREEN}┌──────────────────────────────────────────────────────────────┐${NC}"
   echo -e "${GREEN}│${NC}              ${BOLD}GILEH KORD — SSH CONTROL PANEL${NC}                  ${GREEN}│${NC}"
   echo -e "${GREEN}├──────────────────────────────────────────────────────────────┤${NC}"
-  echo -e "  Status       : ${status_badge}   ${DIM}|${NC}  SSL: ${ssl_badge}"
-  echo -e "  HTTP IP Link : ${CYAN}${BOLD}http://${server_ip}${NC}"
-  echo -e "  Direct Port  : ${CYAN}http://${server_ip}:${PORT}${NC}"
-  echo -e "  Domain Link  : ${CYAN}https://${DOMAIN}${NC}"
-  echo -e "  Manager User : ${YELLOW}${BOLD}${managers_list}${NC} ${DIM}(Change with Option 8)${NC}"
-  echo -e "  Quick Command: ${GREEN}sudo gk${NC}"
+  echo -e "  Status       : ${status_badge}"
+  echo -e "  Address      : ${CYAN}${BOLD}${real_addr}${NC}"
+  echo -e "  Manager User : ${YELLOW}${BOLD}${managers_list}${NC} ${DIM}(Option 8)${NC}"
+  echo -e "  Shortcut     : ${GREEN}sudo gk${NC}"
   echo -e "${GREEN}├──────────────────────────────────────────────────────────────┤${NC}"
   echo -e "  ${BOLD}1)${NC} Install GILEH KORD          ${BOLD}8)${NC} ${YELLOW}Add / Change Manager User & Pass${NC}"
-  echo -e "  ${BOLD}2)${NC} Update from GitHub          ${BOLD}9)${NC} Configure Domain & Port"
+  echo -e "  ${BOLD}2)${NC} Update from GitHub          ${BOLD}9)${NC} Change Port (or Randomize) & Domain"
   echo -e "  ${BOLD}3)${NC} Start Application          ${BOLD}10)${NC} Issue Free Let's Encrypt SSL"
   echo -e "  ${BOLD}4)${NC} Stop Application           ${BOLD}11)${NC} Check SSL Status"
   echo -e "  ${BOLD}5)${NC} Restart Application        ${BOLD}12)${NC} Rebuild Frontend"
