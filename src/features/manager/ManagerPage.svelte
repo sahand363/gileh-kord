@@ -12,6 +12,10 @@
     employees,
     timesheets,
     appSettings,
+    syncSnapshots,
+    refreshSnapshotsList,
+    revertServerToSnapshot,
+    syncLocalStateToServer,
     updateGlobalRevenueCoefficient,
     updateEmployee,
     deleteRevenueDayRecord
@@ -26,6 +30,7 @@
     formatNumber,
     parseNumericInput,
     toJalaliDate,
+    toJalaliDateTime,
     toJalaliNumeric
   } from '../../utils/formatters';
   import { getPersianWeekdayName } from '../../utils/jalali';
@@ -39,7 +44,8 @@
   import JalaliDatePicker from '../../components/common/JalaliDatePicker.svelte';
   import ColumnChart, { type ColumnChartItem } from '../../components/common/ColumnChart.svelte';
 
-  // Nested Management Sub-Modules
+  // Nested Management Sub-Modules (All stay inside ManagerPage)
+  import MenuPage from '../menu/MenuPage.svelte';
   import EmployeesPage from '../employees/EmployeesPage.svelte';
   import ExpensesPage from '../expenses/ExpensesPage.svelte';
   import InventoryPage from '../inventory/InventoryPage.svelte';
@@ -50,6 +56,8 @@
 
   const MANAGER_TABS: Array<{ id: ManagerSubTab; label: string; icon: string }> = [
     { id: 'overview', label: 'درآمد و سهم کارکنان', icon: '₿' },
+    { id: 'menu', label: 'منوی رستوران', icon: '🍽' },
+    { id: 'history_logs', label: 'تاریخچه تغییرات و بازگشت', icon: '↺' },
     { id: 'employees', label: 'ثبت کارکنان و ضرایب', icon: '♟' },
     { id: 'expenses', label: 'هزینه‌ها', icon: '¤' },
     { id: 'inventory', label: 'انبار', icon: '◫' },
@@ -78,6 +86,7 @@
       usernameInput = $activeManagerUsername;
     }
     frontendMultiplierInput = String($appSettings.globalRevenueCoefficient ?? 0.6);
+    void refreshSnapshotsList();
   });
 
   $: filteredDailyRevenues = filterRevenueRecords(
@@ -142,6 +151,7 @@
     }
     passwordInput = '';
     frontendMultiplierInput = String($appSettings.globalRevenueCoefficient ?? 0.6);
+    void refreshSnapshotsList();
     showToast('ورود به بخش مدیریت انجام شد.');
   }
 
@@ -176,6 +186,24 @@
     if (!confirmed) return;
     await deleteRevenueDayRecord(id);
     showToast('رکورد درآمد حذف شد.');
+  }
+
+  async function handleManualFullSync() {
+    await syncLocalStateToServer('همگام‌سازی دستی از پنل مدیریت');
+    showToast('تمام اطلاعات این دستگاه روی سرور ذخیره و همگام شد.');
+  }
+
+  async function handleRevertSnapshot(snapId: string, summary: string) {
+    const confirmed = window.confirm(
+      `آیا مطمئن هستید که می‌خواهید تمام اطلاعات برنامه را به نسخه «${summary}» بازگردانید؟`
+    );
+    if (!confirmed) return;
+    try {
+      await revertServerToSnapshot(snapId);
+      showToast('اطلاعات با موفقیت به نسخه انتخابی بازگردانده شد.');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'خطا در بازگردانی نسخه.');
+    }
   }
 
   function handleLockPanel() {
@@ -234,6 +262,13 @@
       </div>
       <div class="setting-actions">
         <button
+          type="button"
+          class="quiet-btn"
+          on:click={handleManualFullSync}
+        >
+          ⇄ ارسال فوری داده‌های این گوشی به سرور
+        </button>
+        <button
           id="adminLogout"
           type="button"
           class="secondary-btn"
@@ -250,7 +285,12 @@
           type="button"
           class="manager-tab-pill"
           class:active={$activeManagerTab === tab.id}
-          on:click={() => activeManagerTab.set(tab.id)}
+          on:click={() => {
+            activeManagerTab.set(tab.id);
+            if (tab.id === 'history_logs') {
+              void refreshSnapshotsList();
+            }
+          }}
         >
           <span>{tab.icon}</span>
           <span>{tab.label}</span>
@@ -474,6 +514,64 @@
             {/each}
           {:else}
             <EmptyState title="درآمدی ثبت نشده است" message="رکوردهای درآمد در این بخش نمایش داده می‌شوند." />
+          {/if}
+        </div>
+      </section>
+    {:else if $activeManagerTab === 'menu'}
+      <MenuPage />
+    {:else if $activeManagerTab === 'history_logs'}
+      <!-- Update History & Revert Back Section -->
+      <section class="panel history-panel">
+        <div class="section-heading">
+          <div>
+            <h2>تاریخچه تغییرات کاربران و بازگشت به نسخه قبلی (Revert)</h2>
+            <p>
+              هر بار که اطلاعاتی ثبت یا ویرایش می‌شود، یک نسخه پشتیبان لحظه‌ای روی سرور ذخیره می‌گردد تا در صورت اشتباه بتوانید با یک کلیک به وضعیت قبلی برگردید.
+            </p>
+          </div>
+          <button
+            type="button"
+            class="quiet-btn"
+            on:click={() => refreshSnapshotsList()}
+          >
+            ↻ بروزرسانی فهرست
+          </button>
+        </div>
+
+        <div class="purchase-list">
+          {#if $syncSnapshots.length > 0}
+            {#each $syncSnapshots as snap (snap.id)}
+              <article class="purchase-item" style="flex-wrap: wrap;">
+                <div class="product-avatar">↺</div>
+                <div class="purchase-main">
+                  <div class="purchase-name">
+                    <span>{snap.actionSummary}</span>
+                    <span class="badge-employee">توسط: {snap.actor}</span>
+                  </div>
+                  <div class="purchase-meta">
+                    <span>زمان: {toJalaliDateTime(snap.timestamp)}</span>
+                    <span>خریدها: {formatNumber(snap.counts?.purchases || 0)}</span>
+                    <span>روزهای درآمد: {formatNumber(snap.counts?.revenues || 0)}</span>
+                    <span>کارکنان: {formatNumber(snap.counts?.employees || 0)}</span>
+                    <span>منو: {formatNumber(snap.counts?.menuItems || 0)}</span>
+                  </div>
+                </div>
+                <div class="purchase-side">
+                  <button
+                    type="button"
+                    class="secondary-btn"
+                    on:click={() => handleRevertSnapshot(snap.id, snap.actionSummary)}
+                  >
+                    ↺ بازگشت به این نسخه
+                  </button>
+                </div>
+              </article>
+            {/each}
+          {:else}
+            <EmptyState
+              title="هنوز تاریخچه تغییری روی سرور ثبت نشده است"
+              message="با زدن دکمه «ارسال فوری داده‌های این گوشی به سرور» در بالا یا ثبت اولین خرید/درآمد، نسخه‌های قابل بازگشت اینجا فهرست می‌شوند."
+            />
           {/if}
         </div>
       </section>
