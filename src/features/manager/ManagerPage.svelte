@@ -18,6 +18,8 @@
     syncLocalStateToServer,
     updateGlobalRevenueCoefficient,
     updateEmployee,
+    saveDailyTotalRevenue,
+    deleteDetailedRevenueEntry,
     deleteRevenueDayRecord
   } from '../../stores/purchaseStore';
   import {
@@ -28,6 +30,7 @@
   import {
     formatMoney,
     formatNumber,
+    formatLivePriceInput,
     getTodayISODate,
     parseNumericInput,
     toJalaliDate,
@@ -41,11 +44,13 @@
     filterRevenueRecords,
     getEffectiveDayRevenue
   } from '../../utils/calculations';
+  import type { RevenueDayRecord } from '../../models/types';
   import EmptyState from '../../components/common/EmptyState.svelte';
   import JalaliDatePicker from '../../components/common/JalaliDatePicker.svelte';
   import ColumnChart, { type ColumnChartItem } from '../../components/common/ColumnChart.svelte';
 
-  // Nested Management Sub-Modules
+  // Nested Management Sub-Modules (Dashboard is now Tab #1 inside Manager)
+  import DashboardPage from '../dashboard/DashboardPage.svelte';
   import MenuPage from '../menu/MenuPage.svelte';
   import EmployeesPage from '../employees/EmployeesPage.svelte';
   import ExpensesPage from '../expenses/ExpensesPage.svelte';
@@ -56,6 +61,7 @@
   import SettingsPage from '../settings/SettingsPage.svelte';
 
   const MANAGER_TABS: Array<{ id: ManagerSubTab; label: string; icon: string }> = [
+    { id: 'dashboard', label: 'پیشخوان', icon: '⊞' },
     { id: 'overview', label: 'درآمد و سهم کارکنان', icon: '₿' },
     { id: 'analytics', label: 'تحلیل ۷ روزه', icon: '↗' },
     { id: 'menu', label: 'منوی کافه', icon: '☕' },
@@ -80,6 +86,15 @@
   let dateTo = '';
   let onlyReal = false;
 
+  // Inline Revenue Editing State
+  let editingRevDate: string | null = null;
+  let editRevTotal = '';
+  let editRevCard = '';
+  let editRevOnline = '';
+  let editRevCash = '';
+  let editRevNotes = '';
+  let editRevError = '';
+
   $: frontendMultiplier = $appSettings.globalRevenueCoefficient ?? 0.6;
 
   onMount(async () => {
@@ -91,7 +106,6 @@
     void refreshSnapshotsList();
   });
 
-  // Build array of the exact last 7 calendar days (oldest to newest: 6 days ago .. today)
   $: last7DaysISOs = (() => {
     const days: string[] = [];
     for (let i = 6; i >= 0; i--) {
@@ -102,7 +116,6 @@
     return days;
   })();
 
-  // Analytics Chart 1: Last 7 Days Income Day-by-Day
   $: last7DaysIncomeColumns = last7DaysISOs.map((iso): ColumnChartItem => {
     const revRec = $revenues.find((r) => r.date === iso && (!onlyReal || !r.isDemo));
     const incomeVal = revRec ? getEffectiveDayRevenue(revRec) : 0;
@@ -117,7 +130,6 @@
 
   $: last7DaysIncomeTotal = last7DaysIncomeColumns.reduce((s, c) => s + c.value, 0);
 
-  // Analytics Chart 2: Last 7 Days All Spendings Day-by-Day (Purchases + Expenses)
   $: last7DaysSpendingColumns = last7DaysISOs.map((iso): ColumnChartItem => {
     const dayPurchSum = $purchases
       .filter((p) => p.purchaseDate === iso && (!onlyReal || !p.isDemo))
@@ -188,6 +200,49 @@
       tone: 'gold'
     })
   );
+
+  function startEditRevenue(rev: RevenueDayRecord) {
+    editingRevDate = rev.date;
+    editRevTotal = formatLivePriceInput(getEffectiveDayRevenue(rev));
+    editRevCard = rev.cardAmount ? formatLivePriceInput(rev.cardAmount) : '';
+    editRevOnline = rev.onlineAmount ? formatLivePriceInput(rev.onlineAmount) : '';
+    editRevCash = rev.cashAmount ? formatLivePriceInput(rev.cashAmount) : '';
+    editRevNotes = rev.notes || '';
+    editRevError = '';
+  }
+
+  function cancelEditRevenue() {
+    editingRevDate = null;
+    editRevError = '';
+  }
+
+  async function saveEditedRevenue(originalDate: string) {
+    editRevError = '';
+    const parsedTotal = parseNumericInput(editRevTotal);
+    if (isNaN(parsedTotal) || parsedTotal <= 0) {
+      editRevError = 'مبلغ کل درآمد باید عددی بزرگ‌تر از صفر باشد.';
+      return;
+    }
+
+    const parsedCard = parseNumericInput(editRevCard);
+    const parsedOnline = parseNumericInput(editRevOnline);
+    const parsedCash = parseNumericInput(editRevCash);
+
+    try {
+      await saveDailyTotalRevenue({
+        date: originalDate,
+        dailyTotalAmount: parsedTotal,
+        cardAmount: !isNaN(parsedCard) && parsedCard > 0 ? parsedCard : undefined,
+        onlineAmount: !isNaN(parsedOnline) && parsedOnline > 0 ? parsedOnline : undefined,
+        cashAmount: !isNaN(parsedCash) && parsedCash > 0 ? parsedCash : undefined,
+        notes: editRevNotes
+      });
+      editingRevDate = null;
+      showToast(`درآمد تاریخ ${toJalaliDate(originalDate)} با موفقیت ویرایش شد.`);
+    } catch (err) {
+      editRevError = err instanceof Error ? err.message : 'خطا در ویرایش درآمد.';
+    }
+  }
 
   async function handleLogin() {
     authError = '';
@@ -345,8 +400,9 @@
       </div>
     </div>
 
-    {#if $activeManagerTab === 'analytics'}
-      <!-- New Analytics Tab: Last 7 Days Income & Last 7 Days Spendings -->
+    {#if $activeManagerTab === 'dashboard'}
+      <DashboardPage />
+    {:else if $activeManagerTab === 'analytics'}
       <div class="two-col-grid" style="margin-bottom: 16px;">
         <section class="panel card-pad">
           <div class="section-heading">
@@ -585,6 +641,7 @@
         {/if}
       </section>
 
+      <!-- Full Recorded Revenue List with Inline Edit Support -->
       <section class="panel card-pad">
         <div class="section-heading">
           <h2>ریز درآمدهای ثبت‌شده ({formatNumber(filteredDailyRevenues.length)} روز)</h2>
@@ -594,26 +651,166 @@
           {#if filteredDailyRevenues.length > 0}
             {#each filteredDailyRevenues as rev (rev.id)}
               {@const dayTotal = getEffectiveDayRevenue(rev)}
-              <article class="purchase-item" style="flex-wrap: wrap;">
-                <div class="product-avatar">₿</div>
-                <div class="purchase-main">
-                  <div class="purchase-name">
-                    <span>
-                      {getPersianWeekdayName(rev.date)} {toJalaliDate(rev.date)} ({toJalaliNumeric(rev.date)})
-                    </span>
+              {#if editingRevDate === rev.date}
+                <div class="panel card-pad" style="border-color: var(--green-2);">
+                  <div class="section-heading" style="margin-bottom: 12px;">
+                    <h2>
+                      ویرایش درآمد {getPersianWeekdayName(rev.date)} {toJalaliDate(rev.date)} ({toJalaliNumeric(rev.date)})
+                    </h2>
                   </div>
+
+                  <form on:submit|preventDefault={() => saveEditedRevenue(rev.date)} novalidate>
+                    <div class="field">
+                      <label for={`edit_rev_tot_${rev.id}`}>مبلغ کل روز (تومان)</label>
+                      <input
+                        id={`edit_rev_tot_${rev.id}`}
+                        type="text"
+                        dir="ltr"
+                        inputmode="numeric"
+                        value={editRevTotal}
+                        on:input={(e) => {
+                          const t = e.currentTarget;
+                          editRevTotal = formatLivePriceInput(t.value);
+                          t.value = editRevTotal;
+                        }}
+                        style="text-align: right;"
+                        required
+                      />
+                    </div>
+
+                    <div class="field-row">
+                      <div class="field">
+                        <label for={`edit_rev_card_${rev.id}`}>کارت‌خوان (اختیاری)</label>
+                        <input
+                          id={`edit_rev_card_${rev.id}`}
+                          type="text"
+                          dir="ltr"
+                          inputmode="numeric"
+                          value={editRevCard}
+                          on:input={(e) => {
+                            const t = e.currentTarget;
+                            editRevCard = formatLivePriceInput(t.value);
+                            t.value = editRevCard;
+                          }}
+                          style="text-align: right;"
+                        />
+                      </div>
+                      <div class="field">
+                        <label for={`edit_rev_online_${rev.id}`}>آنلاین (اختیاری)</label>
+                        <input
+                          id={`edit_rev_online_${rev.id}`}
+                          type="text"
+                          dir="ltr"
+                          inputmode="numeric"
+                          value={editRevOnline}
+                          on:input={(e) => {
+                            const t = e.currentTarget;
+                            editRevOnline = formatLivePriceInput(t.value);
+                            t.value = editRevOnline;
+                          }}
+                          style="text-align: right;"
+                        />
+                      </div>
+                    </div>
+
+                    <div class="field-row">
+                      <div class="field">
+                        <label for={`edit_rev_cash_${rev.id}`}>نقدی (اختیاری)</label>
+                        <input
+                          id={`edit_rev_cash_${rev.id}`}
+                          type="text"
+                          dir="ltr"
+                          inputmode="numeric"
+                          value={editRevCash}
+                          on:input={(e) => {
+                            const t = e.currentTarget;
+                            editRevCash = formatLivePriceInput(t.value);
+                            t.value = editRevCash;
+                          }}
+                          style="text-align: right;"
+                        />
+                      </div>
+                      <div class="field">
+                        <label for={`edit_rev_notes_${rev.id}`}>توضیحات</label>
+                        <input id={`edit_rev_notes_${rev.id}`} bind:value={editRevNotes} />
+                      </div>
+                    </div>
+
+                    {#if rev.mode === 'detailed' && rev.entries.length > 0}
+                      <div style="margin-bottom: 12px; padding: 10px; background: #f5f8f5; border-radius: 10px;">
+                        <strong style="font-size: 11px; display: block; margin-bottom: 6px;">
+                          ریز اقلام ثبت‌شده این روز:
+                        </strong>
+                        {#each rev.entries as entry (entry.id)}
+                          <div style="display: flex; justify-content: space-between; align-items: center; font-size: 11px; padding: 4px 0;">
+                            <span>{entry.description} ({entry.category}) — {formatMoney(entry.amount)} تومان</span>
+                            <button
+                              type="button"
+                              class="quiet-btn"
+                              on:click={() => deleteDetailedRevenueEntry(rev.date, entry.id)}
+                            >
+                              حذف ردیف
+                            </button>
+                          </div>
+                        {/each}
+                      </div>
+                    {/if}
+
+                    {#if editRevError}
+                      <div class="form-error" role="alert">{editRevError}</div>
+                    {/if}
+
+                    <div class="setting-actions">
+                      <button type="submit" class="secondary-btn">ذخیره تغییرات ✓</button>
+                      <button type="button" class="quiet-btn" on:click={cancelEditRevenue}>
+                        انصراف
+                      </button>
+                    </div>
+                  </form>
                 </div>
-                <div class="purchase-side" style="display: flex; align-items: center; gap: 8px;">
-                  <div class="purchase-amount">{formatMoney(dayTotal)} تومان</div>
-                  <button
-                    type="button"
-                    class="quiet-btn"
-                    on:click={() => handleDeleteRevenueRecord(rev.id, rev.date)}
-                  >
-                    حذف
-                  </button>
-                </div>
-              </article>
+              {:else}
+                <article class="purchase-item" style="flex-wrap: wrap;">
+                  <div class="product-avatar">₿</div>
+                  <div class="purchase-main">
+                    <div class="purchase-name">
+                      <span>
+                        {getPersianWeekdayName(rev.date)} {toJalaliDate(rev.date)} ({toJalaliNumeric(rev.date)})
+                      </span>
+                    </div>
+                    <div class="purchase-meta">
+                      {#if rev.cardAmount}
+                        <span>کارت‌خوان: {formatMoney(rev.cardAmount)}</span>
+                      {/if}
+                      {#if rev.onlineAmount}
+                        <span>آنلاین: {formatMoney(rev.onlineAmount)}</span>
+                      {/if}
+                      {#if rev.cashAmount}
+                        <span>نقدی: {formatMoney(rev.cashAmount)}</span>
+                      {/if}
+                      {#if rev.notes}
+                        <span>({rev.notes})</span>
+                      {/if}
+                    </div>
+                  </div>
+                  <div class="purchase-side" style="display: flex; align-items: center; gap: 8px;">
+                    <div class="purchase-amount">{formatMoney(dayTotal)} تومان</div>
+                    <button
+                      type="button"
+                      class="secondary-btn"
+                      on:click={() => startEditRevenue(rev)}
+                    >
+                      ویرایش
+                    </button>
+                    <button
+                      type="button"
+                      class="quiet-btn"
+                      on:click={() => handleDeleteRevenueRecord(rev.id, rev.date)}
+                    >
+                      حذف
+                    </button>
+                  </div>
+                </article>
+              {/if}
             {/each}
           {:else}
             <EmptyState title="درآمدی ثبت نشده است" message="رکوردهای درآمد در این بخش نمایش داده می‌شوند." />
