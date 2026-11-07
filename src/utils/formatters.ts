@@ -4,6 +4,7 @@ import {
   formatJalaliNumeric,
   isValidGregorianISODate
 } from './jalali';
+import type { ReportingCurrency } from '../models/types';
 
 const persianIntegerFormatter = new Intl.NumberFormat('fa-IR', {
   maximumFractionDigits: 0
@@ -15,12 +16,35 @@ const persianDecimalFormatter = new Intl.NumberFormat('fa-IR', {
 
 export const MAX_SAFE_AMOUNT = 999_999_999_999;
 export const MAX_SAFE_QUANTITY = 1_000_000_000;
+export const RIAL_PER_TOMAN = 10;
 
 export function formatMoney(amount: number): string {
   if (typeof amount !== 'number' || isNaN(amount) || !Number.isFinite(amount)) {
     return '۰';
   }
   return persianIntegerFormatter.format(Math.round(amount));
+}
+
+/**
+ * Formats a canonical Toman integer in either TOMAN or RIAL (1 Toman = 10 Rial)
+ * for display/reporting only, without modifying stored data.
+ */
+export function formatReportingMoney(
+  tomanAmount: number,
+  reportingCurrency: ReportingCurrency = 'TOMAN'
+): string {
+  if (typeof tomanAmount !== 'number' || isNaN(tomanAmount) || !Number.isFinite(tomanAmount)) {
+    return '۰';
+  }
+  const value =
+    reportingCurrency === 'RIAL'
+      ? Math.round(tomanAmount) * RIAL_PER_TOMAN
+      : Math.round(tomanAmount);
+  return persianIntegerFormatter.format(value);
+}
+
+export function getCurrencyLabel(reportingCurrency: ReportingCurrency = 'TOMAN'): string {
+  return reportingCurrency === 'RIAL' ? 'ریال' : 'تومان';
 }
 
 export function formatNumber(value: number): string {
