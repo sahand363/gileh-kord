@@ -1,26 +1,47 @@
 import { writable } from 'svelte/store';
 import { dbClient, requestToPromise } from './db';
 import type { ManagerAuthRecord } from '../models/types';
-import { generateUUID } from '../utils/uuid';
 
 const MANAGER_AUTH_KEY = 'manager_credentials';
 const SESSION_TOKEN_STORAGE_KEY = 'gk_session_token';
+const SESSION_CSRF_STORAGE_KEY = 'gk_session_csrf';
 const SESSION_USER_STORAGE_KEY = 'gk_session_user';
 const SESSION_EXPIRES_STORAGE_KEY = 'gk_session_expires';
 
-function readStoredSession(): { token: string; username: string } | null {
+function purgeLegacyAppAuthCookie(): void {
+  if (typeof document === 'undefined') return;
+  document.cookie = 'gk_app_auth=; path=/; max-age=0; SameSite=Lax';
+}
+
+interface StoredClientSession {
+  token: string;
+  csrfToken: string;
+  username: string;
+  expiresAt: number;
+}
+
+function readStoredSession(): StoredClientSession | null {
+  purgeLegacyAppAuthCookie();
   if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
     return null;
   }
   try {
     const token = localStorage.getItem(SESSION_TOKEN_STORAGE_KEY) || '';
+    const csrfToken = localStorage.getItem(SESSION_CSRF_STORAGE_KEY) || '';
     const username = localStorage.getItem(SESSION_USER_STORAGE_KEY) || '';
-    const expiresRaw = Number(localStorage.getItem(SESSION_EXPIRES_STORAGE_KEY) || '0');
-    if (!token || !username || (expiresRaw > 0 && expiresRaw <= Date.now())) {
+    const expiresAt = Number(localStorage.getItem(SESSION_EXPIRES_STORAGE_KEY) || '0');
+    // Require signed token format (<sessionId>.<hmac>) and non-expired timestamp
+    if (
+      !token ||
+      !token.includes('.') ||
+      !csrfToken ||
+      !username ||
+      (expiresAt > 0 && expiresAt <= Date.now())
+    ) {
       clearStoredSession();
       return null;
     }
-    return { token, username };
+    return { token, csrfToken, username, expiresAt };
   } catch {
     return null;
   }
@@ -28,14 +49,17 @@ function readStoredSession(): { token: string; username: string } | null {
 
 function saveStoredSession(
   token: string,
+  csrfToken: string,
   username: string,
   expiresAt: number
 ): void {
+  purgeLegacyAppAuthCookie();
   if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
     return;
   }
   try {
     localStorage.setItem(SESSION_TOKEN_STORAGE_KEY, token);
+    localStorage.setItem(SESSION_CSRF_STORAGE_KEY, csrfToken);
     localStorage.setItem(SESSION_USER_STORAGE_KEY, username);
     localStorage.setItem(SESSION_EXPIRES_STORAGE_KEY, String(expiresAt));
   } catch {
@@ -44,11 +68,13 @@ function saveStoredSession(
 }
 
 function clearStoredSession(): void {
+  purgeLegacyAppAuthCookie();
   if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
     return;
   }
   try {
     localStorage.removeItem(SESSION_TOKEN_STORAGE_KEY);
+    localStorage.removeItem(SESSION_CSRF_STORAGE_KEY);
     localStorage.removeItem(SESSION_USER_STORAGE_KEY);
     localStorage.removeItem(SESSION_EXPIRES_STORAGE_KEY);
   } catch {
@@ -61,8 +87,32 @@ export function getActiveSessionToken(): string {
   return session ? session.token : '';
 }
 
-function constantTimeHashCompare(a: string, b: string): boolean {
-  if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length || a.length === 0) {
+export function getActiveCsrfToken(): string {
+  const session = readStoredSession();
+  return session ? session.csrfToken : '';
+}
+
+function generateRandomSaltHex(byteLength = 16): string {
+  const bytes = new Uint8Array(byteLength);
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < byteLength; i++) {
+      bytes[i] = Math.floor(Math.random() * 256);
+    }
+  }
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+function constantTimeHexCompare(a: string, b: string): boolean {
+  if (
+    typeof a !== 'string' ||
+    typeof b !== 'string' ||
+    a.length !== b.length ||
+    a.length === 0
+  ) {
     return false;
   }
   let diff = 0;
@@ -72,20 +122,52 @@ function constantTimeHashCompare(a: string, b: string): boolean {
   return diff === 0;
 }
 
-const initialSession = readStoredSession();
-
-// Gate 1: Whole-app login state (requires valid server token or verified offline cache)
-export const isAppAuthenticated = writable<boolean>(Boolean(initialSession));
-
-// Gate 2: Manager Dashboard login state (requires re-entering credentials on Manager tab)
-export const isManagerUnlocked = writable<boolean>(false);
-export const isManagerConfigured = writable<boolean>(false);
-export const activeManagerUsername = writable<string>(
-  initialSession ? initialSession.username : ''
-);
+/**
+ * Derives a salted password hash using Web Crypto PBKDF2-HMAC-SHA256 (100,000 iterations)
+ * when available, with a deterministic multi-round fallback for non-SubtleCrypto environments.
+ */
+export async function deriveSaltedPasswordHashAsync(
+  password: string,
+  saltHex: string
+): Promise<string> {
+  if (
+    typeof crypto !== 'undefined' &&
+    crypto.subtle &&
+    typeof TextEncoder !== 'undefined'
+  ) {
+    try {
+      const enc = new TextEncoder();
+      const keyMaterial = await crypto.subtle.importKey(
+        'raw',
+        enc.encode(password),
+        { name: 'PBKDF2' },
+        false,
+        ['deriveBits']
+      );
+      const derivedBits = await crypto.subtle.deriveBits(
+        {
+          name: 'PBKDF2',
+          salt: enc.encode(saltHex),
+          iterations: 100000,
+          hash: 'SHA-256'
+        },
+        keyMaterial,
+        256
+      );
+      const hashArray = Array.from(new Uint8Array(derivedBits));
+      const hashHex = hashArray
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('');
+      return `pbkdf2$100000$${hashHex}`;
+    } catch {
+      // Fallback below if SubtleCrypto is unavailable in HTTP context
+    }
+  }
+  return `kdf2$${deriveLocalPasswordHash(password, saltHex)}`;
+}
 
 export function deriveLocalPasswordHash(password: string, salt: string): string {
-  const input = `${salt}::gileh_kord_v2_auth::${password}`;
+  const input = `${salt}::gileh_kord_v2_salted::${password}`;
   const state = new Uint32Array([
     0x6a09e667,
     0xbb67ae85,
@@ -97,7 +179,7 @@ export function deriveLocalPasswordHash(password: string, salt: string): string 
     0x5be0cd19
   ]);
 
-  for (let round = 0; round < 4096; round++) {
+  for (let round = 0; round < 16384; round++) {
     for (let i = 0; i < input.length; i++) {
       const code = input.charCodeAt(i) ^ (round & 0xff);
       const idx = (i + round) & 7;
@@ -113,6 +195,15 @@ export function deriveLocalPasswordHash(password: string, salt: string): string 
     .map((n) => n.toString(16).padStart(8, '0'))
     .join('');
 }
+
+const initialSession = readStoredSession();
+
+export const isAppAuthenticated = writable<boolean>(Boolean(initialSession));
+export const isManagerUnlocked = writable<boolean>(false);
+export const isManagerConfigured = writable<boolean>(false);
+export const activeManagerUsername = writable<string>(
+  initialSession ? initialSession.username : ''
+);
 
 export class ManagerAuthService {
   public async getRecord(): Promise<ManagerAuthRecord | null> {
@@ -136,8 +227,8 @@ export class ManagerAuthService {
     username: string,
     password: string
   ): Promise<void> {
-    const salt = generateUUID();
-    const passwordHash = deriveLocalPasswordHash(password, salt);
+    const salt = generateRandomSaltHex(16);
+    const passwordHash = await deriveSaltedPasswordHashAsync(password, salt);
     const now = new Date().toISOString();
     const record: ManagerAuthRecord = {
       key: MANAGER_AUTH_KEY,
@@ -152,13 +243,30 @@ export class ManagerAuthService {
     });
   }
 
+  private async verifyAgainstLocalRecord(
+    record: ManagerAuthRecord,
+    password: string
+  ): Promise<boolean> {
+    if (!record.salt || !record.passwordHash) return false;
+    if (record.passwordHash.startsWith('pbkdf2$')) {
+      const candidate = await deriveSaltedPasswordHashAsync(password, record.salt);
+      return constantTimeHexCompare(candidate, record.passwordHash);
+    }
+    if (record.passwordHash.startsWith('kdf2$')) {
+      const candidate = `kdf2$${deriveLocalPasswordHash(password, record.salt)}`;
+      return constantTimeHexCompare(candidate, record.passwordHash);
+    }
+    const legacyCandidate = deriveLocalPasswordHash(password, record.salt);
+    return constantTimeHexCompare(legacyCandidate, record.passwordHash);
+  }
+
   public async checkInitialized(): Promise<boolean> {
+    purgeLegacyAppAuthCookie();
     const storedSession = readStoredSession();
     if (storedSession) {
       isAppAuthenticated.set(true);
       activeManagerUsername.set(storedSession.username);
 
-      // Verify token validity with the server when online
       if (typeof fetch !== 'undefined') {
         try {
           const res = await fetch('/api/auth/session', {
@@ -173,8 +281,19 @@ export class ManagerAuthService {
             this.logoutWholeApp();
             return false;
           }
+          if (res.ok) {
+            const data = await res.json().catch(() => null);
+            if (data && data.csrfToken) {
+              saveStoredSession(
+                storedSession.token,
+                String(data.csrfToken),
+                String(data.username || storedSession.username),
+                Number(data.expiresAt || storedSession.expiresAt)
+              );
+            }
+          }
         } catch {
-          // Offline: retain locally stored valid session until expiry
+          // Offline: keep valid signed session until expiry
         }
       }
     } else {
@@ -194,11 +313,6 @@ export class ManagerAuthService {
     return false;
   }
 
-  /**
-   * Authenticates credentials against the server (`POST /api/auth/login`).
-   * Offline fallback is strictly limited to verifying against an already-existing,
-   * server-verified `ManagerAuthRecord` in IndexedDB. Never auto-creates credentials.
-   */
   public async verifyCredentials(
     username: string,
     password: string,
@@ -218,7 +332,8 @@ export class ManagerAuthService {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            Accept: 'application/json'
+            Accept: 'application/json',
+            'X-Requested-With': 'XMLHttpRequest'
           },
           credentials: 'same-origin',
           body: JSON.stringify({
@@ -230,20 +345,30 @@ export class ManagerAuthService {
 
         const data = await res.json().catch(() => null);
 
-        if (res.ok && data && data.ok && typeof data.token === 'string') {
+        if (
+          res.ok &&
+          data &&
+          data.ok &&
+          typeof data.token === 'string' &&
+          typeof data.csrfToken === 'string'
+        ) {
           const verifiedUser = String(data.username || cleanUser);
           const expiresAt =
             Number(data.expiresAt) ||
             Date.now() + rememberDays * 24 * 60 * 60 * 1000;
 
-          saveStoredSession(data.token, verifiedUser, expiresAt);
+          saveStoredSession(
+            data.token,
+            data.csrfToken,
+            verifiedUser,
+            expiresAt
+          );
           await this.saveVerifiedLocalCache(verifiedUser, password);
           activeManagerUsername.set(verifiedUser);
           isManagerConfigured.set(true);
           return { success: true };
         }
 
-        // Server explicitly rejected credentials or is unconfigured — never fall back to offline cache
         const serverErrMsg =
           data?.error?.message ||
           (typeof data?.error === 'string' ? data.error : null) ||
@@ -257,7 +382,6 @@ export class ManagerAuthService {
       }
     }
 
-    // Strict Offline Verification: Only succeeds if a previously server-verified record exists
     const record = await this.getRecord();
     if (!record || !record.username || !record.passwordHash || !record.salt) {
       return {
@@ -269,8 +393,7 @@ export class ManagerAuthService {
 
     const userMatches =
       cleanUser.toLowerCase() === record.username.trim().toLowerCase();
-    const candidateHash = deriveLocalPasswordHash(password, record.salt);
-    const hashMatches = constantTimeHashCompare(candidateHash, record.passwordHash);
+    const hashMatches = await this.verifyAgainstLocalRecord(record, password);
 
     if (userMatches && hashMatches) {
       activeManagerUsername.set(record.username);
@@ -309,10 +432,6 @@ export class ManagerAuthService {
     return { success: true };
   }
 
-  /**
-   * Changes the offline cache password ONLY if a verified record already exists
-   * and the current password matches in constant time.
-   */
   public async changePassword(
     currentPassword: string,
     newPassword: string,
@@ -340,8 +459,8 @@ export class ManagerAuthService {
       };
     }
 
-    const currentHash = deriveLocalPasswordHash(currentPassword, record.salt);
-    if (!constantTimeHashCompare(currentHash, record.passwordHash)) {
+    const matches = await this.verifyAgainstLocalRecord(record, currentPassword);
+    if (!matches) {
       return { success: false, error: 'رمز عبور فعلی نادرست است.' };
     }
 
@@ -361,11 +480,14 @@ export class ManagerAuthService {
 
   public logoutWholeApp(): void {
     const token = getActiveSessionToken();
+    const csrfToken = getActiveCsrfToken();
     if (token && typeof fetch !== 'undefined') {
       void fetch('/api/auth/logout', {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${token}`
+          Authorization: `Bearer ${token}`,
+          'X-CSRF-Token': csrfToken,
+          'X-Requested-With': 'XMLHttpRequest'
         },
         credentials: 'same-origin'
       }).catch(() => {});
