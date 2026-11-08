@@ -4,12 +4,17 @@
   import {
     appSettings,
     loadPurchases,
-    syncLocalStateToServer
+    syncLocalStateToServer,
+    checkForServerUpdates
   } from '../../stores/purchaseStore';
   import {
     managerAuthService,
-    activeManagerUsername
+    activeManagerUsername,
+    operatingModeStore,
+    configuredServerUrlStore,
+    setConnectionConfig
   } from '../../services/ManagerAuthService';
+  import { apiClient, backendStatus } from '../../services/api/apiClient';
   import { showToast } from '../../stores/toastStore';
   import { MEASUREMENT_UNITS, type ReportingCurrency } from '../../models/types';
 
@@ -18,6 +23,13 @@
   let reportingCurrency: ReportingCurrency = 'TOMAN';
   let showDemoBadges = true;
 
+  // Connection Mode & Server Address Settings
+  let modeChoice: 'standalone' | 'server' = 'standalone';
+  let serverAddressInput = '';
+  let connectionError = '';
+  let isTestingServer = false;
+
+  // Password Change
   let currentPassword = '';
   let newUsername = '';
   let newPassword = '';
@@ -29,8 +41,56 @@
     defaultUnit = s.defaultUnit || 'کیلوگرم';
     reportingCurrency = (s.reportingCurrency || 'TOMAN') as ReportingCurrency;
     showDemoBadges = s.showDemoBadges;
-    newUsername = $activeManagerUsername || 'admin';
+
+    modeChoice = $operatingModeStore === 'server' ? 'server' : 'standalone';
+    serverAddressInput = $configuredServerUrlStore || s.serverAddress || '';
+    newUsername = $activeManagerUsername || '';
   });
+
+  async function handleSaveConnectionSettings() {
+    connectionError = '';
+
+    if (modeChoice === 'standalone') {
+      setConnectionConfig('standalone', '');
+      apiClient.configure({ baseUrl: '', enabled: false });
+      const saved = await settingsRepository.saveSettings({
+        serverAddress: '',
+        backendSyncEnabled: false
+      });
+      appSettings.set(saved);
+      showToast('برنامه روی «حالت مستقل در همین گوشی» تنظیم شد.');
+      return;
+    }
+
+    const cleanUrl = serverAddressInput.trim().replace(/\/+$/, '');
+    if (!cleanUrl || !/^https?:\/\//i.test(cleanUrl)) {
+      connectionError =
+        'لطفاً آدرس کامل سرور را همراه با http:// یا https:// وارد کنید (مثلاً http://94.184.6.138:3000).';
+      return;
+    }
+
+    isTestingServer = true;
+    try {
+      setConnectionConfig('server', cleanUrl);
+      apiClient.configure({ baseUrl: cleanUrl, enabled: true });
+
+      const healthy = await apiClient.checkHealth();
+      const saved = await settingsRepository.saveSettings({
+        serverAddress: cleanUrl,
+        backendSyncEnabled: true
+      });
+      appSettings.set(saved);
+
+      if (healthy) {
+        void checkForServerUpdates();
+        showToast('آدرس سرور ذخیره شد و اتصال با موفقیت برقرار گردید.');
+      } else {
+        showToast('آدرس سرور ذخیره شد، اما سرور در حال حاضر پاسخ نداد.');
+      }
+    } finally {
+      isTestingServer = false;
+    }
+  }
 
   async function handleSaveGeneralSettings() {
     const saved = await settingsRepository.saveSettings({
@@ -58,27 +118,110 @@
     }
     currentPassword = '';
     newPassword = '';
-    showToast('رمز عبور محلی بروزرسانی شد (برای تغییر رمز اصلی سرور از منوی sudo gk گزینه ۸ استفاده کنید).');
+    showToast('نام کاربری و رمز عبور این دستگاه با موفقیت بروزرسانی شد.');
   }
 
   function handleFullDeviceLogout() {
-    if (!window.confirm('آیا مایلید از حساب کاربری این دستگاه خارج شوید و کوکی ۳۰ روزه پاک شود؟')) {
+    if (
+      !window.confirm(
+        'آیا مایلید از حساب کاربری این دستگاه خارج شوید؟'
+      )
+    ) {
       return;
     }
     managerAuthService.logoutWholeApp();
-    showToast('خروج کامل از دستگاه انجام شد.');
+    showToast('خروج از حساب کاربری انجام شد.');
   }
 </script>
 
 <section class="page active" aria-labelledby="settingsTitle">
   <div class="page-heading">
     <div>
-      <p class="eyebrow">پیکربندی عمومی و نشست کاربری</p>
+      <p class="eyebrow">پیکربندی برنامه، آدرس سرور و نشست کاربری</p>
       <h1 id="settingsTitle">تنظیمات</h1>
     </div>
   </div>
 
   <div class="settings-grid">
+    <!-- 1. Server Address & Standalone/Online Mode Configuration -->
+    <section class="panel setting-card">
+      <div class="setting-icon">⇄</div>
+      <div class="setting-content">
+        <h3>حالت کارکرد برنامه و آدرس سرور (مستقل / آنلاین)</h3>
+        <p>
+          می‌توانید برنامه را به صورت کاملاً مستقل روی همین گوشی استفاده کنید یا آدرس سرور کافه را وارد نمایید تا داده‌ها با سرور همگام شوند.
+        </p>
+
+        <div class="setting-actions" style="margin-bottom: 14px;">
+          <button
+            type="button"
+            class={modeChoice === 'standalone' ? 'secondary-btn' : 'quiet-btn'}
+            on:click={() => {
+              modeChoice = 'standalone';
+              connectionError = '';
+            }}
+          >
+            {modeChoice === 'standalone' ? '● ' : '○ '}حالت مستقل (ذخیره فقط در همین گوشی)
+          </button>
+
+          <button
+            type="button"
+            class={modeChoice === 'server' ? 'secondary-btn' : 'quiet-btn'}
+            on:click={() => {
+              modeChoice = 'server';
+              connectionError = '';
+            }}
+          >
+            {modeChoice === 'server' ? '● ' : '○ '}متصل به سرور آنلاین
+          </button>
+        </div>
+
+        <form on:submit|preventDefault={handleSaveConnectionSettings} novalidate>
+          {#if modeChoice === 'server'}
+            <div class="field">
+              <label for="setServerUrl">آدرس سرور (IP و پورت یا دامنه)</label>
+              <input
+                id="setServerUrl"
+                type="url"
+                dir="ltr"
+                bind:value={serverAddressInput}
+                placeholder="http://94.184.6.138:3000"
+                style="text-align: left;"
+                required
+              />
+              <small class="field-hint">
+                وضعیت فعلی سرور:
+                <strong>
+                  {$backendStatus === 'connected' ? 'متصل (سبز)' : 'عدم اتصال'}
+                </strong>
+              </small>
+            </div>
+          {/if}
+
+          {#if connectionError}
+            <div class="form-error" role="alert">{connectionError}</div>
+          {/if}
+
+          <button
+            type="submit"
+            class="primary-btn"
+            style="max-width: 280px;"
+            disabled={isTestingServer}
+          >
+            <span>
+              {isTestingServer
+                ? 'در حال بررسی سرور...'
+                : modeChoice === 'standalone'
+                  ? 'ذخیره حالت مستقل'
+                  : 'ذخیره آدرس و اتصال به سرور'}
+            </span>
+            <span class="btn-arrow">←</span>
+          </button>
+        </form>
+      </div>
+    </section>
+
+    <!-- 2. General Cafe Settings -->
     <section class="panel setting-card">
       <div class="setting-icon">⚙</div>
       <div class="setting-content">
@@ -131,12 +274,13 @@
       </div>
     </section>
 
+    <!-- 3. Change Manager Username & Password -->
     <section class="panel setting-card">
       <div class="setting-icon">🔑</div>
       <div class="setting-content">
-        <h3>بروزرسانی رمز عبور کش آفلاین</h3>
+        <h3>تغییر نام کاربری و رمز عبور در این دستگاه</h3>
         <p>
-          توجه: برای افزودن مدیر جدید یا تغییر رمز اصلی سرور، در ترمینال SSH دستور <code>sudo gk</code> را زده و <strong>گزینه ۸</strong> را انتخاب کنید.
+          در حالت مستقل، این رمز مستقیماً رمز ورود و مدیریت شما روی گوشی است. در حالت سرور، کش آفلاین را بروز می‌کند.
         </p>
 
         <form on:submit|preventDefault={handleChangeLocalCredentials} novalidate>
@@ -157,7 +301,7 @@
           </div>
 
           <div class="field">
-            <label for="setNewPass">رمز عبور جدید</label>
+            <label for="setNewPass">رمز عبور جدید (حداقل ۸ کاراکتر)</label>
             <input
               id="setNewPass"
               type="password"
@@ -171,18 +315,19 @@
           {/if}
 
           <button type="submit" class="secondary-btn">
-            بروزرسانی رمز عبور محلی
+            ذخیره رمز عبور جدید
           </button>
         </form>
       </div>
     </section>
 
+    <!-- 4. Active Device Session Logout -->
     <section class="panel setting-card">
       <div class="setting-icon">⌑</div>
       <div class="setting-content">
         <h3>نشست فعال در این دستگاه</h3>
         <p>
-          در صورتی که می‌خواهید کوکی ۳۰ روزه ورود اول در این مرورگر پاک شود و برنامه به صفحه ورود اولیه برگردد، از دکمه زیر استفاده کنید.
+          برای خروج از حساب کاربری فعلی و بازگشت به صفحه ورود اولیه، از دکمه زیر استفاده کنید.
         </p>
         <div class="setting-actions">
           <button type="button" class="quiet-btn" on:click={handleFullDeviceLogout}>
