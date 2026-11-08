@@ -2003,7 +2003,8 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+      const resolvedExt = path.extname(realTarget).toLowerCase();
+      const contentType = MIME_TYPES[resolvedExt] || 'application/octet-stream';
       const isHashedAsset = pathname.startsWith('/assets/');
 
       fs.readFile(realTarget, (readErr, content) => {
