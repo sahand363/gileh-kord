@@ -7,7 +7,7 @@ import type {
 } from '../../models/types';
 import {
   getActiveCsrfToken,
-  getActiveSessionToken,
+  hasActiveSessionMeta,
   isAppAuthenticated,
   isManagerUnlocked
 } from '../ManagerAuthService';
@@ -17,6 +17,7 @@ export type BackendConnectionState = 'disconnected' | 'checking' | 'connected';
 export const backendStatus = writable<BackendConnectionState>('disconnected');
 
 export interface ServerSyncMeta {
+  revision?: number;
   updatedAt: string | null;
   lastActor: string;
   lastAction: string;
@@ -28,9 +29,34 @@ export interface ServerSyncMeta {
   };
 }
 
+export class SyncConflictError extends Error {
+  public serverRevision: number;
+  public updatedAt: string | null;
+  public lastActor: string;
+  public lastAction: string;
+
+  constructor(
+    message: string,
+    meta: {
+      serverRevision?: number;
+      updatedAt?: string | null;
+      lastActor?: string;
+      lastAction?: string;
+    }
+  ) {
+    super(message);
+    this.name = 'SyncConflictError';
+    this.serverRevision = Number(meta.serverRevision) || 0;
+    this.updatedAt = meta.updatedAt || null;
+    this.lastActor = meta.lastActor || 'کاربر';
+    this.lastAction = meta.lastAction || 'بروزرسانی';
+  }
+}
+
 export class ApiClient {
   private baseUrl = '';
   private enabled = false;
+  private lastKnownRevision: number | null = null;
 
   public configure(options: { baseUrl?: string; enabled?: boolean }): void {
     if (options.baseUrl !== undefined) {
@@ -43,6 +69,16 @@ export class ApiClient {
 
   public isEnabled(): boolean {
     return this.enabled;
+  }
+
+  public getLastKnownRevision(): number | null {
+    return this.lastKnownRevision;
+  }
+
+  public setLastKnownRevision(rev: number | undefined | null): void {
+    if (typeof rev === 'number' && Number.isFinite(rev) && rev >= 0) {
+      this.lastKnownRevision = rev;
+    }
   }
 
   private buildUrl(path: string): string {
@@ -62,14 +98,10 @@ export class ApiClient {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-    const token = getActiveSessionToken();
     const csrfToken = getActiveCsrfToken();
     const securityHeaders: Record<string, string> = {
       'X-Requested-With': 'XMLHttpRequest'
     };
-    if (token) {
-      securityHeaders['Authorization'] = `Bearer ${token}`;
-    }
     if (csrfToken) {
       securityHeaders['X-CSRF-Token'] = csrfToken;
     }
@@ -91,15 +123,30 @@ export class ApiClient {
       if (!response.ok) {
         if (response.status === 401 && path !== '/api/health') {
           isManagerUnlocked.set(false);
-          if (!token) {
+          if (!hasActiveSessionMeta()) {
             isAppAuthenticated.set(false);
           }
+        }
+        if (response.status === 409 && data?.error) {
+          throw new SyncConflictError(
+            data.error.message || 'تداخل نسخه همگام‌سازی روی سرور تشخیص داده شد.',
+            {
+              serverRevision: data.error.serverRevision,
+              updatedAt: data.error.updatedAt,
+              lastActor: data.error.lastActor,
+              lastAction: data.error.lastAction
+            }
+          );
         }
         const message =
           data?.error?.message || `خطای ارتباط با سرور (${response.status})`;
         throw new Error(message);
       }
+
       backendStatus.set('connected');
+      if (data && typeof data.revision === 'number') {
+        this.setLastKnownRevision(data.revision);
+      }
       return data as T;
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') {
@@ -127,33 +174,44 @@ export class ApiClient {
   }
 
   public async getSyncMeta(): Promise<ServerSyncMeta | null> {
-    if (!getActiveSessionToken()) return null;
+    if (!hasActiveSessionMeta()) return null;
     try {
-      return await this.request<ServerSyncMeta>('/api/sync/meta', {
+      const meta = await this.request<ServerSyncMeta>('/api/sync/meta', {
         method: 'GET'
       });
+      if (meta && typeof meta.revision === 'number') {
+        this.setLastKnownRevision(meta.revision);
+      }
+      return meta;
     } catch {
       return null;
     }
   }
 
   public async pullFullStateFromServer(): Promise<{
+    revision?: number;
     updatedAt: string;
     state: BackupData;
   }> {
-    return this.request<{ updatedAt: string; state: BackupData }>(
-      '/api/sync/state',
-      { method: 'GET' },
-      12000
-    );
+    const res = await this.request<{
+      revision?: number;
+      updatedAt: string;
+      state: BackupData;
+    }>('/api/sync/state', { method: 'GET' }, 12000);
+    if (res && typeof res.revision === 'number') {
+      this.setLastKnownRevision(res.revision);
+    }
+    return res;
   }
 
   public async pushFullStateToServer(
     backup: BackupData,
     actor: string,
-    actionSummary: string
+    actionSummary: string,
+    forceOverwrite = false
   ): Promise<{
     ok: boolean;
+    revision?: number;
     updatedAt: string;
     snapshotId: string;
   }> {
@@ -164,6 +222,8 @@ export class ApiClient {
         body: JSON.stringify({
           actor,
           actionSummary,
+          baseRevision: this.lastKnownRevision,
+          forceOverwrite,
           state: backup
         })
       },
@@ -184,6 +244,7 @@ export class ApiClient {
     actor: string
   ): Promise<{
     ok: boolean;
+    revision?: number;
     updatedAt: string;
     state: BackupData;
   }> {
@@ -198,7 +259,7 @@ export class ApiClient {
   }
 
   public async listProducts(query = ''): Promise<Product[]> {
-    if (!getActiveSessionToken()) return [];
+    if (!hasActiveSessionMeta()) return [];
     const q = query ? `?query=${encodeURIComponent(query)}` : '';
     const res = await this.request<{ items: Product[] }>(`/api/products${q}`);
     return res.items || [];
@@ -212,7 +273,7 @@ export class ApiClient {
     supplierName?: string;
     pageSize?: number;
   }): Promise<Purchase[]> {
-    if (!getActiveSessionToken()) return [];
+    if (!hasActiveSessionMeta()) return [];
     const search = new URLSearchParams();
     if (params?.query) search.set('query', params.query);
     if (params?.dateFrom) search.set('date_from', params.dateFrom);
