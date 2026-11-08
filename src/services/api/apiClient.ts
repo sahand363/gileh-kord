@@ -76,7 +76,7 @@ export class ApiClient {
   }
 
   public setLastKnownRevision(rev: number | undefined | null): void {
-    if (typeof rev === 'number' && Number.isFinite(rev) && rev >= 0) {
+    if (typeof rev === 'number' && Number.isInteger(rev) && rev >= 0) {
       this.lastKnownRevision = rev;
     }
   }
@@ -128,6 +128,9 @@ export class ApiClient {
           }
         }
         if (response.status === 409 && data?.error) {
+          if (typeof data.error.serverRevision === 'number') {
+            this.setLastKnownRevision(data.error.serverRevision);
+          }
           throw new SyncConflictError(
             data.error.message || 'تداخل نسخه همگام‌سازی روی سرور تشخیص داده شد.',
             {
@@ -215,6 +218,19 @@ export class ApiClient {
     updatedAt: string;
     snapshotId: string;
   }> {
+    // Ensure we always send a valid integer baseRevision
+    if (this.lastKnownRevision === null) {
+      const meta = await this.getSyncMeta();
+      if (meta && typeof meta.revision === 'number' && Number.isInteger(meta.revision)) {
+        this.lastKnownRevision = meta.revision;
+      } else {
+        this.lastKnownRevision = 0;
+      }
+    }
+
+    const baseRevision = Math.max(0, Math.trunc(this.lastKnownRevision));
+    const explicitForce = Boolean(forceOverwrite);
+
     return this.request(
       '/api/sync/push',
       {
@@ -222,8 +238,8 @@ export class ApiClient {
         body: JSON.stringify({
           actor,
           actionSummary,
-          baseRevision: this.lastKnownRevision,
-          forceOverwrite,
+          baseRevision,
+          forceOverwrite: explicitForce,
           state: backup
         })
       },
