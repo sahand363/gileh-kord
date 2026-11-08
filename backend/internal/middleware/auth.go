@@ -27,8 +27,8 @@ type Session struct {
 }
 
 type loginAttemptTracker struct {
-	count        int
-	windowStart  time.Time
+	count       int
+	windowStart time.Time
 }
 
 type AuthManager struct {
@@ -43,7 +43,14 @@ type AuthManager struct {
 const (
 	maxLoginAttemptsPerWindow = 5
 	loginRateLimitWindow      = 5 * time.Minute
+	maxRateLimitMapEntries    = 5000
+	maxSessionsMapEntries     = 5000
 )
+
+var trustedProxies = map[string]bool{
+	"127.0.0.1": true,
+	"::1":       true,
+}
 
 func NewAuthManager() *AuthManager {
 	secret := make([]byte, 32)
@@ -83,16 +90,46 @@ func AuditLog(event, actor, ip, detail string) {
 	log.Printf("[AUDIT] event=%s actor=%q ip=%q detail=%q", event, cleanActor, cleanIP, detail)
 }
 
+// extractClientIP only trusts X-Real-IP / X-Forwarded-For when the direct peer is a trusted loopback proxy.
 func extractClientIP(r *http.Request) string {
+	peerHost, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil || peerHost == "" {
+		peerHost = strings.TrimSpace(r.RemoteAddr)
+	}
+
+	if !trustedProxies[peerHost] {
+		return peerHost
+	}
+
+	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" && !strings.Contains(realIP, ",") {
+		return realIP
+	}
+
 	if xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); xff != "" {
 		parts := strings.Split(xff, ",")
-		return strings.TrimSpace(parts[0])
+		for i := len(parts) - 1; i >= 0; i-- {
+			candidate := strings.TrimSpace(parts[i])
+			if candidate != "" && !trustedProxies[candidate] {
+				return candidate
+			}
+		}
 	}
-	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
-	if err == nil && host != "" {
-		return host
+
+	return peerHost
+}
+
+func (am *AuthManager) sweepExpiredRateLimitsLocked(now time.Time) {
+	for ip, tracker := range am.loginAttempts {
+		if now.Sub(tracker.windowStart) > loginRateLimitWindow {
+			delete(am.loginAttempts, ip)
+		}
 	}
-	return r.RemoteAddr
+	if len(am.loginAttempts) >= maxRateLimitMapEntries {
+		for ip := range am.loginAttempts {
+			delete(am.loginAttempts, ip)
+			break
+		}
+	}
 }
 
 func (am *AuthManager) isRateLimited(ip string) bool {
@@ -114,6 +151,9 @@ func (am *AuthManager) recordFailedLogin(ip string) {
 	now := time.Now()
 	tracker, exists := am.loginAttempts[ip]
 	if !exists || now.Sub(tracker.windowStart) > loginRateLimitWindow {
+		if len(am.loginAttempts) >= maxRateLimitMapEntries {
+			am.sweepExpiredRateLimitsLocked(now)
+		}
 		am.loginAttempts[ip] = &loginAttemptTracker{count: 1, windowStart: now}
 		return
 	}
@@ -205,9 +245,17 @@ func (am *AuthManager) IssueSession(username string, duration time.Duration) (st
 
 	idHash := sha256.Sum256([]byte(sessionID))
 	key := hex.EncodeToString(idHash[:])
-	expiresAt := time.Now().Add(duration)
+	now := time.Now()
+	expiresAt := now.Add(duration)
 
 	am.mu.Lock()
+	if len(am.sessions) >= maxSessionsMapEntries {
+		for k, s := range am.sessions {
+			if now.After(s.ExpiresAt) {
+				delete(am.sessions, k)
+			}
+		}
+	}
 	am.sessions[key] = Session{
 		SessionID: sessionID,
 		Username:  username,
@@ -269,8 +317,20 @@ func verifyCSRFAndOrigin(r *http.Request, sess *Session) bool {
 	return subtle.ConstantTimeCompare([]byte(providedCSRF), []byte(sess.CSRFToken)) == 1
 }
 
+func applySecurityHeaders(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+	h.Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload")
+	h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("X-Frame-Options", "DENY")
+	h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
+	h.Set("Cross-Origin-Opener-Policy", "same-origin")
+}
+
 func (am *AuthManager) RequireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		applySecurityHeaders(w)
 		ip := extractClientIP(r)
 		sess, ok := am.ValidateRequest(r)
 		if !ok {
@@ -291,6 +351,7 @@ func (am *AuthManager) RequireAuth(next http.Handler) http.Handler {
 }
 
 func (am *AuthManager) HandleLogin(w http.ResponseWriter, r *http.Request) {
+	applySecurityHeaders(w)
 	if r.Method != http.MethodPost {
 		handlers.Error(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -349,13 +410,13 @@ func (am *AuthManager) HandleLogin(w http.ResponseWriter, r *http.Request) {
 
 	AuditLog("AUTH_LOGIN_SUCCESS", expectedUser, ip, "session issued")
 
-	isHTTPS := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+	isHTTPS := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" || os.Getenv("ENFORCE_HTTPS") == "true"
 	http.SetCookie(w, &http.Cookie{
 		Name:     "gk_session",
 		Value:    signedToken,
 		Path:     "/",
 		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
+		SameSite: http.SameSiteStrictMode,
 		Secure:   isHTTPS,
 		MaxAge:   days * 86400,
 	})
@@ -364,11 +425,11 @@ func (am *AuthManager) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   isHTTPS,
 		MaxAge:   -1,
 	})
 
-	// Do NOT expose the session token in the JSON response body
 	handlers.JSON(w, http.StatusOK, handlers.Envelope{
 		"ok":        true,
 		"username":  expectedUser,
