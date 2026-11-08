@@ -12,19 +12,30 @@ const HOST = process.env.HOST || '0.0.0.0';
 const DIST_DIR = path.resolve(__dirname, 'dist');
 const DATA_DIR = process.env.GILEH_DATA_DIR || path.resolve(__dirname, 'data');
 const ADMIN_USER = (process.env.ADMIN_USER || '').trim();
-const ADMIN_PASS = (process.env.ADMIN_PASS || '').trim();
+const ADMIN_PASS_HASH = (process.env.ADMIN_PASS_HASH || '').trim();
+const LEGACY_ADMIN_PASS = (process.env.ADMIN_PASS || '').trim();
 const MANAGERS_FILE = process.env.MANAGERS_FILE || '/etc/gileh-kord/managers.conf';
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 const SERVER_STORE_FILE = path.join(DATA_DIR, 'server_synced_store.json');
 const SNAPSHOTS_FILE = path.join(DATA_DIR, 'server_snapshots.json');
 const SESSIONS_FILE = path.join(DATA_DIR, 'server_sessions.json');
+const SECRET_KEY_FILE = path.join(DATA_DIR, 'server_hmac_secret.key');
+const LOCAL_MANAGERS_FALLBACK = path.join(DATA_DIR, 'managers.conf');
 const MAX_SNAPSHOTS = 30;
 
-// Rate limiting for /api/auth/login (Max 5 failed attempts per 5 minutes per IP)
+// Scrypt parameters (OWASP recommended interactive parameters)
+const SCRYPT_N = 16384;
+const SCRYPT_R = 8;
+const SCRYPT_P = 1;
+const SCRYPT_KEYLEN = 64;
+
+// Brute-force rate limiting (5 failed attempts per 5 minutes per IP)
 const LOGIN_WINDOW_MS = 5 * 60 * 1000;
 const MAX_LOGIN_ATTEMPTS = 5;
 const loginAttemptsByIp = new Map();
+
+const INSECURE_PASSWORDS = new Set(['admin1234', 'admin', '123456', 'password', '']);
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -38,45 +49,175 @@ const MIME_TYPES = {
   '.woff2': 'font/woff2'
 };
 
-const INSECURE_PASSWORDS = new Set(['admin1234', 'admin', '123456', 'password', '']);
+// ============================================================================
+// Cryptographic Primitives: Salted scrypt & Constant-Time HMAC
+// ============================================================================
 
-function constantTimeStringEqual(a, b) {
-  const hashA = crypto.createHash('sha256').update(String(a)).digest();
-  const hashB = crypto.createHash('sha256').update(String(b)).digest();
-  return crypto.timingSafeEqual(hashA, hashB) && String(a).length === String(b).length;
+function loadOrCreateServerSecret() {
+  try {
+    if (fs.existsSync(SECRET_KEY_FILE)) {
+      const hex = fs.readFileSync(SECRET_KEY_FILE, 'utf-8').trim();
+      if (hex.length >= 64) {
+        return Buffer.from(hex, 'hex');
+      }
+    }
+  } catch {
+    // Generate new key below
+  }
+  const secret = crypto.randomBytes(32);
+  try {
+    fs.writeFileSync(SECRET_KEY_FILE, secret.toString('hex'), {
+      encoding: 'utf-8',
+      mode: 0o600
+    });
+  } catch {
+    // Keep in-memory secret if filesystem is read-only
+  }
+  return secret;
 }
 
-function loadConfiguredManagers() {
-  const managers = new Map();
+const SERVER_HMAC_SECRET = loadOrCreateServerSecret();
 
-  if (ADMIN_USER && ADMIN_PASS && !INSECURE_PASSWORDS.has(ADMIN_PASS.toLowerCase())) {
-    managers.set(ADMIN_USER.toLowerCase(), {
-      username: ADMIN_USER,
-      password: ADMIN_PASS
-    });
+function constantTimeHexEqual(hexA, hexB) {
+  if (typeof hexA !== 'string' || typeof hexB !== 'string') return false;
+  if (hexA.length !== hexB.length || hexA.length === 0 || hexA.length % 2 !== 0) {
+    return false;
   }
+  try {
+    const bufA = Buffer.from(hexA, 'hex');
+    const bufB = Buffer.from(hexB, 'hex');
+    if (bufA.length !== bufB.length || bufA.length === 0) return false;
+    return crypto.timingSafeEqual(bufA, bufB);
+  } catch {
+    return false;
+  }
+}
+
+export function hashPasswordScrypt(plainPassword) {
+  const salt = crypto.randomBytes(16);
+  const derived = crypto.scryptSync(
+    String(plainPassword),
+    salt,
+    SCRYPT_KEYLEN,
+    { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P }
+  );
+  return `scrypt$${SCRYPT_N}$${SCRYPT_R}$${SCRYPT_P}$${salt.toString('hex')}$${derived.toString('hex')}`;
+}
+
+export function verifyPasswordScrypt(plainPassword, storedHash) {
+  if (!plainPassword || !storedHash || typeof storedHash !== 'string') {
+    return false;
+  }
+  const parts = storedHash.trim().split('$');
+  if (parts.length !== 6 || parts[0] !== 'scrypt') {
+    return false;
+  }
+  const N = Number(parts[1]);
+  const r = Number(parts[2]);
+  const p = Number(parts[3]);
+  const saltHex = parts[4];
+  const expectedHashHex = parts[5];
+
+  if (!N || !r || !p || !saltHex || !expectedHashHex) return false;
+  if (N > 65536 || r > 16 || p > 4) return false;
 
   try {
-    if (fs.existsSync(MANAGERS_FILE)) {
-      const lines = fs.readFileSync(MANAGERS_FILE, 'utf-8').split(/\r?\n/);
+    const salt = Buffer.from(saltHex, 'hex');
+    const expectedBuf = Buffer.from(expectedHashHex, 'hex');
+    if (salt.length < 8 || expectedBuf.length < 32) return false;
+
+    const derived = crypto.scryptSync(
+      String(plainPassword),
+      salt,
+      expectedBuf.length,
+      { N, r, p }
+    );
+    return crypto.timingSafeEqual(derived, expectedBuf);
+  } catch {
+    return false;
+  }
+}
+
+function resolveManagersFilePath() {
+  try {
+    const dir = path.dirname(MANAGERS_FILE);
+    if (fs.existsSync(dir)) return MANAGERS_FILE;
+  } catch {
+    // Fallback to DATA_DIR
+  }
+  return LOCAL_MANAGERS_FALLBACK;
+}
+
+/**
+ * Loads manager accounts and automatically migrates any legacy non-default plaintext
+ * password into a salted scrypt hash on disk so plaintext is never retained.
+ */
+function loadAndMigrateManagers() {
+  const managers = new Map();
+  const targetFile = resolveManagersFilePath();
+  let needsRewrite = false;
+
+  if (fs.existsSync(targetFile)) {
+    try {
+      const lines = fs.readFileSync(targetFile, 'utf-8').split(/\r?\n/);
       for (const line of lines) {
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith('#')) continue;
         const sepIdx = trimmed.indexOf(':');
         if (sepIdx === -1) continue;
         const u = trimmed.slice(0, sepIdx).trim();
-        const p = trimmed.slice(sepIdx + 1).trim();
-        if (u && p && !INSECURE_PASSWORDS.has(p.toLowerCase())) {
-          managers.set(u.toLowerCase(), { username: u, password: p });
+        const secretVal = trimmed.slice(sepIdx + 1).trim();
+        if (!u || !secretVal) continue;
+
+        if (secretVal.startsWith('scrypt$')) {
+          managers.set(u.toLowerCase(), { username: u, passHash: secretVal });
+        } else if (!INSECURE_PASSWORDS.has(secretVal.toLowerCase())) {
+          // One-way migration from legacy plaintext to salted scrypt hash
+          const hashed = hashPasswordScrypt(secretVal);
+          managers.set(u.toLowerCase(), { username: u, passHash: hashed });
+          needsRewrite = true;
         }
       }
+    } catch {
+      // Ignore read errors
     }
-  } catch {
-    // Ignore file read errors; fail closed if map remains empty
+  }
+
+  if (ADMIN_USER) {
+    const key = ADMIN_USER.toLowerCase();
+    if (ADMIN_PASS_HASH && ADMIN_PASS_HASH.startsWith('scrypt$')) {
+      if (!managers.has(key)) {
+        managers.set(key, { username: ADMIN_USER, passHash: ADMIN_PASS_HASH });
+        needsRewrite = true;
+      }
+    } else if (
+      LEGACY_ADMIN_PASS &&
+      !INSECURE_PASSWORDS.has(LEGACY_ADMIN_PASS.toLowerCase()) &&
+      !managers.has(key)
+    ) {
+      const hashed = hashPasswordScrypt(LEGACY_ADMIN_PASS);
+      managers.set(key, { username: ADMIN_USER, passHash: hashed });
+      needsRewrite = true;
+    }
+  }
+
+  if (needsRewrite && managers.size > 0) {
+    try {
+      const serialized = Array.from(managers.values())
+        .map((m) => `${m.username}:${m.passHash}`)
+        .join('\n') + '\n';
+      fs.writeFileSync(targetFile, serialized, { encoding: 'utf-8', mode: 0o600 });
+    } catch {
+      // Ignore if unprivileged
+    }
   }
 
   return managers;
 }
+
+// Run migration check once on boot
+const DUMMY_SCRYPT_HASH = hashPasswordScrypt('dummy_timing_defense_password_value');
+loadAndMigrateManagers();
 
 function verifyManagerCredentials(username, password) {
   const cleanUser = String(username || '').trim();
@@ -85,19 +226,19 @@ function verifyManagerCredentials(username, password) {
     return { ok: false, reason: 'invalid_input' };
   }
 
-  const managers = loadConfiguredManagers();
+  const managers = loadAndMigrateManagers();
   if (managers.size === 0) {
     return { ok: false, reason: 'not_configured' };
   }
 
   const record = managers.get(cleanUser.toLowerCase());
   if (!record) {
-    // Perform dummy hash comparison to mitigate username enumeration timing
-    constantTimeStringEqual(cleanPass, 'dummy_secret_value_for_timing');
+    // Constant-time dummy scrypt evaluation to prevent username enumeration
+    verifyPasswordScrypt(cleanPass, DUMMY_SCRYPT_HASH);
     return { ok: false, reason: 'invalid_credentials' };
   }
 
-  if (constantTimeStringEqual(cleanPass, record.password)) {
+  if (verifyPasswordScrypt(cleanPass, record.passHash)) {
     return { ok: true, username: record.username };
   }
 
@@ -105,8 +246,42 @@ function verifyManagerCredentials(username, password) {
 }
 
 // ============================================================================
-// Server-Managed Session Store
+// Cryptographically Signed Server-Side Sessions & CSRF Tokens
 // ============================================================================
+
+function signSessionId(sessionId) {
+  const mac = crypto
+    .createHmac('sha256', SERVER_HMAC_SECRET)
+    .update(String(sessionId))
+    .digest('hex');
+  return `${sessionId}.${mac}`;
+}
+
+function verifySignedSessionToken(signedToken) {
+  if (!signedToken || typeof signedToken !== 'string') return null;
+  const dotIdx = signedToken.indexOf('.');
+  if (dotIdx <= 0) return null;
+
+  const sessionId = signedToken.slice(0, dotIdx);
+  const providedMac = signedToken.slice(dotIdx + 1);
+  if (!/^[a-f0-9]{64}$/i.test(sessionId) || !/^[a-f0-9]{64}$/i.test(providedMac)) {
+    return null;
+  }
+
+  const expectedMac = crypto
+    .createHmac('sha256', SERVER_HMAC_SECRET)
+    .update(sessionId)
+    .digest('hex');
+
+  if (!constantTimeHexEqual(providedMac, expectedMac)) {
+    return null;
+  }
+  return sessionId;
+}
+
+function hashValueSha256(val) {
+  return crypto.createHash('sha256').update(String(val)).digest('hex');
+}
 
 function readSessions() {
   try {
@@ -114,15 +289,15 @@ function readSessions() {
       const raw = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf-8'));
       const now = Date.now();
       const valid = {};
-      for (const [tokenHash, session] of Object.entries(raw || {})) {
+      for (const [idHash, session] of Object.entries(raw || {})) {
         if (session && typeof session.expiresAt === 'number' && session.expiresAt > now) {
-          valid[tokenHash] = session;
+          valid[idHash] = session;
         }
       }
       return valid;
     }
   } catch {
-    // Ignore corrupted session file
+    // Ignore
   }
   return {};
 }
@@ -134,39 +309,39 @@ function writeSessions(sessions) {
       mode: 0o600
     });
   } catch {
-    // Ignore write error
+    // Ignore
   }
 }
 
-function hashSessionToken(rawToken) {
-  return crypto.createHash('sha256').update(String(rawToken)).digest('hex');
-}
-
 function createServerSession(username, rememberDays = 30) {
-  const rawToken = crypto.randomBytes(32).toString('hex');
-  const tokenHash = hashSessionToken(rawToken);
+  const sessionId = crypto.randomBytes(32).toString('hex');
+  const signedToken = signSessionId(sessionId);
+  const csrfToken = crypto.randomBytes(32).toString('hex');
+
+  const idHash = hashValueSha256(sessionId);
   const clampedDays = Math.min(30, Math.max(1, Number(rememberDays) || 1));
   const maxAgeSeconds = clampedDays * 24 * 60 * 60;
   const now = Date.now();
   const expiresAt = now + maxAgeSeconds * 1000;
 
   const sessions = readSessions();
-  sessions[tokenHash] = {
+  sessions[idHash] = {
     username,
+    csrfToken,
     createdAt: new Date(now).toISOString(),
     expiresAt
   };
   writeSessions(sessions);
 
-  return { rawToken, maxAgeSeconds, expiresAt };
+  return { signedToken, csrfToken, maxAgeSeconds, expiresAt };
 }
 
-function revokeServerSession(rawToken) {
-  if (!rawToken) return;
-  const tokenHash = hashSessionToken(rawToken);
+function revokeServerSession(sessionId) {
+  if (!sessionId) return;
+  const idHash = hashValueSha256(sessionId);
   const sessions = readSessions();
-  if (sessions[tokenHash]) {
-    delete sessions[tokenHash];
+  if (sessions[idHash]) {
+    delete sessions[idHash];
     writeSessions(sessions);
   }
 }
@@ -179,35 +354,105 @@ function parseCookies(cookieHeader) {
     if (idx === -1) continue;
     const k = part.slice(0, idx).trim();
     const v = part.slice(idx + 1).trim();
-    list[k] = decodeURIComponent(v);
+    try {
+      list[k] = decodeURIComponent(v);
+    } catch {
+      list[k] = v;
+    }
   }
   return list;
 }
 
-function extractRequestToken(req) {
-  const authHeader = req.headers['authorization'] || '';
-  if (typeof authHeader === 'string' && authHeader.toLowerCase().startsWith('bearer ')) {
-    const bearer = authHeader.slice(7).trim();
-    if (bearer) return bearer;
-  }
+function extractSignedToken(req) {
   const cookies = parseCookies(req.headers.cookie);
   if (cookies.gk_session) {
     return cookies.gk_session;
+  }
+  const authHeader = req.headers['authorization'] || '';
+  if (typeof authHeader === 'string' && authHeader.toLowerCase().startsWith('bearer ')) {
+    return authHeader.slice(7).trim();
   }
   return null;
 }
 
 function getAuthenticatedSession(req) {
-  const rawToken = extractRequestToken(req);
-  if (!rawToken || rawToken.length < 32) return null;
+  const signedToken = extractSignedToken(req);
+  const sessionId = verifySignedSessionToken(signedToken);
+  if (!sessionId) return null;
 
-  const tokenHash = hashSessionToken(rawToken);
+  const idHash = hashValueSha256(sessionId);
   const sessions = readSessions();
-  const session = sessions[tokenHash];
+  const session = sessions[idHash];
   if (!session || session.expiresAt <= Date.now()) {
     return null;
   }
-  return { ...session, rawToken };
+  return { ...session, sessionId, signedToken };
+}
+
+/**
+ * Verifies CSRF protection for state-changing requests (POST, PUT, DELETE, PATCH):
+ * 1. Validates Origin / Referer header matches the host when present.
+ * 2. Verifies X-CSRF-Token header against the session's cryptographic csrfToken in constant time.
+ */
+function verifyCsrfProtection(req, activeSession) {
+  const method = (req.method || 'GET').toUpperCase();
+  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') {
+    return { ok: true };
+  }
+
+  const host = (req.headers['x-forwarded-host'] || req.headers.host || '').toString().trim();
+  const origin = (req.headers.origin || '').toString().trim();
+  const referer = (req.headers.referer || '').toString().trim();
+
+  if (origin && host) {
+    try {
+      const originHost = new URL(origin).host;
+      if (originHost !== host) {
+        return { ok: false, reason: 'Cross-origin request rejected (Origin mismatch)' };
+      }
+    } catch {
+      return { ok: false, reason: 'Malformed Origin header' };
+    }
+  } else if (referer && host) {
+    try {
+      const refererHost = new URL(referer).host;
+      if (refererHost !== host) {
+        return { ok: false, reason: 'Cross-origin request rejected (Referer mismatch)' };
+      }
+    } catch {
+      return { ok: false, reason: 'Malformed Referer header' };
+    }
+  }
+
+  if (!activeSession || !activeSession.csrfToken) {
+    return { ok: false, reason: 'Missing session CSRF context' };
+  }
+
+  const providedCsrf = (req.headers['x-csrf-token'] || '').toString().trim();
+  if (!constantTimeHexEqual(providedCsrf, activeSession.csrfToken)) {
+    return { ok: false, reason: 'توکن امنیتی CSRF نامعتبر است یا منقضی شده است.' };
+  }
+
+  return { ok: true };
+}
+
+function buildCookieHeaders(req, signedToken, maxAgeSeconds) {
+  const isHttps =
+    req.headers['x-forwarded-proto'] === 'https' || Boolean(req.socket.encrypted);
+  const sessionCookie = [
+    `gk_session=${encodeURIComponent(signedToken)}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    `Max-Age=${maxAgeSeconds}`
+  ];
+  if (isHttps) {
+    sessionCookie.push('Secure');
+  }
+  // Explicitly expire any legacy insecure gk_app_auth cookie
+  const purgeLegacyCookie =
+    'gk_app_auth=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0';
+  return [sessionCookie.join('; '), purgeLegacyCookie];
 }
 
 function isClientRateLimited(ip) {
@@ -351,25 +596,11 @@ function sendJson(res, status, payload, extraHeaders = {}) {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
     ...extraHeaders
   });
   res.end(JSON.stringify(payload));
-}
-
-function buildSessionCookieHeader(req, token, maxAgeSeconds) {
-  const isHttps =
-    req.headers['x-forwarded-proto'] === 'https' || Boolean(req.socket.encrypted);
-  const parts = [
-    `gk_session=${encodeURIComponent(token)}`,
-    'Path=/',
-    'HttpOnly',
-    'SameSite=Lax',
-    `Max-Age=${maxAgeSeconds}`
-  ];
-  if (isHttps) {
-    parts.push('Secure');
-  }
-  return parts.join('; ');
 }
 
 const server = http.createServer(async (req, res) => {
@@ -382,7 +613,7 @@ const server = http.createServer(async (req, res) => {
 
   if (pathname.startsWith('/api/')) {
     let rawBody = Buffer.alloc(0);
-    if (req.method === 'POST' || req.method === 'PUT') {
+    if (req.method === 'POST' || req.method === 'PUT' || req.method === 'DELETE') {
       try {
         rawBody = await readRawBody(req);
       } catch {
@@ -391,7 +622,6 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    // Public Health Check (Redacted: does not expose filesystem paths)
     if (pathname === '/api/health' || pathname === '/api/status') {
       sendJson(res, 200, {
         app: 'GILEH KORD',
@@ -401,7 +631,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // Public Authentication Endpoint with Brute-Force Protection
+    // Login Endpoint: Verifies salted scrypt hash & issues HMAC-signed session + CSRF token
     if (pathname === '/api/auth/login' && req.method === 'POST') {
       if (isClientRateLimited(clientIp)) {
         sendJson(res, 429, {
@@ -427,7 +657,7 @@ const server = http.createServer(async (req, res) => {
             error: {
               code: 503,
               message:
-                'رمز عبور امن روی سرور تنظیم نشده است. در ترمینال سرور دستور sudo gk را اجرا کرده و از گزینه ۸ رمز عبور مدیر را تعیین کنید.'
+                'حساب مدیر روی سرور تنظیم نشده است. در ترمینال سرور دستور sudo gk را اجرا کرده و از گزینه ۸ رمز عبور مدیر را تعیین کنید.'
             }
           });
           return;
@@ -447,9 +677,9 @@ const server = http.createServer(async (req, res) => {
 
         clearFailedLoginAttempts(clientIp);
         const session = createServerSession(verification.username, rememberDays);
-        const cookieHeader = buildSessionCookieHeader(
+        const cookieHeaders = buildCookieHeaders(
           req,
-          session.rawToken,
+          session.signedToken,
           session.maxAgeSeconds
         );
 
@@ -459,10 +689,11 @@ const server = http.createServer(async (req, res) => {
           {
             ok: true,
             username: verification.username,
-            token: session.rawToken,
+            token: session.signedToken,
+            csrfToken: session.csrfToken,
             expiresAt: session.expiresAt
           },
-          { 'Set-Cookie': cookieHeader }
+          { 'Set-Cookie': cookieHeaders }
         );
       } catch {
         sendJson(res, 400, {
@@ -473,13 +704,25 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // All endpoints below require a valid server-verified session
+    // Require valid HMAC-signed server session for all other /api/* routes
     const activeSession = getAuthenticatedSession(req);
     if (!activeSession) {
       sendJson(res, 401, {
         error: {
           code: 401,
-          message: 'دسترسی غیرمجاز. لطفاً ابتدا وارد حساب کاربری خود شوید.'
+          message: 'نشست کاربری معتبر نیست یا منقضی شده است. لطفاً مجدداً وارد شوید.'
+        }
+      });
+      return;
+    }
+
+    // Enforce CSRF token & Origin check on all state-changing operations
+    const csrfCheck = verifyCsrfProtection(req, activeSession);
+    if (!csrfCheck.ok) {
+      sendJson(res, 403, {
+        error: {
+          code: 403,
+          message: csrfCheck.reason || 'درخواست به دلیل محافظت امنیتی CSRF رد شد.'
         }
       });
       return;
@@ -489,19 +732,19 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 200, {
         ok: true,
         username: activeSession.username,
+        csrfToken: activeSession.csrfToken,
         expiresAt: activeSession.expiresAt
       });
       return;
     }
 
     if (pathname === '/api/auth/logout' && req.method === 'POST') {
-      revokeServerSession(activeSession.rawToken);
-      const clearCookie = buildSessionCookieHeader(req, '', 0);
-      sendJson(res, 200, { ok: true }, { 'Set-Cookie': clearCookie });
+      revokeServerSession(activeSession.sessionId);
+      const clearCookies = buildCookieHeaders(req, '', 0);
+      sendJson(res, 200, { ok: true }, { 'Set-Cookie': clearCookies });
       return;
     }
 
-    // 1. Authenticated Sync Metadata
     if (pathname === '/api/sync/meta' && req.method === 'GET') {
       const store = readServerStore();
       sendJson(res, 200, {
@@ -518,7 +761,6 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // 2. Authenticated Full State Pull
     if (pathname === '/api/sync/state' && req.method === 'GET') {
       const store = readServerStore();
       sendJson(res, 200, {
@@ -541,7 +783,6 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // 3. Authenticated Full State Push & Backup Import
     if (
       (pathname === '/api/sync/push' || pathname === '/api/import/backup') &&
       req.method === 'POST'
@@ -549,7 +790,6 @@ const server = http.createServer(async (req, res) => {
       try {
         const body = JSON.parse(rawBody.toString('utf-8') || '{}');
         const incoming = body.state ? body.state : body;
-        // Actor is bound to the authenticated server session username
         const actor = activeSession.username;
         const actionSummary = String(
           body.actionSummary || 'همگام‌سازی کامل اطلاعات'
@@ -594,7 +834,6 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // 4. Authenticated Snapshot History
     if (pathname === '/api/sync/history' && req.method === 'GET') {
       const snaps = readSnapshots().map((s) => ({
         id: s.id,
@@ -607,7 +846,6 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // 5. Authenticated Snapshot Revert
     if (pathname === '/api/sync/revert' && req.method === 'POST') {
       try {
         const body = JSON.parse(rawBody.toString('utf-8') || '{}');
@@ -663,7 +901,6 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // 6. Authenticated Products & Purchases Endpoints
     if (pathname === '/api/products' && req.method === 'GET') {
       const store = readServerStore();
       sendJson(res, 200, { items: store.products });
