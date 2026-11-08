@@ -6,6 +6,7 @@ import type {
   SyncSnapshotMeta
 } from '../../models/types';
 import {
+  getActiveCsrfToken,
   getActiveSessionToken,
   isAppAuthenticated,
   isManagerUnlocked
@@ -62,9 +63,15 @@ export class ApiClient {
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     const token = getActiveSessionToken();
-    const authHeaders: Record<string, string> = {};
+    const csrfToken = getActiveCsrfToken();
+    const securityHeaders: Record<string, string> = {
+      'X-Requested-With': 'XMLHttpRequest'
+    };
     if (token) {
-      authHeaders['Authorization'] = `Bearer ${token}`;
+      securityHeaders['Authorization'] = `Bearer ${token}`;
+    }
+    if (csrfToken) {
+      securityHeaders['X-CSRF-Token'] = csrfToken;
     }
 
     try {
@@ -74,7 +81,7 @@ export class ApiClient {
         headers: {
           'Content-Type': 'application/json',
           Accept: 'application/json',
-          ...authHeaders,
+          ...securityHeaders,
           ...((init?.headers as Record<string, string>) || {})
         },
         signal: controller.signal
