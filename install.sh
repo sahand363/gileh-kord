@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# GILEH KORD - Hardened SSH Control Panel (Salted scrypt Password Storage)
+# GILEH KORD - Hardened SSH Control Panel (Salted scrypt & Trusted Proxy)
 # =============================================================================
 
 set -u
@@ -68,9 +68,15 @@ hash_password_scrypt() {
       process.stdout.write(`scrypt$16384$8$1$${salt.toString("hex")}$${dk.toString("hex")}`);
     '
   else
-    # If called before Node is installed, install_system_dependencies runs first in option_install
     echo ""
   fi
+}
+
+is_ssl_configured() {
+  if [[ -n "${DOMAIN:-}" && -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" && -f "/etc/letsencrypt/live/${DOMAIN}/privkey.pem" ]]; then
+    return 0
+  fi
+  return 1
 }
 
 load_or_init_config() {
@@ -89,9 +95,11 @@ load_or_init_config() {
 PORT=${rand_port}
 HOST=0.0.0.0
 DOMAIN=${DEFAULT_DOMAIN}
+ENFORCE_HTTPS=false
+TRUSTED_PROXIES=127.0.0.1,::1
 GILEH_DATA_DIR=${DATA_DIR}
 ADMIN_USER=${INITIAL_ADMIN_USER}
-ADMIN_PASS_HASH=${pass_hash}
+ADMIN_PASS_HASH='${pass_hash}'
 MANAGERS_FILE=${MANAGERS_FILE}
 EOF
     chmod 600 "${CONFIG_FILE}"
@@ -109,6 +117,13 @@ EOF
   fi
   ADMIN_USER="${ADMIN_USER:-$INITIAL_ADMIN_USER}"
   ADMIN_PASS_HASH="${ADMIN_PASS_HASH:-}"
+  ENFORCE_HTTPS="${ENFORCE_HTTPS:-false}"
+  TRUSTED_PROXIES="${TRUSTED_PROXIES:-127.0.0.1,::1}"
+
+  # Automatically enable ENFORCE_HTTPS if Let's Encrypt SSL certificates exist for DOMAIN
+  if is_ssl_configured; then
+    ENFORCE_HTTPS="true"
+  fi
 
   # Migrate any legacy plaintext ADMIN_PASS in config.env to salted scrypt ADMIN_PASS_HASH
   if [[ -z "${ADMIN_PASS_HASH}" && -n "${ADMIN_PASS:-}" && "${ADMIN_PASS}" != "admin1234" ]]; then
@@ -121,8 +136,10 @@ EOF
     ADMIN_PASS_HASH=$(hash_password_scrypt "${new_pass}")
     unset ADMIN_PASS
     save_config_file
-    echo "${ADMIN_USER}:${ADMIN_PASS_HASH}" > "${MANAGERS_FILE}"
-    chmod 600 "${MANAGERS_FILE}"
+    if [[ -n "${ADMIN_PASS_HASH}" ]]; then
+      echo "${ADMIN_USER}:${ADMIN_PASS_HASH}" > "${MANAGERS_FILE}"
+      chmod 600 "${MANAGERS_FILE}"
+    fi
     log_warn "Replaced insecure password with new strong password for '${ADMIN_USER}': ${new_pass}"
   fi
 
@@ -133,10 +150,18 @@ EOF
 }
 
 save_config_file() {
+  if is_ssl_configured; then
+    ENFORCE_HTTPS="true"
+  else
+    ENFORCE_HTTPS="${ENFORCE_HTTPS:-false}"
+  fi
+
   cat > "${CONFIG_FILE}" <<EOF
 PORT=${PORT}
 HOST=0.0.0.0
 DOMAIN=${DOMAIN}
+ENFORCE_HTTPS=${ENFORCE_HTTPS}
+TRUSTED_PROXIES=${TRUSTED_PROXIES:-127.0.0.1,::1}
 GILEH_DATA_DIR=${DATA_DIR}
 ADMIN_USER=${ADMIN_USER}
 ADMIN_PASS_HASH='${ADMIN_PASS_HASH}'
@@ -166,7 +191,7 @@ get_real_address() {
   load_or_init_config
   local server_ip
   server_ip=$(get_server_ip)
-  if [[ -n "${DOMAIN:-}" && -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" ]]; then
+  if is_ssl_configured; then
     echo "https://${DOMAIN}/"
   else
     echo "http://${server_ip}:${PORT}/"
@@ -280,7 +305,7 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-For \$remote_addr;
         proxy_set_header X-Forwarded-Proto \$scheme;
     }
 }
@@ -288,7 +313,7 @@ EOF
   ln -sf "${NGINX_IP_AVAILABLE}" "${NGINX_IP_ENABLED}"
 
   if [[ -n "${DOMAIN:-}" && "${DOMAIN}" != "_" ]]; then
-    if [[ -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" && -f "/etc/letsencrypt/live/${DOMAIN}/privkey.pem" ]]; then
+    if is_ssl_configured; then
       cat > "${NGINX_DOMAIN_AVAILABLE}" <<EOF
 server {
     listen 80;
@@ -314,12 +339,17 @@ server {
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_prefer_server_ciphers on;
 
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
     location / {
         proxy_pass http://127.0.0.1:${PORT};
         proxy_http_version 1.1;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-For \$remote_addr;
         proxy_set_header X-Forwarded-Proto https;
     }
 }
@@ -340,7 +370,7 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-For \$remote_addr;
         proxy_set_header X-Forwarded-Proto \$scheme;
     }
 }
@@ -448,7 +478,7 @@ option_manage_users() {
 
       read -r -s -p "Enter Strong Password for '${NEW_USER}' (min 8 chars): " NEW_PASS
       echo ""
-      if [[ "${#NEW_PASS}" -lt 8 || "${NEW_PASS}" == "admin1234" || "${NEW_PASS}" == "12345678" ]]; then
+      if [[ "${#NEW_PASS}" -lt 8 || "${NEW_PASS}" == "admin1234" || "${NEW_PASS}" == "12345678" || "${NEW_PASS}" == "password" ]]; then
         log_error "Password must be at least 8 characters and not a common default."
         return 1
       fi
@@ -533,8 +563,12 @@ option_setup_ssl() {
   mkdir -p /var/www/html
   setup_nginx_proxy
   if certbot certonly --webroot -w /var/www/html -d "${DOMAIN}" --non-interactive --agree-tos --register-unsafely-without-email; then
+    ENFORCE_HTTPS="true"
+    save_config_file
+    setup_systemd_service
     setup_nginx_proxy
-    log_info "SSL active! Real Address is now: https://${DOMAIN}/"
+    systemctl restart "${SERVICE_NAME}"
+    log_info "SSL active and HTTPS enforced! Real Address is now: https://${DOMAIN}/"
   else
     log_error "Certbot failed. Verify DNS A record for ${DOMAIN}."
   fi
