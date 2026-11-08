@@ -11,14 +11,20 @@ const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '0.0.0.0';
 const DIST_DIR = path.resolve(__dirname, 'dist');
 const DATA_DIR = process.env.GILEH_DATA_DIR || path.resolve(__dirname, 'data');
-const ADMIN_USER = (process.env.ADMIN_USER || 'admin').trim();
-const ADMIN_PASS = (process.env.ADMIN_PASS || 'admin1234').trim();
+const ADMIN_USER = (process.env.ADMIN_USER || '').trim();
+const ADMIN_PASS = (process.env.ADMIN_PASS || '').trim();
 const MANAGERS_FILE = process.env.MANAGERS_FILE || '/etc/gileh-kord/managers.conf';
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 const SERVER_STORE_FILE = path.join(DATA_DIR, 'server_synced_store.json');
 const SNAPSHOTS_FILE = path.join(DATA_DIR, 'server_snapshots.json');
+const SESSIONS_FILE = path.join(DATA_DIR, 'server_sessions.json');
 const MAX_SNAPSHOTS = 30;
+
+// Rate limiting for /api/auth/login (Max 5 failed attempts per 5 minutes per IP)
+const LOGIN_WINDOW_MS = 5 * 60 * 1000;
+const MAX_LOGIN_ATTEMPTS = 5;
+const loginAttemptsByIp = new Map();
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -31,6 +37,207 @@ const MIME_TYPES = {
   '.ico': 'image/x-icon',
   '.woff2': 'font/woff2'
 };
+
+const INSECURE_PASSWORDS = new Set(['admin1234', 'admin', '123456', 'password', '']);
+
+function constantTimeStringEqual(a, b) {
+  const hashA = crypto.createHash('sha256').update(String(a)).digest();
+  const hashB = crypto.createHash('sha256').update(String(b)).digest();
+  return crypto.timingSafeEqual(hashA, hashB) && String(a).length === String(b).length;
+}
+
+function loadConfiguredManagers() {
+  const managers = new Map();
+
+  if (ADMIN_USER && ADMIN_PASS && !INSECURE_PASSWORDS.has(ADMIN_PASS.toLowerCase())) {
+    managers.set(ADMIN_USER.toLowerCase(), {
+      username: ADMIN_USER,
+      password: ADMIN_PASS
+    });
+  }
+
+  try {
+    if (fs.existsSync(MANAGERS_FILE)) {
+      const lines = fs.readFileSync(MANAGERS_FILE, 'utf-8').split(/\r?\n/);
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        const sepIdx = trimmed.indexOf(':');
+        if (sepIdx === -1) continue;
+        const u = trimmed.slice(0, sepIdx).trim();
+        const p = trimmed.slice(sepIdx + 1).trim();
+        if (u && p && !INSECURE_PASSWORDS.has(p.toLowerCase())) {
+          managers.set(u.toLowerCase(), { username: u, password: p });
+        }
+      }
+    }
+  } catch {
+    // Ignore file read errors; fail closed if map remains empty
+  }
+
+  return managers;
+}
+
+function verifyManagerCredentials(username, password) {
+  const cleanUser = String(username || '').trim();
+  const cleanPass = String(password || '').trim();
+  if (!cleanUser || !cleanPass) {
+    return { ok: false, reason: 'invalid_input' };
+  }
+
+  const managers = loadConfiguredManagers();
+  if (managers.size === 0) {
+    return { ok: false, reason: 'not_configured' };
+  }
+
+  const record = managers.get(cleanUser.toLowerCase());
+  if (!record) {
+    // Perform dummy hash comparison to mitigate username enumeration timing
+    constantTimeStringEqual(cleanPass, 'dummy_secret_value_for_timing');
+    return { ok: false, reason: 'invalid_credentials' };
+  }
+
+  if (constantTimeStringEqual(cleanPass, record.password)) {
+    return { ok: true, username: record.username };
+  }
+
+  return { ok: false, reason: 'invalid_credentials' };
+}
+
+// ============================================================================
+// Server-Managed Session Store
+// ============================================================================
+
+function readSessions() {
+  try {
+    if (fs.existsSync(SESSIONS_FILE)) {
+      const raw = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf-8'));
+      const now = Date.now();
+      const valid = {};
+      for (const [tokenHash, session] of Object.entries(raw || {})) {
+        if (session && typeof session.expiresAt === 'number' && session.expiresAt > now) {
+          valid[tokenHash] = session;
+        }
+      }
+      return valid;
+    }
+  } catch {
+    // Ignore corrupted session file
+  }
+  return {};
+}
+
+function writeSessions(sessions) {
+  try {
+    fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2), {
+      encoding: 'utf-8',
+      mode: 0o600
+    });
+  } catch {
+    // Ignore write error
+  }
+}
+
+function hashSessionToken(rawToken) {
+  return crypto.createHash('sha256').update(String(rawToken)).digest('hex');
+}
+
+function createServerSession(username, rememberDays = 30) {
+  const rawToken = crypto.randomBytes(32).toString('hex');
+  const tokenHash = hashSessionToken(rawToken);
+  const clampedDays = Math.min(30, Math.max(1, Number(rememberDays) || 1));
+  const maxAgeSeconds = clampedDays * 24 * 60 * 60;
+  const now = Date.now();
+  const expiresAt = now + maxAgeSeconds * 1000;
+
+  const sessions = readSessions();
+  sessions[tokenHash] = {
+    username,
+    createdAt: new Date(now).toISOString(),
+    expiresAt
+  };
+  writeSessions(sessions);
+
+  return { rawToken, maxAgeSeconds, expiresAt };
+}
+
+function revokeServerSession(rawToken) {
+  if (!rawToken) return;
+  const tokenHash = hashSessionToken(rawToken);
+  const sessions = readSessions();
+  if (sessions[tokenHash]) {
+    delete sessions[tokenHash];
+    writeSessions(sessions);
+  }
+}
+
+function parseCookies(cookieHeader) {
+  const list = {};
+  if (!cookieHeader) return list;
+  for (const part of cookieHeader.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx === -1) continue;
+    const k = part.slice(0, idx).trim();
+    const v = part.slice(idx + 1).trim();
+    list[k] = decodeURIComponent(v);
+  }
+  return list;
+}
+
+function extractRequestToken(req) {
+  const authHeader = req.headers['authorization'] || '';
+  if (typeof authHeader === 'string' && authHeader.toLowerCase().startsWith('bearer ')) {
+    const bearer = authHeader.slice(7).trim();
+    if (bearer) return bearer;
+  }
+  const cookies = parseCookies(req.headers.cookie);
+  if (cookies.gk_session) {
+    return cookies.gk_session;
+  }
+  return null;
+}
+
+function getAuthenticatedSession(req) {
+  const rawToken = extractRequestToken(req);
+  if (!rawToken || rawToken.length < 32) return null;
+
+  const tokenHash = hashSessionToken(rawToken);
+  const sessions = readSessions();
+  const session = sessions[tokenHash];
+  if (!session || session.expiresAt <= Date.now()) {
+    return null;
+  }
+  return { ...session, rawToken };
+}
+
+function isClientRateLimited(ip) {
+  const now = Date.now();
+  const entry = loginAttemptsByIp.get(ip);
+  if (!entry) return false;
+  if (now - entry.firstAttemptAt > LOGIN_WINDOW_MS) {
+    loginAttemptsByIp.delete(ip);
+    return false;
+  }
+  return entry.count >= MAX_LOGIN_ATTEMPTS;
+}
+
+function recordFailedLoginAttempt(ip) {
+  const now = Date.now();
+  const entry = loginAttemptsByIp.get(ip);
+  if (!entry || now - entry.firstAttemptAt > LOGIN_WINDOW_MS) {
+    loginAttemptsByIp.set(ip, { count: 1, firstAttemptAt: now });
+  } else {
+    entry.count += 1;
+  }
+}
+
+function clearFailedLoginAttempts(ip) {
+  loginAttemptsByIp.delete(ip);
+}
+
+// ============================================================================
+// Data & Snapshot Persistence
+// ============================================================================
 
 function stripDemoItems(list) {
   if (!Array.isArray(list)) return [];
@@ -80,7 +287,10 @@ function readServerStore() {
 }
 
 function writeServerStore(data) {
-  fs.writeFileSync(SERVER_STORE_FILE, JSON.stringify(data, null, 2), 'utf-8');
+  fs.writeFileSync(SERVER_STORE_FILE, JSON.stringify(data, null, 2), {
+    encoding: 'utf-8',
+    mode: 0o600
+  });
 }
 
 function readSnapshots() {
@@ -112,39 +322,11 @@ function recordSnapshot(actor, actionSummary, state) {
   };
   snapshots.unshift(snap);
   const trimmed = snapshots.slice(0, MAX_SNAPSHOTS);
-  fs.writeFileSync(SNAPSHOTS_FILE, JSON.stringify(trimmed, null, 2), 'utf-8');
+  fs.writeFileSync(SNAPSHOTS_FILE, JSON.stringify(trimmed, null, 2), {
+    encoding: 'utf-8',
+    mode: 0o600
+  });
   return snap;
-}
-
-function verifyManagerCredentials(username, password) {
-  const cleanUser = String(username || '').trim().toLowerCase();
-  const cleanPass = String(password || '').trim();
-  if (!cleanUser || !cleanPass) return false;
-
-  if (cleanUser === ADMIN_USER.toLowerCase() && cleanPass === ADMIN_PASS) {
-    return true;
-  }
-
-  try {
-    if (fs.existsSync(MANAGERS_FILE)) {
-      const lines = fs.readFileSync(MANAGERS_FILE, 'utf-8').split(/\r?\n/);
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith('#')) continue;
-        const sepIdx = trimmed.indexOf(':');
-        if (sepIdx === -1) continue;
-        const u = trimmed.slice(0, sepIdx).trim().toLowerCase();
-        const p = trimmed.slice(sepIdx + 1).trim();
-        if (u === cleanUser && p === cleanPass) {
-          return true;
-        }
-      }
-    }
-  } catch {
-    // Fallback to env credentials
-  }
-
-  return false;
 }
 
 function readRawBody(req) {
@@ -165,14 +347,38 @@ function readRawBody(req) {
   });
 }
 
-function sendJson(res, status, payload) {
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+function sendJson(res, status, payload, extraHeaders = {}) {
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+    ...extraHeaders
+  });
   res.end(JSON.stringify(payload));
+}
+
+function buildSessionCookieHeader(req, token, maxAgeSeconds) {
+  const isHttps =
+    req.headers['x-forwarded-proto'] === 'https' || Boolean(req.socket.encrypted);
+  const parts = [
+    `gk_session=${encodeURIComponent(token)}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    `Max-Age=${maxAgeSeconds}`
+  ];
+  if (isHttps) {
+    parts.push('Secure');
+  }
+  return parts.join('; ');
 }
 
 const server = http.createServer(async (req, res) => {
   const reqUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
   const pathname = decodeURIComponent(reqUrl.pathname);
+  const clientIp =
+    (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() ||
+    req.socket.remoteAddress ||
+    'unknown';
 
   if (pathname.startsWith('/api/')) {
     let rawBody = Buffer.alloc(0);
@@ -180,38 +386,122 @@ const server = http.createServer(async (req, res) => {
       try {
         rawBody = await readRawBody(req);
       } catch {
-        sendJson(res, 400, { error: { message: 'بدنه درخواست نامعتبر است' } });
+        sendJson(res, 400, { error: { code: 400, message: 'بدنه درخواست نامعتبر است' } });
         return;
       }
     }
 
+    // Public Health Check (Redacted: does not expose filesystem paths)
     if (pathname === '/api/health' || pathname === '/api/status') {
       sendJson(res, 200, {
         app: 'GILEH KORD',
         status: 'ok',
-        dataDir: DATA_DIR,
         timestamp: new Date().toISOString()
       });
       return;
     }
 
+    // Public Authentication Endpoint with Brute-Force Protection
     if (pathname === '/api/auth/login' && req.method === 'POST') {
+      if (isClientRateLimited(clientIp)) {
+        sendJson(res, 429, {
+          ok: false,
+          error: {
+            code: 429,
+            message: 'تعداد تلاش‌های ناموفق بیش از حد مجاز است. لطفاً ۵ دقیقه دیگر تلاش کنید.'
+          }
+        });
+        return;
+      }
+
       try {
         const parsed = JSON.parse(rawBody.toString('utf-8') || '{}');
         const user = String(parsed.username || '').trim();
         const pass = String(parsed.password || '').trim();
-        if (verifyManagerCredentials(user, pass)) {
-          sendJson(res, 200, { ok: true, username: user });
-        } else {
-          sendJson(res, 401, { ok: false, error: 'Invalid credentials' });
+        const rememberDays = Number(parsed.rememberDays) || 30;
+
+        const verification = verifyManagerCredentials(user, pass);
+        if (verification.reason === 'not_configured') {
+          sendJson(res, 503, {
+            ok: false,
+            error: {
+              code: 503,
+              message:
+                'رمز عبور امن روی سرور تنظیم نشده است. در ترمینال سرور دستور sudo gk را اجرا کرده و از گزینه ۸ رمز عبور مدیر را تعیین کنید.'
+            }
+          });
+          return;
         }
+
+        if (!verification.ok) {
+          recordFailedLoginAttempt(clientIp);
+          sendJson(res, 401, {
+            ok: false,
+            error: {
+              code: 401,
+              message: 'نام کاربری یا رمز عبور نادرست است.'
+            }
+          });
+          return;
+        }
+
+        clearFailedLoginAttempts(clientIp);
+        const session = createServerSession(verification.username, rememberDays);
+        const cookieHeader = buildSessionCookieHeader(
+          req,
+          session.rawToken,
+          session.maxAgeSeconds
+        );
+
+        sendJson(
+          res,
+          200,
+          {
+            ok: true,
+            username: verification.username,
+            token: session.rawToken,
+            expiresAt: session.expiresAt
+          },
+          { 'Set-Cookie': cookieHeader }
+        );
       } catch {
-        sendJson(res, 400, { ok: false, error: 'Bad request' });
+        sendJson(res, 400, {
+          ok: false,
+          error: { code: 400, message: 'ساختار درخواست ورود نامعتبر است.' }
+        });
       }
       return;
     }
 
-    // 1. Check Sync Metadata (used by new browsers to ask if user wants latest data)
+    // All endpoints below require a valid server-verified session
+    const activeSession = getAuthenticatedSession(req);
+    if (!activeSession) {
+      sendJson(res, 401, {
+        error: {
+          code: 401,
+          message: 'دسترسی غیرمجاز. لطفاً ابتدا وارد حساب کاربری خود شوید.'
+        }
+      });
+      return;
+    }
+
+    if (pathname === '/api/auth/session' && req.method === 'GET') {
+      sendJson(res, 200, {
+        ok: true,
+        username: activeSession.username,
+        expiresAt: activeSession.expiresAt
+      });
+      return;
+    }
+
+    if (pathname === '/api/auth/logout' && req.method === 'POST') {
+      revokeServerSession(activeSession.rawToken);
+      const clearCookie = buildSessionCookieHeader(req, '', 0);
+      sendJson(res, 200, { ok: true }, { 'Set-Cookie': clearCookie });
+      return;
+    }
+
+    // 1. Authenticated Sync Metadata
     if (pathname === '/api/sync/meta' && req.method === 'GET') {
       const store = readServerStore();
       sendJson(res, 200, {
@@ -228,7 +518,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // 2. Pull Full State (Purchases, Revenues, Timesheets, Employees, Menu, etc.)
+    // 2. Authenticated Full State Pull
     if (pathname === '/api/sync/state' && req.method === 'GET') {
       const store = readServerStore();
       sendJson(res, 200, {
@@ -251,13 +541,19 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // 3. Push Full State & Record Revertible Snapshot
-    if ((pathname === '/api/sync/push' || pathname === '/api/import/backup') && req.method === 'POST') {
+    // 3. Authenticated Full State Push & Backup Import
+    if (
+      (pathname === '/api/sync/push' || pathname === '/api/import/backup') &&
+      req.method === 'POST'
+    ) {
       try {
         const body = JSON.parse(rawBody.toString('utf-8') || '{}');
         const incoming = body.state ? body.state : body;
-        const actor = String(body.actor || 'کاربر').trim();
-        const actionSummary = String(body.actionSummary || 'همگام‌سازی کامل اطلاعات').trim();
+        // Actor is bound to the authenticated server session username
+        const actor = activeSession.username;
+        const actionSummary = String(
+          body.actionSummary || 'همگام‌سازی کامل اطلاعات'
+        ).trim();
         const now = new Date().toISOString();
 
         const newState = {
@@ -291,12 +587,14 @@ const server = http.createServer(async (req, res) => {
           importedPurchases: newState.purchases.length
         });
       } catch {
-        sendJson(res, 400, { error: { message: 'ساختار داده ارسالی معتبر نیست' } });
+        sendJson(res, 400, {
+          error: { code: 400, message: 'ساختار داده ارسالی معتبر نیست' }
+        });
       }
       return;
     }
 
-    // 4. List Snapshots for Manager Revert Tab
+    // 4. Authenticated Snapshot History
     if (pathname === '/api/sync/history' && req.method === 'GET') {
       const snaps = readSnapshots().map((s) => ({
         id: s.id,
@@ -309,16 +607,18 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // 5. Revert to a Selected Snapshot
+    // 5. Authenticated Snapshot Revert
     if (pathname === '/api/sync/revert' && req.method === 'POST') {
       try {
         const body = JSON.parse(rawBody.toString('utf-8') || '{}');
         const snapId = String(body.snapshotId || '').trim();
-        const actor = String(body.actor || 'مدیر').trim();
+        const actor = activeSession.username;
         const snaps = readSnapshots();
         const target = snaps.find((s) => s.id === snapId);
         if (!target || !target.state) {
-          sendJson(res, 404, { error: { message: 'نسخه مورد نظر در تاریخچه یافت نشد.' } });
+          sendJson(res, 404, {
+            error: { code: 404, message: 'نسخه مورد نظر در تاریخچه یافت نشد.' }
+          });
           return;
         }
 
@@ -331,7 +631,11 @@ const server = http.createServer(async (req, res) => {
         };
 
         writeServerStore(restoredState);
-        recordSnapshot(actor, `بازگشت به نسخه قبلی (${target.actionSummary})`, restoredState);
+        recordSnapshot(
+          actor,
+          `بازگشت به نسخه قبلی (${target.actionSummary})`,
+          restoredState
+        );
 
         sendJson(res, 200, {
           ok: true,
@@ -352,11 +656,14 @@ const server = http.createServer(async (req, res) => {
           }
         });
       } catch {
-        sendJson(res, 400, { error: { message: 'خطا در بازگردانی نسخه' } });
+        sendJson(res, 400, {
+          error: { code: 400, message: 'خطا در بازگردانی نسخه' }
+        });
       }
       return;
     }
 
+    // 6. Authenticated Products & Purchases Endpoints
     if (pathname === '/api/products' && req.method === 'GET') {
       const store = readServerStore();
       sendJson(res, 200, { items: store.products });
@@ -369,7 +676,77 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    sendJson(res, 404, { error: { message: 'مسیر API یافت نشد' } });
+    if (pathname === '/api/purchases' && req.method === 'POST') {
+      try {
+        const input = JSON.parse(rawBody.toString('utf-8') || '{}');
+        const store = readServerStore();
+        const now = new Date().toISOString();
+        const newPurchase = {
+          id: input.id || `purch_${crypto.randomUUID()}`,
+          productId: input.productId || `prod_${crypto.randomUUID()}`,
+          productName: String(input.productName || '').trim(),
+          quantity: Number(input.quantity) || 1,
+          unit: String(input.unit || 'کیلوگرم'),
+          totalAmount: Math.round(Number(input.totalAmount) || 0),
+          currency: 'IRT',
+          purchaseDate: String(input.purchaseDate || now.slice(0, 10)),
+          employeeId: input.employeeId || undefined,
+          employeeNameSnapshot: input.employeeNameSnapshot || undefined,
+          supplierName: input.supplierName || undefined,
+          invoiceNumber: input.invoiceNumber || undefined,
+          notes: input.notes || undefined,
+          isDemo: false,
+          createdAt: now,
+          updatedAt: now
+        };
+        store.purchases = [
+          newPurchase,
+          ...store.purchases.filter((p) => p.id !== newPurchase.id)
+        ];
+        store.updatedAt = now;
+        store.lastActor = activeSession.username;
+        store.lastAction = `ثبت خرید: ${newPurchase.productName}`;
+        writeServerStore(store);
+        recordSnapshot(activeSession.username, store.lastAction, store);
+        sendJson(res, 201, { purchase: newPurchase, product: null });
+      } catch {
+        sendJson(res, 400, { error: { code: 400, message: 'خطا در ثبت خرید' } });
+      }
+      return;
+    }
+
+    if (pathname.startsWith('/api/purchases/') && req.method === 'PUT') {
+      try {
+        const id = pathname.replace('/api/purchases/', '').trim();
+        const input = JSON.parse(rawBody.toString('utf-8') || '{}');
+        const store = readServerStore();
+        const idx = store.purchases.findIndex((p) => p.id === id);
+        if (idx === -1) {
+          sendJson(res, 404, { error: { code: 404, message: 'فاکتور خرید یافت نشد' } });
+          return;
+        }
+        const now = new Date().toISOString();
+        const updated = {
+          ...store.purchases[idx],
+          ...input,
+          id,
+          isDemo: false,
+          updatedAt: now
+        };
+        store.purchases[idx] = updated;
+        store.updatedAt = now;
+        store.lastActor = activeSession.username;
+        store.lastAction = `ویرایش خرید: ${updated.productName}`;
+        writeServerStore(store);
+        recordSnapshot(activeSession.username, store.lastAction, store);
+        sendJson(res, 200, updated);
+      } catch {
+        sendJson(res, 400, { error: { code: 400, message: 'خطا در ویرایش خرید' } });
+      }
+      return;
+    }
+
+    sendJson(res, 404, { error: { code: 404, message: 'مسیر API یافت نشد' } });
     return;
   }
 
