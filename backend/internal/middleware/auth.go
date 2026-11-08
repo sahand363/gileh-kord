@@ -7,6 +7,8 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -24,21 +26,33 @@ type Session struct {
 	ExpiresAt time.Time
 }
 
-type AuthManager struct {
-	mu         sync.RWMutex
-	hmacSecret []byte
-	sessions   map[string]Session // keyed by SHA-256(SessionID)
-	adminUser  string
-	adminHash  string // Salted scrypt hash: scrypt$16384$8$1$<salt>$<hash>
+type loginAttemptTracker struct {
+	count        int
+	windowStart  time.Time
 }
+
+type AuthManager struct {
+	mu            sync.RWMutex
+	hmacSecret    []byte
+	sessions      map[string]Session
+	loginAttempts map[string]*loginAttemptTracker
+	adminUser     string
+	adminHash     string
+}
+
+const (
+	maxLoginAttemptsPerWindow = 5
+	loginRateLimitWindow      = 5 * time.Minute
+)
 
 func NewAuthManager() *AuthManager {
 	secret := make([]byte, 32)
 	_, _ = rand.Read(secret)
 
 	am := &AuthManager{
-		hmacSecret: secret,
-		sessions:   make(map[string]Session),
+		hmacSecret:    secret,
+		sessions:      make(map[string]Session),
+		loginAttempts: make(map[string]*loginAttemptTracker),
 	}
 	am.loadCredentialsFromEnv()
 	return am
@@ -49,7 +63,67 @@ var insecurePasswords = map[string]bool{
 	"admin":     true,
 	"admin1234": true,
 	"123456":    true,
+	"12345678":  true,
 	"password":  true,
+}
+
+func AuditLog(event, actor, ip, detail string) {
+	cleanActor := strings.Map(func(r rune) rune {
+		if r < 32 || r == 127 {
+			return -1
+		}
+		return r
+	}, actor)
+	cleanIP := strings.Map(func(r rune) rune {
+		if r < 32 || r == 127 {
+			return -1
+		}
+		return r
+	}, ip)
+	log.Printf("[AUDIT] event=%s actor=%q ip=%q detail=%q", event, cleanActor, cleanIP, detail)
+}
+
+func extractClientIP(r *http.Request) string {
+	if xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); xff != "" {
+		parts := strings.Split(xff, ",")
+		return strings.TrimSpace(parts[0])
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err == nil && host != "" {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+func (am *AuthManager) isRateLimited(ip string) bool {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+
+	now := time.Now()
+	tracker, exists := am.loginAttempts[ip]
+	if !exists || now.Sub(tracker.windowStart) > loginRateLimitWindow {
+		return false
+	}
+	return tracker.count >= maxLoginAttemptsPerWindow
+}
+
+func (am *AuthManager) recordFailedLogin(ip string) {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+
+	now := time.Now()
+	tracker, exists := am.loginAttempts[ip]
+	if !exists || now.Sub(tracker.windowStart) > loginRateLimitWindow {
+		am.loginAttempts[ip] = &loginAttemptTracker{count: 1, windowStart: now}
+		return
+	}
+	tracker.count++
+}
+
+func (am *AuthManager) clearFailedLogins(ip string) {
+	am.mu.Lock()
+	delete(am.loginAttempts, ip)
+	am.mu.Unlock()
 }
 
 func (am *AuthManager) loadCredentialsFromEnv() {
@@ -195,17 +269,22 @@ func verifyCSRFAndOrigin(r *http.Request, sess *Session) bool {
 	return subtle.ConstantTimeCompare([]byte(providedCSRF), []byte(sess.CSRFToken)) == 1
 }
 
-// RequireAuth enforces both a valid HMAC-signed server session AND CSRF protection on mutating requests.
 func (am *AuthManager) RequireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ip := extractClientIP(r)
 		sess, ok := am.ValidateRequest(r)
 		if !ok {
+			AuditLog("API_UNAUTHORIZED", "anonymous", ip, r.Method+" "+r.URL.Path)
 			handlers.Error(w, http.StatusUnauthorized, "نشست کاربری معتبر نیست یا منقضی شده است.")
 			return
 		}
 		if !verifyCSRFAndOrigin(r, sess) {
+			AuditLog("API_CSRF_REJECTED", sess.Username, ip, r.Method+" "+r.URL.Path)
 			handlers.Error(w, http.StatusForbidden, "توکن امنیتی CSRF نامعتبر است.")
 			return
+		}
+		if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete {
+			AuditLog("DATA_MODIFICATION", sess.Username, ip, r.Method+" "+r.URL.Path)
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -214,6 +293,13 @@ func (am *AuthManager) RequireAuth(next http.Handler) http.Handler {
 func (am *AuthManager) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		handlers.Error(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	ip := extractClientIP(r)
+	if am.isRateLimited(ip) {
+		AuditLog("AUTH_RATE_LIMITED", "anonymous", ip, "too many failed login attempts")
+		handlers.Error(w, http.StatusTooManyRequests, "تعداد تلاش‌های ناموفق بیش از حد مجاز است. لطفاً ۵ دقیقه دیگر تلاش کنید.")
 		return
 	}
 
@@ -233,6 +319,7 @@ func (am *AuthManager) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	am.mu.RUnlock()
 
 	if expectedUser == "" || expectedHash == "" {
+		AuditLog("AUTH_UNCONFIGURED", body.Username, ip, "admin credentials not set")
 		handlers.Error(w, http.StatusServiceUnavailable, "حساب مدیر روی سرور پیکربندی نشده است")
 		return
 	}
@@ -243,10 +330,13 @@ func (am *AuthManager) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	passMatch := VerifyPasswordScrypt(body.Password, expectedHash)
 
 	if !userMatch || !passMatch {
+		am.recordFailedLogin(ip)
+		AuditLog("AUTH_LOGIN_FAILED", body.Username, ip, "invalid credentials")
 		handlers.Error(w, http.StatusUnauthorized, "نام کاربری یا رمز عبور نادرست است")
 		return
 	}
 
+	am.clearFailedLogins(ip)
 	days := body.RememberDays
 	if days <= 0 || days > 30 {
 		days = 30
@@ -256,6 +346,8 @@ func (am *AuthManager) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		handlers.Error(w, http.StatusInternalServerError, "خطا در ایجاد نشست")
 		return
 	}
+
+	AuditLog("AUTH_LOGIN_SUCCESS", expectedUser, ip, "session issued")
 
 	isHTTPS := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
 	http.SetCookie(w, &http.Cookie{
@@ -267,7 +359,6 @@ func (am *AuthManager) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		Secure:   isHTTPS,
 		MaxAge:   days * 86400,
 	})
-	// Purge any legacy gk_app_auth cookie
 	http.SetCookie(w, &http.Cookie{
 		Name:     "gk_app_auth",
 		Value:    "",
@@ -277,10 +368,10 @@ func (am *AuthManager) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   -1,
 	})
 
+	// Do NOT expose the session token in the JSON response body
 	handlers.JSON(w, http.StatusOK, handlers.Envelope{
 		"ok":        true,
 		"username":  expectedUser,
-		"token":     signedToken,
 		"csrfToken": csrfToken,
 		"expiresAt": expiresAt.UnixMilli(),
 	})
