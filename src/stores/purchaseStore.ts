@@ -29,7 +29,11 @@ import {
 import { ALL_STORES, dbClient, requestToPromise } from '../services/db';
 import { createInitialDemoDataset } from '../services/demoData';
 import { backupService } from '../services/BackupService';
-import { apiClient, type ServerSyncMeta } from '../services/api/apiClient';
+import {
+  apiClient,
+  SyncConflictError,
+  type ServerSyncMeta
+} from '../services/api/apiClient';
 import { getTodayISODate, normalizeProductKey } from '../utils/formatters';
 import {
   buildPublicRevenueView,
@@ -94,12 +98,20 @@ async function readStoreAll<T>(storeName: string): Promise<T[]> {
   });
 }
 
-export async function syncLocalStateToServer(actionSummary: string): Promise<void> {
+export async function syncLocalStateToServer(
+  actionSummary: string,
+  forceOverwrite = false
+): Promise<void> {
   if (!apiClient.isEnabled()) return;
   try {
     const backup = await backupService.exportBackup();
     const actor = get(activeManagerUsername) || 'کاربر';
-    const res = await apiClient.pushFullStateToServer(backup, actor, actionSummary);
+    const res = await apiClient.pushFullStateToServer(
+      backup,
+      actor,
+      actionSummary,
+      forceOverwrite
+    );
     if (res && res.updatedAt) {
       const saved = await settingsRepository.saveSettings({
         lastSyncAt: res.updatedAt,
@@ -109,8 +121,11 @@ export async function syncLocalStateToServer(actionSummary: string): Promise<voi
       pendingServerUpdate.set(null);
       await refreshSnapshotsList();
     }
-  } catch {
-    // Offline or test environment: local IndexedDB remains intact
+  } catch (err) {
+    if (err instanceof SyncConflictError) {
+      // Another device updated the server first: surface the update prompt instead of overwriting
+      void checkForServerUpdates();
+    }
   }
 }
 
