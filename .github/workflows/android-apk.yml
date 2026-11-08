@@ -1,0 +1,79 @@
+name: Build Android APK & Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-android:
+    name: Build Standalone & Syncable Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Java 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install npm dependencies
+        run: npm install
+
+      - name: Run TypeScript & Svelte checks
+        run: npm run check
+
+      - name: Build Frontend Production Bundle
+        run: npm run build
+
+      - name: Initialize or Sync Capacitor Android Project
+        run: |
+          if [ ! -d "android" ]; then
+            npx cap add android
+          fi
+          npx cap sync android
+
+      - name: Enable Cleartext HTTP Traffic in AndroidManifest.xml (for IP:PORT servers)
+        run: |
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          if ! grep -q "usesCleartextTraffic" "$MANIFEST"; then
+            sed -i 's/<application/<application android:usesCleartextTraffic="true"/g' "$MANIFEST"
+          fi
+
+      - name: Build Installable Android APK
+        working-directory: ./android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk ../Gileh-Kord-Cafe.apk
+
+      - name: Upload APK as Workflow Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gileh-Kord-Cafe-APK
+          path: Gileh-Kord-Cafe.apk
+
+      - name: Publish APK to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.4.${{ github.run_number }}
+          name: "Gileh Kord Android APK (Build #${{ github.run_number }})"
+          body: |
+            نسخه مستقل و قابل نصب اندروید کافه گیله‌کُرد (بدون نیاز به اینترنت و دارای قابلیت کارکرد مستقل یا اتصال به سرور).
+            فایل **Gileh-Kord-Cafe.apk** را دانلود و روی گوشی نصب کنید.
+          files: Gileh-Kord-Cafe.apk
