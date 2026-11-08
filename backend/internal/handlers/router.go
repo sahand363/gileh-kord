@@ -9,7 +9,25 @@ import (
 	"github.com/sahand363/gileh-kord/backend/internal/repositories"
 )
 
-func RegisterRoutes(mux *http.ServeMux, db *database.DB, cfg *config.Config, startTime time.Time) {
+// RouteGuard wraps protected handlers with server-side authentication middleware.
+type RouteGuard func(http.Handler) http.Handler
+
+func RegisterRoutes(
+	mux *http.ServeMux,
+	db *database.DB,
+	cfg *config.Config,
+	startTime time.Time,
+	guards ...RouteGuard,
+) {
+	wrap := func(h http.Handler) http.Handler {
+		for _, g := range guards {
+			if g != nil {
+				h = g(h)
+			}
+		}
+		return h
+	}
+
 	productRepo := repositories.NewProductRepository(db)
 	purchaseRepo := repositories.NewPurchaseRepository(db)
 
@@ -20,14 +38,13 @@ func RegisterRoutes(mux *http.ServeMux, db *database.DB, cfg *config.Config, sta
 
 	mux.Handle("/api/health", healthHandler)
 
-	mux.HandleFunc("/api/products", productHandler.ServeCollection)
-	mux.HandleFunc("/api/products/{id}", productHandler.ServeItem)
-	mux.HandleFunc("/api/products/", productHandler.ServeItem)
+	mux.Handle("/api/products", wrap(http.HandlerFunc(productHandler.ServeCollection)))
+	mux.Handle("/api/products/{id}", wrap(http.HandlerFunc(productHandler.ServeItem)))
+	mux.Handle("/api/products/", wrap(http.HandlerFunc(productHandler.ServeItem)))
 
-	mux.HandleFunc("/api/purchases", purchaseHandler.ServeCollection)
-	mux.HandleFunc("/api/purchases/{id}", purchaseHandler.ServeItem)
-	mux.HandleFunc("/api/purchases/", purchaseHandler.ServeItem)
+	mux.Handle("/api/purchases", wrap(http.HandlerFunc(purchaseHandler.ServeCollection)))
+	mux.Handle("/api/purchases/{id}", wrap(http.HandlerFunc(purchaseHandler.ServeItem)))
+	mux.Handle("/api/purchases/", wrap(http.HandlerFunc(purchaseHandler.ServeItem)))
 
-	// Explicit JSON Backup Importer into SQLite
-	mux.Handle("/api/import/backup", importHandler)
+	mux.Handle("/api/import/backup", wrap(importHandler))
 }
