@@ -3,59 +3,108 @@ import { dbClient, requestToPromise } from './db';
 import type { ManagerAuthRecord } from '../models/types';
 
 const MANAGER_AUTH_KEY = 'manager_credentials';
-const LEGACY_TOKEN_STORAGE_KEY = 'gk_session_token';
+const SESSION_TOKEN_STORAGE_KEY = 'gk_session_token';
 const SESSION_CSRF_STORAGE_KEY = 'gk_session_csrf';
 const SESSION_USER_STORAGE_KEY = 'gk_session_user';
 const SESSION_EXPIRES_STORAGE_KEY = 'gk_session_expires';
 
-function purgeLegacyTokensAndCookies(): void {
-  if (typeof document !== 'undefined') {
-    document.cookie = 'gk_app_auth=; path=/; max-age=0; SameSite=Lax';
+const CONNECTION_MODE_KEY = 'gk_operating_mode';
+const SERVER_URL_STORAGE_KEY = 'gk_server_address';
+
+const PBKDF2_ITERATIONS = 100000;
+const PBKDF2_FALLBACK_ITERATIONS = 20000;
+
+export type OperatingMode = 'unconfigured' | 'standalone' | 'server';
+
+export function getOperatingMode(): OperatingMode {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
+    return 'standalone';
   }
+  const raw = localStorage.getItem(CONNECTION_MODE_KEY);
+  if (raw === 'standalone' || raw === 'server') {
+    return raw;
+  }
+  return 'unconfigured';
+}
+
+export function getConfiguredServerUrl(): string {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
+    return '';
+  }
+  return (localStorage.getItem(SERVER_URL_STORAGE_KEY) || '')
+    .trim()
+    .replace(/\/+$/, '');
+}
+
+export function setConnectionConfig(
+  mode: OperatingMode,
+  serverUrl: string = ''
+): void {
+  const cleanUrl = serverUrl.trim().replace(/\/+$/, '');
   if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
     try {
-      localStorage.removeItem(LEGACY_TOKEN_STORAGE_KEY);
+      localStorage.setItem(CONNECTION_MODE_KEY, mode);
+      localStorage.setItem(SERVER_URL_STORAGE_KEY, cleanUrl);
     } catch {
-      // Ignore
+      // Ignore storage errors
     }
+  }
+  operatingModeStore.set(mode);
+  configuredServerUrlStore.set(cleanUrl);
+}
+
+export const operatingModeStore = writable<OperatingMode>(getOperatingMode());
+export const configuredServerUrlStore = writable<string>(getConfiguredServerUrl());
+
+function purgeLegacyCookies(): void {
+  if (typeof document !== 'undefined') {
+    document.cookie = 'gk_app_auth=; path=/; max-age=0; SameSite=Strict';
   }
 }
 
 interface StoredClientSessionMeta {
+  token: string;
   csrfToken: string;
   username: string;
   expiresAt: number;
 }
 
 function readStoredSessionMeta(): StoredClientSessionMeta | null {
-  purgeLegacyTokensAndCookies();
+  purgeLegacyCookies();
   if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
     return null;
   }
   try {
+    const token = localStorage.getItem(SESSION_TOKEN_STORAGE_KEY) || '';
     const csrfToken = localStorage.getItem(SESSION_CSRF_STORAGE_KEY) || '';
     const username = localStorage.getItem(SESSION_USER_STORAGE_KEY) || '';
     const expiresAt = Number(localStorage.getItem(SESSION_EXPIRES_STORAGE_KEY) || '0');
-    if (!csrfToken || !username || (expiresAt > 0 && expiresAt <= Date.now())) {
+    if (
+      !/^[a-f0-9]{64}$/i.test(csrfToken) ||
+      !username ||
+      (expiresAt > 0 && expiresAt <= Date.now())
+    ) {
       clearStoredSessionMeta();
       return null;
     }
-    return { csrfToken, username, expiresAt };
+    return { token, csrfToken, username, expiresAt };
   } catch {
     return null;
   }
 }
 
 function saveStoredSessionMeta(
+  token: string,
   csrfToken: string,
   username: string,
   expiresAt: number
 ): void {
-  purgeLegacyTokensAndCookies();
+  purgeLegacyCookies();
   if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
     return;
   }
   try {
+    localStorage.setItem(SESSION_TOKEN_STORAGE_KEY, token);
     localStorage.setItem(SESSION_CSRF_STORAGE_KEY, csrfToken);
     localStorage.setItem(SESSION_USER_STORAGE_KEY, username);
     localStorage.setItem(SESSION_EXPIRES_STORAGE_KEY, String(expiresAt));
@@ -65,17 +114,23 @@ function saveStoredSessionMeta(
 }
 
 function clearStoredSessionMeta(): void {
-  purgeLegacyTokensAndCookies();
+  purgeLegacyCookies();
   if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
     return;
   }
   try {
+    localStorage.removeItem(SESSION_TOKEN_STORAGE_KEY);
     localStorage.removeItem(SESSION_CSRF_STORAGE_KEY);
     localStorage.removeItem(SESSION_USER_STORAGE_KEY);
     localStorage.removeItem(SESSION_EXPIRES_STORAGE_KEY);
   } catch {
     // Ignore
   }
+}
+
+export function getActiveSessionToken(): string {
+  const meta = readStoredSessionMeta();
+  return meta ? meta.token : '';
 }
 
 export function getActiveCsrfToken(): string {
@@ -92,16 +147,14 @@ function generateRandomSaltHex(byteLength = 16): string {
   if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
     crypto.getRandomValues(bytes);
   } else {
-    for (let i = 0; i < byteLength; i++) {
-      bytes[i] = Math.floor(Math.random() * 256);
-    }
+    throw new Error('Secure random number generator (crypto.getRandomValues) is required.');
   }
   return Array.from(bytes)
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
 }
 
-function constantTimeHexCompare(a: string, b: string): boolean {
+function constantTimeStringCompare(a: string, b: string): boolean {
   if (
     typeof a !== 'string' ||
     typeof b !== 'string' ||
@@ -117,9 +170,149 @@ function constantTimeHexCompare(a: string, b: string): boolean {
   return diff === 0;
 }
 
+// ============================================================================
+// Standard FIPS 180-4 SHA-256 & RFC 2898 PBKDF2-HMAC-SHA256
+// ============================================================================
+
+const SHA256_K = new Uint32Array([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+]);
+
+function rotr32(x: number, n: number): number {
+  return (x >>> n) | (x << (32 - n));
+}
+
+function sha256Bytes(data: Uint8Array): Uint8Array {
+  let h0 = 0x6a09e667;
+  let h1 = 0xbb67ae85;
+  let h2 = 0x3c6ef372;
+  let h3 = 0xa54ff53a;
+  let h4 = 0x510e527f;
+  let h5 = 0x9b05688c;
+  let h6 = 0x1f83d9ab;
+  let h7 = 0x5be0cd19;
+
+  const bitLen = data.length * 8;
+  const padLen = (data.length + 9 + 63) & ~63;
+  const padded = new Uint8Array(padLen);
+  padded.set(data);
+  padded[data.length] = 0x80;
+  const view = new DataView(padded.buffer);
+  view.setUint32(padLen - 8, Math.floor(bitLen / 0x100000000), false);
+  view.setUint32(padLen - 4, bitLen >>> 0, false);
+
+  const w = new Uint32Array(64);
+  for (let offset = 0; offset < padLen; offset += 64) {
+    for (let i = 0; i < 16; i++) {
+      w[i] = view.getUint32(offset + i * 4, false);
+    }
+    for (let i = 16; i < 64; i++) {
+      const s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+      const s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+    }
+
+    let a = h0, b = h1, c = h2, d = h3, e = h4, f = h5, g = h6, h = h7;
+    for (let i = 0; i < 64; i++) {
+      const S1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+      const ch = (e & f) ^ (~e & g);
+      const temp1 = (h + S1 + ch + SHA256_K[i] + w[i]) >>> 0;
+      const S0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const temp2 = (S0 + maj) >>> 0;
+
+      h = g;
+      g = f;
+      f = e;
+      e = (d + temp1) >>> 0;
+      d = c;
+      c = b;
+      b = a;
+      a = (temp1 + temp2) >>> 0;
+    }
+
+    h0 = (h0 + a) >>> 0;
+    h1 = (h1 + b) >>> 0;
+    h2 = (h2 + c) >>> 0;
+    h3 = (h3 + d) >>> 0;
+    h4 = (h4 + e) >>> 0;
+    h5 = (h5 + f) >>> 0;
+    h6 = (h6 + g) >>> 0;
+    h7 = (h7 + h) >>> 0;
+  }
+
+  const out = new Uint8Array(32);
+  const outView = new DataView(out.buffer);
+  outView.setUint32(0, h0, false);
+  outView.setUint32(4, h1, false);
+  outView.setUint32(8, h2, false);
+  outView.setUint32(12, h3, false);
+  outView.setUint32(16, h4, false);
+  outView.setUint32(20, h5, false);
+  outView.setUint32(24, h6, false);
+  outView.setUint32(28, h7, false);
+  return out;
+}
+
+function hmacSha256Bytes(key: Uint8Array, message: Uint8Array): Uint8Array {
+  const blockSize = 64;
+  const k = key.length > blockSize ? sha256Bytes(key) : key;
+  const ipad = new Uint8Array(blockSize + message.length);
+  const opad = new Uint8Array(blockSize + 32);
+
+  for (let i = 0; i < blockSize; i++) {
+    const kb = i < k.length ? k[i] : 0;
+    ipad[i] = kb ^ 0x36;
+    opad[i] = kb ^ 0x5c;
+  }
+  ipad.set(message, blockSize);
+  const innerHash = sha256Bytes(ipad);
+  opad.set(innerHash, blockSize);
+  return sha256Bytes(opad);
+}
+
+export function pbkdf2HmacSha256Sync(
+  password: string,
+  salt: string,
+  iterations = PBKDF2_FALLBACK_ITERATIONS
+): string {
+  const enc = new TextEncoder();
+  const keyBytes = enc.encode(password);
+  const saltBytes = enc.encode(salt);
+
+  const saltBlock = new Uint8Array(saltBytes.length + 4);
+  saltBlock.set(saltBytes);
+  saltBlock[saltBytes.length] = 0;
+  saltBlock[saltBytes.length + 1] = 0;
+  saltBlock[saltBytes.length + 2] = 0;
+  saltBlock[saltBytes.length + 3] = 1;
+
+  let u = hmacSha256Bytes(keyBytes, saltBlock);
+  const t = new Uint8Array(u);
+
+  for (let c = 1; c < iterations; c++) {
+    u = hmacSha256Bytes(keyBytes, u);
+    for (let j = 0; j < 32; j++) {
+      t[j] ^= u[j];
+    }
+  }
+
+  return Array.from(t)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
 export async function deriveSaltedPasswordHashAsync(
   password: string,
-  saltHex: string
+  saltHex: string,
+  iterations = PBKDF2_ITERATIONS
 ): Promise<string> {
   if (
     typeof crypto !== 'undefined' &&
@@ -139,52 +332,23 @@ export async function deriveSaltedPasswordHashAsync(
         {
           name: 'PBKDF2',
           salt: enc.encode(saltHex),
-          iterations: 100000,
+          iterations,
           hash: 'SHA-256'
         },
         keyMaterial,
         256
       );
-      const hashArray = Array.from(new Uint8Array(derivedBits));
-      const hashHex = hashArray
+      const hashHex = Array.from(new Uint8Array(derivedBits))
         .map((b) => b.toString(16).padStart(2, '0'))
         .join('');
-      return `pbkdf2$100000$${hashHex}`;
+      return `pbkdf2$${iterations}$${hashHex}`;
     } catch {
-      // Fallback below if SubtleCrypto is unavailable in HTTP context
+      // Fall through to synchronous PBKDF2-HMAC-SHA256
     }
   }
-  return `kdf2$${deriveLocalPasswordHash(password, saltHex)}`;
-}
-
-export function deriveLocalPasswordHash(password: string, salt: string): string {
-  const input = `${salt}::gileh_kord_v2_salted::${password}`;
-  const state = new Uint32Array([
-    0x6a09e667,
-    0xbb67ae85,
-    0x3c6ef372,
-    0xa54ff53a,
-    0x510e527f,
-    0x9b05688c,
-    0x1f83d9ab,
-    0x5be0cd19
-  ]);
-
-  for (let round = 0; round < 16384; round++) {
-    for (let i = 0; i < input.length; i++) {
-      const code = input.charCodeAt(i) ^ (round & 0xff);
-      const idx = (i + round) & 7;
-      let h = state[idx] ^ code;
-      h = Math.imul(h ^ (h >>> 16), 0x85ebca6b);
-      h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
-      state[idx] = (h ^ (h >>> 16)) >>> 0;
-      state[(idx + 1) & 7] = (state[(idx + 1) & 7] + state[idx] + round) >>> 0;
-    }
-  }
-
-  return Array.from(state)
-    .map((n) => n.toString(16).padStart(8, '0'))
-    .join('');
+  const syncIterations = Math.min(iterations, PBKDF2_FALLBACK_ITERATIONS);
+  const hashHex = pbkdf2HmacSha256Sync(password, saltHex, syncIterations);
+  return `pbkdf2$${syncIterations}$${hashHex}`;
 }
 
 const initialMeta = readStoredSessionMeta();
@@ -219,7 +383,11 @@ export class ManagerAuthService {
     password: string
   ): Promise<void> {
     const salt = generateRandomSaltHex(16);
-    const passwordHash = await deriveSaltedPasswordHashAsync(password, salt);
+    const passwordHash = await deriveSaltedPasswordHashAsync(
+      password,
+      salt,
+      PBKDF2_ITERATIONS
+    );
     const now = new Date().toISOString();
     const record: ManagerAuthRecord = {
       key: MANAGER_AUTH_KEY,
@@ -239,36 +407,81 @@ export class ManagerAuthService {
     password: string
   ): Promise<boolean> {
     if (!record.salt || !record.passwordHash) return false;
-    if (record.passwordHash.startsWith('pbkdf2$')) {
-      const candidate = await deriveSaltedPasswordHashAsync(password, record.salt);
-      return constantTimeHexCompare(candidate, record.passwordHash);
+    const parts = record.passwordHash.split('$');
+    if (parts.length !== 3 || parts[0] !== 'pbkdf2') {
+      return false;
     }
-    if (record.passwordHash.startsWith('kdf2$')) {
-      const candidate = `kdf2$${deriveLocalPasswordHash(password, record.salt)}`;
-      return constantTimeHexCompare(candidate, record.passwordHash);
+    const iterations = Number(parts[1]);
+    if (!Number.isInteger(iterations) || iterations < 10000 || iterations > 1000000) {
+      return false;
     }
-    const legacyCandidate = deriveLocalPasswordHash(password, record.salt);
-    return constantTimeHexCompare(legacyCandidate, record.passwordHash);
+    const candidate = await deriveSaltedPasswordHashAsync(
+      password,
+      record.salt,
+      iterations
+    );
+    return constantTimeStringCompare(candidate, record.passwordHash);
+  }
+
+  /**
+   * Initializes a Standalone (offline-first on-device) Manager account when the user
+   * chooses "حالت مستقل روی همین گوشی" on first launch.
+   */
+  public async setupStandaloneAccount(
+    username: string,
+    password: string,
+    rememberDays: number = 30
+  ): Promise<{ success: boolean; error?: string }> {
+    const cleanUser = username.trim();
+    if (!cleanUser) {
+      return { success: false, error: 'لطفاً نام کاربری دلخواه خود را وارد کنید.' };
+    }
+    if (!password || password.length < 8) {
+      return {
+        success: false,
+        error: 'رمز عبور باید حداقل ۸ کاراکتر باشد.'
+      };
+    }
+
+    await this.saveVerifiedLocalCache(cleanUser, password);
+    setConnectionConfig('standalone', '');
+
+    const localCsrf = generateRandomSaltHex(32);
+    const expiresAt = Date.now() + rememberDays * 24 * 60 * 60 * 1000;
+    saveStoredSessionMeta('', localCsrf, cleanUser, expiresAt);
+
+    activeManagerUsername.set(cleanUser);
+    isManagerConfigured.set(true);
+    isAppAuthenticated.set(true);
+    return { success: true };
   }
 
   public async checkInitialized(): Promise<boolean> {
-    purgeLegacyTokensAndCookies();
+    purgeLegacyCookies();
+    const mode = getOperatingMode();
+    const serverUrl = getConfiguredServerUrl();
     const storedMeta = readStoredSessionMeta();
+
     if (storedMeta) {
       isAppAuthenticated.set(true);
       activeManagerUsername.set(storedMeta.username);
 
-      if (typeof fetch !== 'undefined') {
+      if (mode === 'server' && typeof fetch !== 'undefined') {
+        const endpoint = `${serverUrl}/api/auth/session`;
+        const headers: Record<string, string> = {
+          Accept: 'application/json',
+          'X-Requested-With': 'XMLHttpRequest'
+        };
+        if (storedMeta.token) {
+          headers['Authorization'] = `Bearer ${storedMeta.token}`;
+        }
         try {
-          const res = await fetch('/api/auth/session', {
+          const res = await fetch(endpoint, {
             method: 'GET',
-            headers: {
-              Accept: 'application/json',
-              'X-Requested-With': 'XMLHttpRequest'
-            },
-            credentials: 'same-origin'
+            headers,
+            credentials: serverUrl ? 'include' : 'same-origin'
           });
-          if (res.status === 401) {
+          if (res.status === 401 || res.status === 403) {
             this.logoutWholeApp();
             return false;
           }
@@ -276,6 +489,7 @@ export class ManagerAuthService {
             const data = await res.json().catch(() => null);
             if (data && typeof data.csrfToken === 'string') {
               saveStoredSessionMeta(
+                storedMeta.token,
                 data.csrfToken,
                 String(data.username || storedMeta.username),
                 Number(data.expiresAt || storedMeta.expiresAt)
@@ -291,11 +505,14 @@ export class ManagerAuthService {
     }
 
     const rec = await this.getRecord();
-    if (rec && rec.username) {
+    if (rec && rec.username && rec.passwordHash?.startsWith('pbkdf2$')) {
       if (!storedMeta) {
         activeManagerUsername.set(rec.username);
       }
       isManagerConfigured.set(true);
+      if (mode === 'unconfigured') {
+        setConnectionConfig('standalone', '');
+      }
       return true;
     }
 
@@ -316,16 +533,21 @@ export class ManagerAuthService {
       };
     }
 
-    if (typeof fetch !== 'undefined') {
+    const mode = getOperatingMode();
+    const serverUrl = getConfiguredServerUrl();
+
+    // 1. If in Server Mode (or web with relative /api), verify against the server first
+    if (mode !== 'standalone' && typeof fetch !== 'undefined') {
+      const loginUrl = `${serverUrl}/api/auth/login`;
       try {
-        const res = await fetch('/api/auth/login', {
+        const res = await fetch(loginUrl, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             Accept: 'application/json',
             'X-Requested-With': 'XMLHttpRequest'
           },
-          credentials: 'same-origin',
+          credentials: serverUrl ? 'include' : 'same-origin',
           body: JSON.stringify({
             username: cleanUser,
             password,
@@ -335,21 +557,20 @@ export class ManagerAuthService {
 
         const data = await res.json().catch(() => null);
 
-        if (
-          res.ok &&
-          data &&
-          data.ok &&
-          typeof data.csrfToken === 'string'
-        ) {
+        if (res.ok && data && data.ok && typeof data.csrfToken === 'string') {
           const verifiedUser = String(data.username || cleanUser);
+          const signedToken = typeof data.token === 'string' ? data.token : '';
           const expiresAt =
             Number(data.expiresAt) ||
             Date.now() + rememberDays * 24 * 60 * 60 * 1000;
 
-          saveStoredSessionMeta(data.csrfToken, verifiedUser, expiresAt);
+          saveStoredSessionMeta(signedToken, data.csrfToken, verifiedUser, expiresAt);
           await this.saveVerifiedLocalCache(verifiedUser, password);
           activeManagerUsername.set(verifiedUser);
           isManagerConfigured.set(true);
+          if (mode === 'unconfigured') {
+            setConnectionConfig('server', serverUrl);
+          }
           return { success: true };
         }
 
@@ -362,16 +583,25 @@ export class ManagerAuthService {
           error: serverErrMsg
         };
       } catch {
-        // Network unreachable: proceed to strict offline cache check below
+        // Network unreachable: proceed to strict local PBKDF2 verification below
       }
     }
 
+    // 2. Verify against local PBKDF2-HMAC-SHA256 record (Standalone Mode or Offline Cache)
     const record = await this.getRecord();
-    if (!record || !record.username || !record.passwordHash || !record.salt) {
+    if (
+      !record ||
+      !record.username ||
+      !record.passwordHash ||
+      !record.passwordHash.startsWith('pbkdf2$') ||
+      !record.salt
+    ) {
       return {
         success: false,
         error:
-          'ارتباط با سرور برقرار نیست. برای اولین ورود در این مرورگر، اتصال به سرور الزامی است.'
+          mode === 'server'
+            ? 'ارتباط با سرور برقرار نیست. آدرس سرور یا اتصال اینترنت را بررسی کنید.'
+            : 'ابتدا حساب کاربری را راه‌اندازی کنید.'
       };
     }
 
@@ -380,6 +610,11 @@ export class ManagerAuthService {
     const hashMatches = await this.verifyAgainstLocalRecord(record, password);
 
     if (userMatches && hashMatches) {
+      if (mode === 'standalone' && !hasActiveSessionMeta()) {
+        const localCsrf = generateRandomSaltHex(32);
+        const expiresAt = Date.now() + rememberDays * 24 * 60 * 60 * 1000;
+        saveStoredSessionMeta('', localCsrf, record.username, expiresAt);
+      }
       activeManagerUsername.set(record.username);
       isManagerConfigured.set(true);
       return { success: true };
@@ -438,8 +673,7 @@ export class ManagerAuthService {
     if (!record || !record.passwordHash || !record.salt) {
       return {
         success: false,
-        error:
-          'هیچ حساب تأییدشده‌ای در حافظه محلی وجود ندارد. لطفاً ابتدا به صورت آنلاین وارد شوید.'
+        error: 'هیچ حساب تأییدشده‌ای در حافظه محلی وجود ندارد.'
       };
     }
 
@@ -464,14 +698,22 @@ export class ManagerAuthService {
 
   public logoutWholeApp(): void {
     const csrfToken = getActiveCsrfToken();
-    if (csrfToken && typeof fetch !== 'undefined') {
-      void fetch('/api/auth/logout', {
+    const token = getActiveSessionToken();
+    const serverUrl = getConfiguredServerUrl();
+    const mode = getOperatingMode();
+
+    if (mode === 'server' && csrfToken && typeof fetch !== 'undefined') {
+      const headers: Record<string, string> = {
+        'X-CSRF-Token': csrfToken,
+        'X-Requested-With': 'XMLHttpRequest'
+      };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+      void fetch(`${serverUrl}/api/auth/logout`, {
         method: 'POST',
-        headers: {
-          'X-CSRF-Token': csrfToken,
-          'X-Requested-With': 'XMLHttpRequest'
-        },
-        credentials: 'same-origin'
+        headers,
+        credentials: serverUrl ? 'include' : 'same-origin'
       }).catch(() => {});
     }
     clearStoredSessionMeta();
