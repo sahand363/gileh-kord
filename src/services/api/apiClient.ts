@@ -5,6 +5,11 @@ import type {
   Purchase,
   SyncSnapshotMeta
 } from '../../models/types';
+import {
+  getActiveSessionToken,
+  isAppAuthenticated,
+  isManagerUnlocked
+} from '../ManagerAuthService';
 
 export type BackendConnectionState = 'disconnected' | 'checking' | 'connected';
 
@@ -56,19 +61,33 @@ export class ApiClient {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
+    const token = getActiveSessionToken();
+    const authHeaders: Record<string, string> = {};
+    if (token) {
+      authHeaders['Authorization'] = `Bearer ${token}`;
+    }
+
     try {
       const response = await fetch(this.buildUrl(path), {
         ...init,
+        credentials: 'same-origin',
         headers: {
           'Content-Type': 'application/json',
           Accept: 'application/json',
-          ...(init?.headers || {})
+          ...authHeaders,
+          ...((init?.headers as Record<string, string>) || {})
         },
         signal: controller.signal
       });
 
       const data = await response.json().catch(() => null);
       if (!response.ok) {
+        if (response.status === 401 && path !== '/api/health') {
+          isManagerUnlocked.set(false);
+          if (!token) {
+            isAppAuthenticated.set(false);
+          }
+        }
         const message =
           data?.error?.message || `خطای ارتباط با سرور (${response.status})`;
         throw new Error(message);
@@ -76,7 +95,9 @@ export class ApiClient {
       backendStatus.set('connected');
       return data as T;
     } catch (err) {
-      backendStatus.set('disconnected');
+      if (err instanceof Error && err.name === 'AbortError') {
+        backendStatus.set('disconnected');
+      }
       throw err;
     } finally {
       clearTimeout(timer);
@@ -99,6 +120,7 @@ export class ApiClient {
   }
 
   public async getSyncMeta(): Promise<ServerSyncMeta | null> {
+    if (!getActiveSessionToken()) return null;
     try {
       return await this.request<ServerSyncMeta>('/api/sync/meta', {
         method: 'GET'
@@ -169,6 +191,7 @@ export class ApiClient {
   }
 
   public async listProducts(query = ''): Promise<Product[]> {
+    if (!getActiveSessionToken()) return [];
     const q = query ? `?query=${encodeURIComponent(query)}` : '';
     const res = await this.request<{ items: Product[] }>(`/api/products${q}`);
     return res.items || [];
@@ -182,6 +205,7 @@ export class ApiClient {
     supplierName?: string;
     pageSize?: number;
   }): Promise<Purchase[]> {
+    if (!getActiveSessionToken()) return [];
     const search = new URLSearchParams();
     if (params?.query) search.set('query', params.query);
     if (params?.dateFrom) search.set('date_from', params.dateFrom);
