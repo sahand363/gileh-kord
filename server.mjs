@@ -15,15 +15,28 @@ const ADMIN_USER = (process.env.ADMIN_USER || '').trim();
 const ADMIN_PASS_HASH = (process.env.ADMIN_PASS_HASH || '').trim();
 const LEGACY_ADMIN_PASS = (process.env.ADMIN_PASS || '').trim();
 const MANAGERS_FILE = process.env.MANAGERS_FILE || '/etc/gileh-kord/managers.conf';
+const ENFORCE_HTTPS =
+  process.env.ENFORCE_HTTPS === 'true' || process.env.NODE_ENV === 'production';
+
+const TRUSTED_PROXY_IPS = new Set([
+  '127.0.0.1',
+  '::1',
+  '::ffff:127.0.0.1',
+  ...(process.env.TRUSTED_PROXIES || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+]);
 
 fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
 try {
   fs.chmodSync(DATA_DIR, 0o700);
 } catch {
-  // Ignore on filesystems that do not support chmod
+  // Ignore on filesystems without POSIX chmod
 }
 
 const SERVER_STORE_FILE = path.join(DATA_DIR, 'server_synced_store.json');
+const SERVER_STORE_BAK_FILE = path.join(DATA_DIR, 'server_synced_store.json.bak');
 const SNAPSHOTS_FILE = path.join(DATA_DIR, 'server_snapshots.json');
 const SESSIONS_FILE = path.join(DATA_DIR, 'server_sessions.json');
 const SECRET_KEY_FILE = path.join(DATA_DIR, 'server_hmac_secret.key');
@@ -35,22 +48,17 @@ const MAX_ARRAY_ITEMS = 10000;
 const MAX_STRING_LEN = 1000;
 const MAX_SAFE_TOMAN = 999_999_999_999;
 
-// Scrypt parameters
 const SCRYPT_N = 16384;
 const SCRYPT_R = 8;
 const SCRYPT_P = 1;
 const SCRYPT_KEYLEN = 64;
 
-// Rate Limiting Windows
 const LOGIN_WINDOW_MS = 5 * 60 * 1000;
 const MAX_LOGIN_ATTEMPTS = 5;
 const API_WINDOW_MS = 60 * 1000;
 const MAX_MUTATION_REQUESTS_PER_MIN = 30;
 const MAX_GENERAL_REQUESTS_PER_MIN = 120;
-
-const loginAttemptsByIp = new Map();
-const mutationRateByIp = new Map();
-const generalRateByIp = new Map();
+const MAX_RATE_LIMIT_ENTRIES = 5000;
 
 const INSECURE_PASSWORDS = new Set(['admin1234', 'admin', '123456', 'password', '12345678', '']);
 
@@ -82,6 +90,18 @@ const MIME_TYPES = {
   '.woff2': 'font/woff2'
 };
 
+const BASE_SECURITY_HEADERS = {
+  'Content-Security-Policy':
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+  'Strict-Transport-Security': 'max-age=63072000; includeSubDomains; preload',
+  'Referrer-Policy': 'strict-origin-when-cross-origin',
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=()',
+  'Cross-Origin-Opener-Policy': 'same-origin',
+  'Cross-Origin-Resource-Policy': 'same-origin'
+};
+
 // ============================================================================
 // 1. Concurrency Mutex & Atomic File Operations
 // ============================================================================
@@ -99,6 +119,7 @@ class AsyncMutex {
 }
 
 const stateMutex = new AsyncMutex();
+const sessionMutex = new AsyncMutex();
 
 function assertPathWithinDirectory(targetPath, allowedRootDir) {
   const resolvedRoot = path.resolve(allowedRootDir);
@@ -110,10 +131,6 @@ function assertPathWithinDirectory(targetPath, allowedRootDir) {
   return resolvedTarget;
 }
 
-/**
- * Writes data atomically to disk by writing to a mode-0600 temporary file,
- * flushing via fsync, and renaming over the destination path.
- */
 function writeFileAtomic(targetPath, contentObjOrString) {
   const safePath = assertPathWithinDirectory(targetPath, DATA_DIR);
   const payload =
@@ -148,7 +165,133 @@ function writeFileAtomic(targetPath, contentObjOrString) {
 }
 
 // ============================================================================
-// 2. Structured Audit Logging (Zero Credential / Token Exposure)
+// 2. Trusted Proxy Client IP Extraction & HTTPS Verification
+// ============================================================================
+
+function getClientIp(req) {
+  const socketIp = (req.socket?.remoteAddress || 'unknown').trim();
+  if (!TRUSTED_PROXY_IPS.has(socketIp)) {
+    return socketIp;
+  }
+
+  const xRealIp = (req.headers['x-real-ip'] || '').toString().trim();
+  if (xRealIp && !xRealIp.includes(',')) {
+    return xRealIp.slice(0, 64);
+  }
+
+  const xff = (req.headers['x-forwarded-for'] || '').toString();
+  if (xff) {
+    const ips = xff
+      .split(',')
+      .map((ip) => ip.trim())
+      .filter(Boolean);
+    for (let i = ips.length - 1; i >= 0; i--) {
+      if (!TRUSTED_PROXY_IPS.has(ips[i])) {
+        return ips[i].slice(0, 64);
+      }
+    }
+    if (ips.length > 0) {
+      return ips[ips.length - 1].slice(0, 64);
+    }
+  }
+
+  return socketIp;
+}
+
+function isRequestSecure(req) {
+  if (req.socket?.encrypted) {
+    return true;
+  }
+  const socketIp = (req.socket?.remoteAddress || '').trim();
+  if (TRUSTED_PROXY_IPS.has(socketIp)) {
+    const proto = (req.headers['x-forwarded-proto'] || '')
+      .toString()
+      .split(',')[0]
+      .trim()
+      .toLowerCase();
+    if (proto === 'https') {
+      return true;
+    }
+  }
+  return false;
+}
+
+// ============================================================================
+// 3. Bounded Rate Limiter with Automatic Expiration & Eviction
+// ============================================================================
+
+class BoundedRateLimiter {
+  constructor(maxAttempts, windowMs, maxEntries = MAX_RATE_LIMIT_ENTRIES) {
+    this.maxAttempts = maxAttempts;
+    this.windowMs = windowMs;
+    this.maxEntries = maxEntries;
+    this.store = new Map();
+
+    const timer = setInterval(() => this.sweepExpired(), Math.min(windowMs, 60000));
+    if (typeof timer.unref === 'function') {
+      timer.unref();
+    }
+  }
+
+  sweepExpired() {
+    const now = Date.now();
+    for (const [key, entry] of this.store.entries()) {
+      if (now - entry.windowStart > this.windowMs) {
+        this.store.delete(key);
+      }
+    }
+  }
+
+  _ensureCapacity() {
+    if (this.store.size < this.maxEntries) return;
+    this.sweepExpired();
+    if (this.store.size >= this.maxEntries) {
+      const oldestKey = this.store.keys().next().value;
+      if (oldestKey !== undefined) {
+        this.store.delete(oldestKey);
+      }
+    }
+  }
+
+  isBlocked(key) {
+    const now = Date.now();
+    const entry = this.store.get(key);
+    if (!entry) return false;
+    if (now - entry.windowStart > this.windowMs) {
+      this.store.delete(key);
+      return false;
+    }
+    return entry.count >= this.maxAttempts;
+  }
+
+  recordAttempt(key) {
+    const now = Date.now();
+    const entry = this.store.get(key);
+    if (!entry || now - entry.windowStart > this.windowMs) {
+      this._ensureCapacity();
+      this.store.set(key, { count: 1, windowStart: now });
+      return 1;
+    }
+    entry.count += 1;
+    return entry.count;
+  }
+
+  consume(key) {
+    const count = this.recordAttempt(key);
+    return { limited: count > this.maxAttempts };
+  }
+
+  reset(key) {
+    this.store.delete(key);
+  }
+}
+
+const loginRateLimiter = new BoundedRateLimiter(MAX_LOGIN_ATTEMPTS, LOGIN_WINDOW_MS);
+const mutationRateLimiter = new BoundedRateLimiter(MAX_MUTATION_REQUESTS_PER_MIN, API_WINDOW_MS);
+const generalRateLimiter = new BoundedRateLimiter(MAX_GENERAL_REQUESTS_PER_MIN, API_WINDOW_MS);
+
+// ============================================================================
+// 4. Structured Audit Logging (Zero Credential / Token Exposure)
 // ============================================================================
 
 const SENSITIVE_LOG_KEYS = new Set([
@@ -193,13 +336,13 @@ function writeAuditLog(event, actor, ip, details = {}) {
     const safeLogPath = assertPathWithinDirectory(AUDIT_LOG_FILE, DATA_DIR);
     fs.appendFileSync(safeLogPath, line, { encoding: 'utf-8', mode: 0o600 });
   } catch {
-    // Fallback to stdout if disk append fails
+    // Fallback to stdout
   }
   console.log(`[AUDIT] ${entry.event} | actor=${entry.actor} | ip=${entry.ip}`);
 }
 
 // ============================================================================
-// 3. Strict Server-Side Input Validation & Sanitization
+// 5. Strict Server-Side Input Validation & Sanitization
 // ============================================================================
 
 const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
@@ -285,10 +428,6 @@ function validateAndSanitizePurchase(raw, idx = 0) {
   };
 }
 
-/**
- * Validates and sanitizes an entire backup / sync state payload before any restore or write.
- * Rejects invalid structures, strips demo records, and prevents prototype pollution.
- */
 function validateAndSanitizeBackupState(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new Error('ساختار داده پشتیبان یا همگام‌سازی نامعتبر است.');
@@ -552,7 +691,7 @@ function validateAndSanitizeBackupState(raw) {
 }
 
 // ============================================================================
-// 4. Cryptographic Primitives: Salted scrypt & Constant-Time HMAC
+// 6. Cryptographic Primitives: Salted scrypt & Constant-Time HMAC
 // ============================================================================
 
 function loadOrCreateServerSecret() {
@@ -732,14 +871,14 @@ function verifyManagerCredentials(username, password) {
   }
 
   if (verifyPasswordScrypt(cleanPass, record.passHash)) {
-    return { ok: true, username: record.username };
+    return { ok: true, username: record.username, role: 'manager' };
   }
 
   return { ok: false, reason: 'invalid_credentials' };
 }
 
 // ============================================================================
-// 5. Cryptographically Signed Server-Side Sessions & CSRF Protection
+// 7. Mutex-Synchronized Transactional Session Store
 // ============================================================================
 
 function signSessionId(sessionId) {
@@ -776,64 +915,80 @@ function hashValueSha256(val) {
   return crypto.createHash('sha256').update(String(val)).digest('hex');
 }
 
-function readSessions() {
+let inMemorySessions = null;
+
+function loadSessionsIntoMemory() {
+  if (inMemorySessions !== null) return inMemorySessions;
+  inMemorySessions = new Map();
   try {
     if (fs.existsSync(SESSIONS_FILE)) {
       const raw = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf-8'));
       const now = Date.now();
-      const valid = {};
       for (const [idHash, session] of Object.entries(raw || {})) {
         if (session && typeof session.expiresAt === 'number' && session.expiresAt > now) {
-          valid[idHash] = session;
+          inMemorySessions.set(idHash, session);
         }
       }
-      return valid;
     }
   } catch {
-    // Ignore
+    // Start with empty map if file is unreadable
   }
-  return {};
+  return inMemorySessions;
 }
 
-function writeSessions(sessions) {
-  try {
-    writeFileAtomic(SESSIONS_FILE, sessions);
-  } catch {
-    // Ignore
-  }
-}
-
-function createServerSession(username, rememberDays = 30) {
-  const sessionId = crypto.randomBytes(32).toString('hex');
-  const signedToken = signSessionId(sessionId);
-  const csrfToken = crypto.randomBytes(32).toString('hex');
-
-  const idHash = hashValueSha256(sessionId);
-  const clampedDays = Math.min(30, Math.max(1, Number(rememberDays) || 1));
-  const maxAgeSeconds = clampedDays * 24 * 60 * 60;
+function flushSessionsToDisk(sessionsMap) {
   const now = Date.now();
-  const expiresAt = now + maxAgeSeconds * 1000;
-
-  const sessions = readSessions();
-  sessions[idHash] = {
-    username,
-    csrfToken,
-    createdAt: new Date(now).toISOString(),
-    expiresAt
-  };
-  writeSessions(sessions);
-
-  return { signedToken, csrfToken, maxAgeSeconds, expiresAt };
+  const serialized = {};
+  for (const [idHash, session] of sessionsMap.entries()) {
+    if (session && session.expiresAt > now) {
+      serialized[idHash] = session;
+    } else {
+      sessionsMap.delete(idHash);
+    }
+  }
+  try {
+    writeFileAtomic(SESSIONS_FILE, serialized);
+  } catch {
+    // Ignore write failure
+  }
 }
 
-function revokeServerSession(sessionId) {
+async function createServerSession(username, role = 'manager', rememberDays = 30) {
+  return sessionMutex.runExclusive(async () => {
+    const sessionsMap = loadSessionsIntoMemory();
+    const sessionId = crypto.randomBytes(32).toString('hex');
+    const signedToken = signSessionId(sessionId);
+    const csrfToken = crypto.randomBytes(32).toString('hex');
+
+    const idHash = hashValueSha256(sessionId);
+    const clampedDays = Math.min(30, Math.max(1, Number(rememberDays) || 1));
+    const maxAgeSeconds = clampedDays * 24 * 60 * 60;
+    const now = Date.now();
+    const expiresAt = now + maxAgeSeconds * 1000;
+
+    sessionsMap.set(idHash, {
+      username,
+      role,
+      csrfToken,
+      createdAt: new Date(now).toISOString(),
+      expiresAt
+    });
+    flushSessionsToDisk(sessionsMap);
+
+    return { signedToken, csrfToken, maxAgeSeconds, expiresAt };
+  });
+}
+
+async function revokeServerSession(sessionId) {
   if (!sessionId) return;
-  const idHash = hashValueSha256(sessionId);
-  const sessions = readSessions();
-  if (sessions[idHash]) {
-    delete sessions[idHash];
-    writeSessions(sessions);
-  }
+  await sessionMutex.runExclusive(async () => {
+    const sessionsMap = loadSessionsIntoMemory();
+    const idHash = hashValueSha256(sessionId);
+    if (sessionsMap.has(idHash)) {
+      sessionsMap.delete(idHash);
+      flushSessionsToDisk(sessionsMap);
+    }
+  });
 }
 
 function parseCookies(cookieHeader) {
@@ -871,9 +1026,10 @@ function getAuthenticatedSession(req) {
   if (!sessionId) return null;
 
   const idHash = hashValueSha256(sessionId);
-  const sessions = readSessions();
-  const session = sessions[idHash];
+  const sessionsMap = loadSessionsIntoMemory();
+  const session = sessionsMap.get(idHash);
   if (!session || session.expiresAt <= Date.now()) {
+    if (session) sessionsMap.delete(idHash);
     return null;
   }
   return { ...session, sessionId };
@@ -924,95 +1080,148 @@ function verifyCsrfProtection(req, activeSession) {
 }
 
 function buildCookieHeaders(req, signedToken, maxAgeSeconds) {
-  const isHttps =
-    req.headers['x-forwarded-proto'] === 'https' || Boolean(req.socket.encrypted);
+  const secureFlag = ENFORCE_HTTPS || isRequestSecure(req);
   const sessionCookie = [
     `gk_session=${encodeURIComponent(signedToken)}`,
     'Path=/',
     'HttpOnly',
-    'SameSite=Lax',
+    'SameSite=Strict',
     `Max-Age=${maxAgeSeconds}`
   ];
-  if (isHttps) {
+  if (secureFlag) {
     sessionCookie.push('Secure');
   }
-  const purgeLegacyCookie =
-    'gk_app_auth=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0';
-  return [sessionCookie.join('; '), purgeLegacyCookie];
+  const purgeLegacyCookie = [
+    'gk_app_auth=',
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Strict',
+    'Max-Age=0',
+    ...(secureFlag ? ['Secure'] : [])
+  ];
+  return [sessionCookie.join('; '), purgeLegacyCookie.join('; ')];
 }
 
 // ============================================================================
-// 6. Rate Limiting (Login & Sensitive API Endpoints)
+// 8. Consistent & Recoverable Data + Snapshot Persistence (Checksummed)
 // ============================================================================
 
-function checkSlidingWindowLimit(map, key, maxRequests, windowMs) {
-  const now = Date.now();
-  const entry = map.get(key);
-  if (!entry || now - entry.windowStart > windowMs) {
-    map.set(key, { count: 1, windowStart: now });
-    return { limited: false };
-  }
-  entry.count += 1;
-  if (entry.count > maxRequests) {
-    return { limited: true };
-  }
-  return { limited: false };
+function computeStateChecksum(stateObj) {
+  const canonical = JSON.stringify({
+    version: stateObj.version || 3,
+    revision: stateObj.revision || 0,
+    updatedAt: stateObj.updatedAt || null,
+    products: stateObj.products || [],
+    purchases: stateObj.purchases || [],
+    suppliers: stateObj.suppliers || [],
+    employees: stateObj.employees || [],
+    revenues: stateObj.revenues || [],
+    timesheets: stateObj.timesheets || [],
+    expenses: stateObj.expenses || [],
+    inventory: stateObj.inventory || [],
+    menuItems: stateObj.menuItems || [],
+    settings: stateObj.settings || {}
+  });
+  return hashValueSha256(canonical);
 }
 
-function isLoginRateLimited(ip) {
-  const now = Date.now();
-  const entry = loginAttemptsByIp.get(ip);
-  if (!entry) return false;
-  if (now - entry.firstAttemptAt > LOGIN_WINDOW_MS) {
-    loginAttemptsByIp.delete(ip);
-    return false;
+function parseAndVerifyStoreData(rawText) {
+  const parsed = JSON.parse(rawText);
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error('Invalid store JSON');
   }
-  return entry.count >= MAX_LOGIN_ATTEMPTS;
-}
+  const normalized = {
+    version: 3,
+    revision: Math.max(0, Math.trunc(Number(parsed.revision) || 1)),
+    updatedAt: parsed.updatedAt || null,
+    lastActor: parsed.lastActor || 'کاربر',
+    lastAction: parsed.lastAction || 'همگام‌سازی',
+    products: Array.isArray(parsed.products) ? parsed.products : [],
+    purchases: Array.isArray(parsed.purchases) ? parsed.purchases : [],
+    suppliers: Array.isArray(parsed.suppliers) ? parsed.suppliers : [],
+    employees: Array.isArray(parsed.employees) ? parsed.employees : [],
+    revenues: Array.isArray(parsed.revenues) ? parsed.revenues : [],
+    timesheets: Array.isArray(parsed.timesheets) ? parsed.timesheets : [],
+    expenses: Array.isArray(parsed.expenses) ? parsed.expenses : [],
+    inventory: Array.isArray(parsed.inventory) ? parsed.inventory : [],
+    menuItems: Array.isArray(parsed.menuItems) ? parsed.menuItems : [],
+    settings: parsed.settings || {}
+  };
 
-function recordFailedLoginAttempt(ip) {
-  const now = Date.now();
-  const entry = loginAttemptsByIp.get(ip);
-  if (!entry || now - entry.firstAttemptAt > LOGIN_WINDOW_MS) {
-    loginAttemptsByIp.set(ip, { count: 1, firstAttemptAt: now });
-  } else {
-    entry.count += 1;
+  if (typeof parsed.checksum === 'string' && parsed.checksum.length === 64) {
+    const expectedChecksum = computeStateChecksum(normalized);
+    if (!constantTimeHexEqual(parsed.checksum, expectedChecksum)) {
+      throw new Error('Store checksum mismatch');
+    }
   }
+  return normalized;
 }
 
-function clearFailedLoginAttempts(ip) {
-  loginAttemptsByIp.delete(ip);
-}
-
-// ============================================================================
-// 7. Atomic Data & Snapshot Store with Revision Tracking
-// ============================================================================
-
-function readServerStore() {
+function readSnapshots() {
   try {
-    if (fs.existsSync(SERVER_STORE_FILE)) {
-      const parsed = JSON.parse(fs.readFileSync(SERVER_STORE_FILE, 'utf-8'));
-      return {
-        version: 3,
-        revision: Math.max(0, Math.trunc(Number(parsed.revision) || 1)),
-        updatedAt: parsed.updatedAt || null,
-        lastActor: parsed.lastActor || 'کاربر',
-        lastAction: parsed.lastAction || 'همگام‌سازی',
-        products: Array.isArray(parsed.products) ? parsed.products : [],
-        purchases: Array.isArray(parsed.purchases) ? parsed.purchases : [],
-        suppliers: Array.isArray(parsed.suppliers) ? parsed.suppliers : [],
-        employees: Array.isArray(parsed.employees) ? parsed.employees : [],
-        revenues: Array.isArray(parsed.revenues) ? parsed.revenues : [],
-        timesheets: Array.isArray(parsed.timesheets) ? parsed.timesheets : [],
-        expenses: Array.isArray(parsed.expenses) ? parsed.expenses : [],
-        inventory: Array.isArray(parsed.inventory) ? parsed.inventory : [],
-        menuItems: Array.isArray(parsed.menuItems) ? parsed.menuItems : [],
-        settings: parsed.settings || {}
-      };
+    if (fs.existsSync(SNAPSHOTS_FILE)) {
+      const list = JSON.parse(fs.readFileSync(SNAPSHOTS_FILE, 'utf-8'));
+      if (Array.isArray(list)) {
+        return list.filter((s) => s && typeof s === 'object' && s.state);
+      }
     }
   } catch {
-    // Return empty default
+    // Ignore corrupted snapshot list
   }
+  return [];
+}
+
+function readServerStore() {
+  // 1. Try primary store file
+  if (fs.existsSync(SERVER_STORE_FILE)) {
+    try {
+      return parseAndVerifyStoreData(fs.readFileSync(SERVER_STORE_FILE, 'utf-8'));
+    } catch {
+      writeAuditLog('STORE_PRIMARY_CORRUPT', 'system', '127.0.0.1', {
+        file: 'server_synced_store.json'
+      });
+    }
+  }
+
+  // 2. Fallback to backup store file (.bak)
+  if (fs.existsSync(SERVER_STORE_BAK_FILE)) {
+    try {
+      const recovered = parseAndVerifyStoreData(
+        fs.readFileSync(SERVER_STORE_BAK_FILE, 'utf-8')
+      );
+      writeFileAtomic(SERVER_STORE_FILE, {
+        ...recovered,
+        checksum: computeStateChecksum(recovered)
+      });
+      writeAuditLog('STORE_AUTO_RECOVERED', 'system', '127.0.0.1', {
+        source: 'server_synced_store.json.bak',
+        revision: recovered.revision
+      });
+      return recovered;
+    } catch {
+      // Proceed to snapshot recovery
+    }
+  }
+
+  // 3. Fallback to most recent verified snapshot in server_snapshots.json
+  const snaps = readSnapshots();
+  for (const snap of snaps) {
+    try {
+      const recovered = parseAndVerifyStoreData(JSON.stringify(snap.state));
+      writeFileAtomic(SERVER_STORE_FILE, {
+        ...recovered,
+        checksum: computeStateChecksum(recovered)
+      });
+      writeAuditLog('STORE_AUTO_RECOVERED', 'system', '127.0.0.1', {
+        source: `snapshot:${snap.id}`,
+        revision: recovered.revision
+      });
+      return recovered;
+    } catch {
+      // Try next snapshot
+    }
+  }
+
   return {
     version: 3,
     revision: 0,
@@ -1032,41 +1241,41 @@ function readServerStore() {
   };
 }
 
-function writeServerStore(data) {
-  writeFileAtomic(SERVER_STORE_FILE, data);
-}
+/**
+ * Commits both the write-ahead snapshot and the primary store + .bak atomically
+ * with SHA-256 checksums so interrupted writes are always recoverable.
+ */
+function commitStateAndSnapshot(actor, actionSummary, stateData) {
+  const checksum = computeStateChecksum(stateData);
+  const envelope = {
+    ...stateData,
+    checksum
+  };
 
-function readSnapshots() {
-  try {
-    if (fs.existsSync(SNAPSHOTS_FILE)) {
-      const list = JSON.parse(fs.readFileSync(SNAPSHOTS_FILE, 'utf-8'));
-      return Array.isArray(list) ? list : [];
-    }
-  } catch {
-    // Ignore
-  }
-  return [];
-}
-
-function recordSnapshot(actor, actionSummary, state) {
+  // Step 1: Write-ahead snapshot commit
   const snapshots = readSnapshots();
   const snap = {
     id: `snap_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`,
-    revision: state.revision || 1,
-    timestamp: state.updatedAt || new Date().toISOString(),
+    revision: stateData.revision || 1,
+    timestamp: stateData.updatedAt || new Date().toISOString(),
     actor: sanitizeText(actor, 64) || 'کاربر',
     actionSummary: sanitizeText(actionSummary, 160) || 'بروزرسانی اطلاعات',
+    checksum,
     counts: {
-      purchases: (state.purchases || []).length,
-      revenues: (state.revenues || []).length,
-      employees: (state.employees || []).length,
-      menuItems: (state.menuItems || []).length
+      purchases: (stateData.purchases || []).length,
+      revenues: (stateData.revenues || []).length,
+      employees: (stateData.employees || []).length,
+      menuItems: (stateData.menuItems || []).length
     },
-    state
+    state: envelope
   };
   snapshots.unshift(snap);
-  const trimmed = snapshots.slice(0, MAX_SNAPSHOTS);
-  writeFileAtomic(SNAPSHOTS_FILE, trimmed);
+  writeFileAtomic(SNAPSHOTS_FILE, snapshots.slice(0, MAX_SNAPSHOTS));
+
+  // Step 2: Commit primary store and update recovery .bak
+  writeFileAtomic(SERVER_STORE_FILE, envelope);
+  writeFileAtomic(SERVER_STORE_BAK_FILE, envelope);
+
   return snap;
 }
 
@@ -1090,17 +1299,16 @@ function readRawBody(req) {
 
 function sendJson(res, status, payload, extraHeaders = {}) {
   res.writeHead(status, {
+    ...BASE_SECURITY_HEADERS,
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
-    'X-Content-Type-Options': 'nosniff',
-    'X-Frame-Options': 'DENY',
     ...extraHeaders
   });
   res.end(JSON.stringify(payload));
 }
 
 // ============================================================================
-// 8. HTTP Server & Route Handlers
+// 9. HTTP Server & Route Handlers
 // ============================================================================
 
 const server = http.createServer(async (req, res) => {
@@ -1126,22 +1334,45 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  const clientIp =
-    (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() ||
-    req.socket.remoteAddress ||
-    'unknown';
+  const clientIp = getClientIp(req);
+  const socketIp = (req.socket?.remoteAddress || '').trim();
+  const isLocalLoopback =
+    socketIp === '127.0.0.1' || socketIp === '::1' || socketIp === '::ffff:127.0.0.1';
+
+  // Enforce HTTPS for sensitive operations when ENFORCE_HTTPS is enabled
+  if (
+    ENFORCE_HTTPS &&
+    !isRequestSecure(req) &&
+    !(isLocalLoopback && pathname === '/api/health')
+  ) {
+    if (pathname.startsWith('/api/')) {
+      sendJson(res, 403, {
+        error: {
+          code: 403,
+          message: 'برای انجام عملیات حساس، ارتباط امن HTTPS الزامی است.'
+        }
+      });
+      return;
+    }
+    const hostHeader = (req.headers.host || '').toString().replace(/:\d+$/, '');
+    if (hostHeader) {
+      res.writeHead(301, {
+        ...BASE_SECURITY_HEADERS,
+        Location: `https://${hostHeader}${rawUrl}`
+      });
+      res.end();
+      return;
+    }
+  }
 
   if (pathname.startsWith('/api/')) {
-    // General API rate limit check
-    const genLimit = checkSlidingWindowLimit(
-      generalRateByIp,
-      clientIp,
-      MAX_GENERAL_REQUESTS_PER_MIN,
-      API_WINDOW_MS
-    );
+    const genLimit = generalRateLimiter.consume(clientIp);
     if (genLimit.limited) {
       sendJson(res, 429, {
-        error: { code: 429, message: 'تعداد درخواست‌ها بیش از حد مجاز است. لطفاً کمی صبر کنید.' }
+        error: {
+          code: 429,
+          message: 'تعداد درخواست‌ها بیش از حد مجاز است. لطفاً کمی صبر کنید.'
+        }
       });
       return;
     }
@@ -1151,7 +1382,9 @@ const server = http.createServer(async (req, res) => {
       try {
         rawBody = await readRawBody(req);
       } catch {
-        sendJson(res, 400, { error: { code: 400, message: 'بدنه درخواست نامعتبر یا بیش از حد بزرگ است.' } });
+        sendJson(res, 400, {
+          error: { code: 400, message: 'بدنه درخواست نامعتبر یا بیش از حد بزرگ است.' }
+        });
         return;
       }
     }
@@ -1165,15 +1398,15 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // Login Endpoint (Salted scrypt + HttpOnly Signed Session Cookie + Audit Log)
     if (pathname === '/api/auth/login' && req.method === 'POST') {
-      if (isLoginRateLimited(clientIp)) {
+      if (loginRateLimiter.isBlocked(clientIp)) {
         writeAuditLog('AUTH_LOGIN_RATE_LIMITED', 'anonymous', clientIp);
         sendJson(res, 429, {
           ok: false,
           error: {
             code: 429,
-            message: 'تعداد تلاش‌های ناموفق بیش از حد مجاز است. لطفاً ۵ دقیقه دیگر تلاش کنید.'
+            message:
+              'تعداد تلاش‌های ناموفق بیش از حد مجاز است. لطفاً ۵ دقیقه دیگر تلاش کنید.'
           }
         });
         return;
@@ -1200,7 +1433,7 @@ const server = http.createServer(async (req, res) => {
         }
 
         if (!verification.ok) {
-          recordFailedLoginAttempt(clientIp);
+          loginRateLimiter.recordAttempt(clientIp);
           writeAuditLog('AUTH_LOGIN_FAILED', user || 'anonymous', clientIp, {
             reason: verification.reason
           });
@@ -1214,8 +1447,12 @@ const server = http.createServer(async (req, res) => {
           return;
         }
 
-        clearFailedLoginAttempts(clientIp);
-        const session = createServerSession(verification.username, rememberDays);
+        loginRateLimiter.reset(clientIp);
+        const session = await createServerSession(
+          verification.username,
+          verification.role || 'manager',
+          rememberDays
+        );
         const cookieHeaders = buildCookieHeaders(
           req,
           session.signedToken,
@@ -1226,7 +1463,6 @@ const server = http.createServer(async (req, res) => {
           rememberDays
         });
 
-        // Session token is set ONLY in the HttpOnly cookie — never exposed in the JSON body
         sendJson(
           res,
           200,
@@ -1247,7 +1483,6 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // Require valid HMAC-signed server session for all other /api/* endpoints
     const activeSession = getAuthenticatedSession(req);
     if (!activeSession) {
       writeAuditLog('API_UNAUTHORIZED_ACCESS', 'anonymous', clientIp, {
@@ -1263,7 +1498,6 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // Enforce CSRF token & Origin check on all state-changing operations
     const csrfCheck = verifyCsrfProtection(req, activeSession);
     if (!csrfCheck.ok) {
       writeAuditLog('API_CSRF_REJECTED', activeSession.username, clientIp, {
@@ -1279,13 +1513,9 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // Rate limit state-mutating operations
     if (req.method === 'POST' || req.method === 'PUT' || req.method === 'DELETE') {
-      const mutLimit = checkSlidingWindowLimit(
-        mutationRateByIp,
-        `${clientIp}:${activeSession.username}`,
-        MAX_MUTATION_REQUESTS_PER_MIN,
-        API_WINDOW_MS
+      const mutLimit = mutationRateLimiter.consume(
+        `${clientIp}:${activeSession.username}`
       );
       if (mutLimit.limited) {
         sendJson(res, 429, {
@@ -1309,7 +1539,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (pathname === '/api/auth/logout' && req.method === 'POST') {
-      revokeServerSession(activeSession.sessionId);
+      await revokeServerSession(activeSession.sessionId);
       writeAuditLog('AUTH_LOGOUT', activeSession.username, clientIp);
       const clearCookies = buildCookieHeaders(req, '', 0);
       sendJson(res, 200, { ok: true }, { 'Set-Cookie': clearCookies });
@@ -1359,7 +1589,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // Atomic, Mutex-Locked Sync Push & Backup Import with Optimistic Concurrency Check
+    // Atomic Sync Push & Backup Import with Strict Revision & forceOverwrite Verification
     if (
       (pathname === '/api/sync/push' || pathname === '/api/import/backup') &&
       req.method === 'POST'
@@ -1368,44 +1598,84 @@ const server = http.createServer(async (req, res) => {
         try {
           const body = JSON.parse(rawBody.toString('utf-8') || '{}');
           const incomingRaw = body.state ? body.state : body;
-          const baseRevision =
-            body.baseRevision !== undefined && body.baseRevision !== null
-              ? Number(body.baseRevision)
-              : null;
-          const forceOverwrite = Boolean(body.forceOverwrite);
-
           const currentStore = readServerStore();
 
-          // Version conflict detection: prevent stale client from overwriting newer server state
-          if (
-            pathname === '/api/sync/push' &&
-            !forceOverwrite &&
-            baseRevision !== null &&
-            Number.isFinite(baseRevision) &&
-            currentStore.revision > 0 &&
-            baseRevision < currentStore.revision
-          ) {
-            writeAuditLog(
-              'SYNC_CONFLICT_REJECTED',
-              activeSession.username,
-              clientIp,
-              {
-                clientBaseRevision: baseRevision,
-                serverRevision: currentStore.revision
-              }
-            );
-            sendJson(res, 409, {
-              error: {
-                code: 409,
-                message:
-                  'اطلاعات روی سرور توسط دستگاه دیگری بروزرسانی شده است. لطفاً ابتدا آخرین نسخه سرور را دریافت کنید.',
-                serverRevision: currentStore.revision,
-                updatedAt: currentStore.updatedAt,
-                lastActor: currentStore.lastActor,
-                lastAction: currentStore.lastAction
-              }
-            });
-            return;
+          if (pathname === '/api/sync/push') {
+            if (
+              body.forceOverwrite !== undefined &&
+              typeof body.forceOverwrite !== 'boolean'
+            ) {
+              sendJson(res, 400, {
+                error: {
+                  code: 400,
+                  message: 'فیلد forceOverwrite باید صرفاً یک مقدار بولین (true/false) باشد.'
+                }
+              });
+              return;
+            }
+
+            const forceOverwrite = body.forceOverwrite === true;
+            if (forceOverwrite && activeSession.role !== 'manager') {
+              writeAuditLog(
+                'SYNC_FORCE_OVERWRITE_DENIED',
+                activeSession.username,
+                clientIp
+              );
+              sendJson(res, 403, {
+                error: {
+                  code: 403,
+                  message: 'اجازه رونویسی اجباری (forceOverwrite) فقط برای مدیر مجاز است.'
+                }
+              });
+              return;
+            }
+
+            if (
+              typeof body.baseRevision !== 'number' ||
+              !Number.isInteger(body.baseRevision) ||
+              body.baseRevision < 0
+            ) {
+              sendJson(res, 400, {
+                error: {
+                  code: 400,
+                  message:
+                    'ارسال شماره نسخه پایه معتبر (baseRevision به صورت عدد صحیح) در هر همگام‌سازی الزامی است.'
+                }
+              });
+              return;
+            }
+
+            if (!forceOverwrite && body.baseRevision !== currentStore.revision) {
+              writeAuditLog(
+                'SYNC_CONFLICT_REJECTED',
+                activeSession.username,
+                clientIp,
+                {
+                  clientBaseRevision: body.baseRevision,
+                  serverRevision: currentStore.revision
+                }
+              );
+              sendJson(res, 409, {
+                error: {
+                  code: 409,
+                  message:
+                    'نسخه ارسالی با نسخه فعلی سرور مطابقت ندارد. لطفاً ابتدا آخرین نسخه سرور را دریافت کنید.',
+                  serverRevision: currentStore.revision,
+                  updatedAt: currentStore.updatedAt,
+                  lastActor: currentStore.lastActor,
+                  lastAction: currentStore.lastAction
+                }
+              });
+              return;
+            }
+          } else {
+            // /api/import/backup requires manager role
+            if (activeSession.role !== 'manager') {
+              sendJson(res, 403, {
+                error: { code: 403, message: 'درون‌ریزی فایل پشتیبان نیازمند دسترسی مدیر است.' }
+              });
+              return;
+            }
           }
 
           const validated = validateAndSanitizeBackupState(incomingRaw);
@@ -1424,8 +1694,7 @@ const server = http.createServer(async (req, res) => {
             ...validated
           };
 
-          writeServerStore(newState);
-          const snap = recordSnapshot(actor, actionSummary, newState);
+          const snap = commitStateAndSnapshot(actor, actionSummary, newState);
 
           writeAuditLog(
             pathname === '/api/import/backup' ? 'BACKUP_IMPORTED' : 'SYNC_STATE_PUSH',
@@ -1434,6 +1703,7 @@ const server = http.createServer(async (req, res) => {
             {
               revision: nextRevision,
               snapshotId: snap.id,
+              forceOverwrite: body.forceOverwrite === true,
               purchases: newState.purchases.length,
               revenues: newState.revenues.length
             }
@@ -1475,12 +1745,21 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (pathname === '/api/sync/revert' && req.method === 'POST') {
+      if (activeSession.role !== 'manager') {
+        sendJson(res, 403, {
+          error: { code: 403, message: 'بازگردانی نسخه نیازمند دسترسی مدیر است.' }
+        });
+        return;
+      }
+
       await stateMutex.runExclusive(async () => {
         try {
           const body = JSON.parse(rawBody.toString('utf-8') || '{}');
           const snapId = sanitizeText(body.snapshotId, 96);
           if (!isValidSafeId(snapId)) {
-            sendJson(res, 400, { error: { code: 400, message: 'شناسه نسخه نامعتبر است.' } });
+            sendJson(res, 400, {
+              error: { code: 400, message: 'شناسه نسخه نامعتبر است.' }
+            });
             return;
           }
 
@@ -1508,8 +1787,7 @@ const server = http.createServer(async (req, res) => {
             ...validatedRestored
           };
 
-          writeServerStore(restoredState);
-          recordSnapshot(
+          commitStateAndSnapshot(
             actor,
             `بازگشت به نسخه قبلی (${target.actionSummary})`,
             restoredState
@@ -1549,13 +1827,13 @@ const server = http.createServer(async (req, res) => {
 
     if (pathname === '/api/products' && req.method === 'GET') {
       const store = readServerStore();
-      sendJson(res, 200, { items: store.products });
+      sendJson(res, 200, { revision: store.revision, items: store.products });
       return;
     }
 
     if (pathname === '/api/purchases' && req.method === 'GET') {
       const store = readServerStore();
-      sendJson(res, 200, { items: store.purchases });
+      sendJson(res, 200, { revision: store.revision, items: store.purchases });
       return;
     }
 
@@ -1577,8 +1855,7 @@ const server = http.createServer(async (req, res) => {
           store.lastActor = activeSession.username;
           store.lastAction = `ثبت خرید: ${newPurchase.productName}`;
 
-          writeServerStore(store);
-          recordSnapshot(activeSession.username, store.lastAction, store);
+          commitStateAndSnapshot(activeSession.username, store.lastAction, store);
 
           writeAuditLog('PURCHASE_CREATED', activeSession.username, clientIp, {
             purchaseId: newPurchase.id,
@@ -1604,14 +1881,18 @@ const server = http.createServer(async (req, res) => {
         try {
           const id = sanitizeText(pathname.replace('/api/purchases/', ''), 96);
           if (!isValidSafeId(id)) {
-            sendJson(res, 400, { error: { code: 400, message: 'شناسه خرید نامعتبر است' } });
+            sendJson(res, 400, {
+              error: { code: 400, message: 'شناسه خرید نامعتبر است' }
+            });
             return;
           }
           const input = JSON.parse(rawBody.toString('utf-8') || '{}');
           const store = readServerStore();
           const idx = store.purchases.findIndex((p) => p.id === id);
           if (idx === -1) {
-            sendJson(res, 404, { error: { code: 404, message: 'فاکتور خرید یافت نشد' } });
+            sendJson(res, 404, {
+              error: { code: 404, message: 'فاکتور خرید یافت نشد' }
+            });
             return;
           }
 
@@ -1626,8 +1907,7 @@ const server = http.createServer(async (req, res) => {
           store.lastActor = activeSession.username;
           store.lastAction = `ویرایش خرید: ${updated.productName}`;
 
-          writeServerStore(store);
-          recordSnapshot(activeSession.username, store.lastAction, store);
+          commitStateAndSnapshot(activeSession.username, store.lastAction, store);
 
           writeAuditLog('PURCHASE_UPDATED', activeSession.username, clientIp, {
             purchaseId: updated.id,
@@ -1635,7 +1915,7 @@ const server = http.createServer(async (req, res) => {
             revision: nextRevision
           });
 
-          sendJson(res, 200, updated);
+          sendJson(res, 200, { ...updated, revision: nextRevision });
         } catch (err) {
           const msg = err instanceof Error ? err.message : 'خطا در ویرایش خرید';
           sendJson(res, 400, { error: { code: 400, message: msg } });
@@ -1649,19 +1929,22 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ============================================================================
-  // Static File Serving with Strict Path Traversal & Extension Protection
+  // Static File Serving with Strict Path Traversal & Security Headers
   // ============================================================================
 
   const segments = pathname.split('/').filter(Boolean);
   if (segments.some((seg) => seg === '..' || seg.startsWith('.'))) {
-    res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.writeHead(403, { ...BASE_SECURITY_HEADERS, 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('Forbidden');
     return;
   }
 
   const ext = path.extname(pathname).toLowerCase();
-  if (FORBIDDEN_STATIC_EXTENSIONS.has(ext) || (ext === '.json' && pathname !== '/manifest.json')) {
-    res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+  if (
+    FORBIDDEN_STATIC_EXTENSIONS.has(ext) ||
+    (ext === '.json' && pathname !== '/manifest.json')
+  ) {
+    res.writeHead(403, { ...BASE_SECURITY_HEADERS, 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('Forbidden');
     return;
   }
@@ -1673,7 +1956,7 @@ const server = http.createServer(async (req, res) => {
       DIST_DIR
     );
   } catch {
-    res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.writeHead(403, { ...BASE_SECURITY_HEADERS, 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('Forbidden');
     return;
   }
@@ -1683,32 +1966,39 @@ const server = http.createServer(async (req, res) => {
       const indexFile = path.join(DIST_DIR, 'index.html');
       fs.readFile(indexFile, (indexErr, content) => {
         if (indexErr) {
-          res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.writeHead(500, {
+            ...BASE_SECURITY_HEADERS,
+            'Content-Type': 'text/plain; charset=utf-8'
+          });
           res.end('Frontend build not found. Run "npm run build" first.');
           return;
         }
         res.writeHead(200, {
+          ...BASE_SECURITY_HEADERS,
           'Content-Type': 'text/html; charset=utf-8',
-          'Cache-Control': 'no-cache',
-          'X-Content-Type-Options': 'nosniff',
-          'X-Frame-Options': 'DENY'
+          'Cache-Control': 'no-cache'
         });
         res.end(content);
       });
       return;
     }
 
-    // Verify realpath to block symlink escapes outside DIST_DIR
     fs.realpath(candidatePath, (realErr, realTarget) => {
       if (realErr) {
-        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.writeHead(404, {
+          ...BASE_SECURITY_HEADERS,
+          'Content-Type': 'text/plain; charset=utf-8'
+        });
         res.end('Not Found');
         return;
       }
       try {
         assertPathWithinDirectory(realTarget, DIST_DIR);
       } catch {
-        res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.writeHead(403, {
+          ...BASE_SECURITY_HEADERS,
+          'Content-Type': 'text/plain; charset=utf-8'
+        });
         res.end('Forbidden');
         return;
       }
@@ -1718,13 +2008,16 @@ const server = http.createServer(async (req, res) => {
 
       fs.readFile(realTarget, (readErr, content) => {
         if (readErr) {
-          res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.writeHead(500, {
+            ...BASE_SECURITY_HEADERS,
+            'Content-Type': 'text/plain; charset=utf-8'
+          });
           res.end('Internal Server Error');
           return;
         }
         res.writeHead(200, {
+          ...BASE_SECURITY_HEADERS,
           'Content-Type': contentType,
-          'X-Content-Type-Options': 'nosniff',
           'Cache-Control': isHashedAsset
             ? 'public, max-age=31536000, immutable'
             : 'no-cache'
