@@ -18,7 +18,7 @@
   import TimesheetsPage from './features/timesheets/TimesheetsPage.svelte';
   import ManagerPage from './features/manager/ManagerPage.svelte';
 
-  let appUsername = 'admin';
+  let appUsername = '';
   let appPassword = '';
   let rememberDays = 30;
   let appAuthError = '';
@@ -29,7 +29,9 @@
     if ($activeManagerUsername) {
       appUsername = $activeManagerUsername;
     }
-    await loadPurchases(true);
+    if ($isAppAuthenticated) {
+      await loadPurchases(true);
+    }
   });
 
   async function handleAppGateLogin() {
@@ -47,7 +49,8 @@
         return;
       }
       appPassword = '';
-      showToast('خوش آمدید! ورود شما برای ۳۰ روز در این مرورگر ذخیره شد.');
+      await loadPurchases(true);
+      showToast('ورود با موفقیت انجام شد.');
     } finally {
       isCheckingAuth = false;
     }
