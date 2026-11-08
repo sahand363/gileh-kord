@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# GILEH KORD - Hardened SSH Control Panel & Credentials Manager
+# GILEH KORD - Hardened SSH Control Panel (Salted scrypt Password Storage)
 # =============================================================================
 
 set -u
@@ -57,6 +57,22 @@ generate_strong_password() {
     tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16
 }
 
+# Hashes a plaintext password using salted scrypt (scrypt$16384$8$1$<salt_hex>$<hash_hex>)
+hash_password_scrypt() {
+  local plain="$1"
+  if command -v node >/dev/null 2>&1; then
+    PASS_TO_HASH="${plain}" node -e '
+      const crypto = require("node:crypto");
+      const salt = crypto.randomBytes(16);
+      const dk = crypto.scryptSync(process.env.PASS_TO_HASH, salt, 64, { N: 16384, r: 8, p: 1 });
+      process.stdout.write(`scrypt$16384$8$1$${salt.toString("hex")}$${dk.toString("hex")}`);
+    '
+  else
+    # If called before Node is installed, install_system_dependencies runs first in option_install
+    echo ""
+  fi
+}
+
 load_or_init_config() {
   mkdir -p "${CONFIG_DIR}" "${DATA_DIR}"
   chmod 700 "${CONFIG_DIR}" "${DATA_DIR}" 2>/dev/null || true
@@ -66,6 +82,8 @@ load_or_init_config() {
     rand_port=$(generate_random_port)
     local generated_pass
     generated_pass=$(generate_strong_password)
+    local pass_hash
+    pass_hash=$(hash_password_scrypt "${generated_pass}")
 
     cat > "${CONFIG_FILE}" <<EOF
 PORT=${rand_port}
@@ -73,42 +91,43 @@ HOST=0.0.0.0
 DOMAIN=${DEFAULT_DOMAIN}
 GILEH_DATA_DIR=${DATA_DIR}
 ADMIN_USER=${INITIAL_ADMIN_USER}
-ADMIN_PASS=${generated_pass}
+ADMIN_PASS_HASH=${pass_hash}
 MANAGERS_FILE=${MANAGERS_FILE}
 EOF
     chmod 600 "${CONFIG_FILE}"
-    echo "${INITIAL_ADMIN_USER}:${generated_pass}" > "${MANAGERS_FILE}"
-    chmod 600 "${MANAGERS_FILE}"
-    log_warn "Generated initial strong manager password for '${INITIAL_ADMIN_USER}': ${generated_pass}"
+    if [[ -n "${pass_hash}" ]]; then
+      echo "${INITIAL_ADMIN_USER}:${pass_hash}" > "${MANAGERS_FILE}"
+      chmod 600 "${MANAGERS_FILE}"
+    fi
+    log_warn "Initial Manager Credentials — Username: ${INITIAL_ADMIN_USER} | Password: ${generated_pass} (Save this now; only the salted scrypt hash is stored on disk)"
   fi
-
-  sed -i 's/^HOST=127\.0\.0\.1/HOST=0.0.0.0/' "${CONFIG_FILE}" 2>/dev/null || true
-  grep -q "^MANAGERS_FILE=" "${CONFIG_FILE}" 2>/dev/null || echo "MANAGERS_FILE=${MANAGERS_FILE}" >> "${CONFIG_FILE}"
 
   # shellcheck disable=SC1090
   source "${CONFIG_FILE}"
   if [[ "${DOMAIN:-_}" == "_" ]]; then
     DOMAIN=""
   fi
+  ADMIN_USER="${ADMIN_USER:-$INITIAL_ADMIN_USER}"
+  ADMIN_PASS_HASH="${ADMIN_PASS_HASH:-}"
 
-  # Automatically replace legacy insecure default 'admin1234' if found
-  if [[ -z "${ADMIN_PASS:-}" || "${ADMIN_PASS}" == "admin1234" ]]; then
-    ADMIN_USER="${ADMIN_USER:-$INITIAL_ADMIN_USER}"
-    ADMIN_PASS=$(generate_strong_password)
+  # Migrate any legacy plaintext ADMIN_PASS in config.env to salted scrypt ADMIN_PASS_HASH
+  if [[ -z "${ADMIN_PASS_HASH}" && -n "${ADMIN_PASS:-}" && "${ADMIN_PASS}" != "admin1234" ]]; then
+    ADMIN_PASS_HASH=$(hash_password_scrypt "${ADMIN_PASS}")
+    unset ADMIN_PASS
     save_config_file
-    if [[ -f "${MANAGERS_FILE}" ]]; then
-      grep -v ":admin1234$" "${MANAGERS_FILE}" > "${MANAGERS_FILE}.tmp" || true
-      echo "${ADMIN_USER}:${ADMIN_PASS}" >> "${MANAGERS_FILE}.tmp"
-      mv "${MANAGERS_FILE}.tmp" "${MANAGERS_FILE}"
-    else
-      echo "${ADMIN_USER}:${ADMIN_PASS}" > "${MANAGERS_FILE}"
-    fi
+  elif [[ -z "${ADMIN_PASS_HASH}" && "${ADMIN_PASS:-}" == "admin1234" ]]; then
+    local new_pass
+    new_pass=$(generate_strong_password)
+    ADMIN_PASS_HASH=$(hash_password_scrypt "${new_pass}")
+    unset ADMIN_PASS
+    save_config_file
+    echo "${ADMIN_USER}:${ADMIN_PASS_HASH}" > "${MANAGERS_FILE}"
     chmod 600 "${MANAGERS_FILE}"
-    log_warn "Replaced insecure default password with strong password for '${ADMIN_USER}': ${ADMIN_PASS}"
+    log_warn "Replaced insecure password with new strong password for '${ADMIN_USER}': ${new_pass}"
   fi
 
-  if [[ ! -f "${MANAGERS_FILE}" ]]; then
-    echo "${ADMIN_USER}:${ADMIN_PASS}" > "${MANAGERS_FILE}"
+  if [[ ! -f "${MANAGERS_FILE}" && -n "${ADMIN_PASS_HASH}" ]]; then
+    echo "${ADMIN_USER}:${ADMIN_PASS_HASH}" > "${MANAGERS_FILE}"
     chmod 600 "${MANAGERS_FILE}"
   fi
 }
@@ -120,7 +139,7 @@ HOST=0.0.0.0
 DOMAIN=${DOMAIN}
 GILEH_DATA_DIR=${DATA_DIR}
 ADMIN_USER=${ADMIN_USER}
-ADMIN_PASS=${ADMIN_PASS}
+ADMIN_PASS_HASH='${ADMIN_PASS_HASH}'
 MANAGERS_FILE=${MANAGERS_FILE}
 EOF
   chmod 600 "${CONFIG_FILE}"
@@ -367,7 +386,6 @@ option_install() {
   install_cli_shortcut
   systemctl restart "${SERVICE_NAME}"
   log_info "GILEH KORD installed! Access at: $(get_real_address)"
-  log_info "Manager Username: ${ADMIN_USER} | Password: ${ADMIN_PASS}"
 }
 
 option_update() {
@@ -403,10 +421,11 @@ option_logs() {
 
 option_manage_users() {
   require_root
+  install_system_dependencies
   load_or_init_config
 
   echo -e "\n${CYAN}┌──────────────────────────────────────────────────────────┐${NC}"
-  echo -e "${CYAN}│        MANAGER TAB — USER & PASSWORD CONFIGURATION       │${NC}"
+  echo -e "${CYAN}│   MANAGER TAB — SALTED SCRYPT USER & PASSWORD MANAGER    │${NC}"
   echo -e "${CYAN}└──────────────────────────────────────────────────────────┘${NC}"
   echo -e "  Current Manager Users : ${YELLOW}$(get_managers_list)${NC}"
   echo -e "  Primary Master User   : ${GREEN}${ADMIN_USER}${NC}"
@@ -427,24 +446,32 @@ option_manage_users() {
         return 1
       fi
 
-      read -r -p "Enter Strong Password for '${NEW_USER}' (min 8 chars): " NEW_PASS
-      if [[ "${#NEW_PASS}" -lt 8 || "${NEW_PASS}" == "admin1234" ]]; then
-        log_error "Password must be at least 8 characters and cannot be a default password."
+      read -r -s -p "Enter Strong Password for '${NEW_USER}' (min 8 chars): " NEW_PASS
+      echo ""
+      if [[ "${#NEW_PASS}" -lt 8 || "${NEW_PASS}" == "admin1234" || "${NEW_PASS}" == "12345678" ]]; then
+        log_error "Password must be at least 8 characters and not a common default."
+        return 1
+      fi
+
+      local new_hash
+      new_hash=$(hash_password_scrypt "${NEW_PASS}")
+      if [[ -z "${new_hash}" ]]; then
+        log_error "Failed to compute salted scrypt hash."
         return 1
       fi
 
       ADMIN_USER="${NEW_USER}"
-      ADMIN_PASS="${NEW_PASS}"
+      ADMIN_PASS_HASH="${new_hash}"
       save_config_file
 
       touch "${MANAGERS_FILE}"
       grep -v "^${NEW_USER}:" "${MANAGERS_FILE}" > "${MANAGERS_FILE}.tmp" || true
-      echo "${NEW_USER}:${NEW_PASS}" >> "${MANAGERS_FILE}.tmp"
+      echo "${NEW_USER}:${new_hash}" >> "${MANAGERS_FILE}.tmp"
       mv "${MANAGERS_FILE}.tmp" "${MANAGERS_FILE}"
       chmod 600 "${MANAGERS_FILE}"
 
       systemctl restart "${SERVICE_NAME}" 2>/dev/null || true
-      log_info "Manager user '${NEW_USER}' saved and activated immediately!"
+      log_info "Manager user '${NEW_USER}' hashed with unique salt (scrypt) and activated!"
       ;;
     2)
       read -r -p "Enter Username to remove: " DEL_USER
@@ -551,7 +578,7 @@ show_menu() {
   echo -e "${GREEN}├──────────────────────────────────────────────────────────────┤${NC}"
   echo -e "  Status       : ${status_badge}"
   echo -e "  Address      : ${CYAN}${BOLD}${real_addr}${NC}"
-  echo -e "  Manager User : ${YELLOW}${BOLD}${managers_list}${NC} ${DIM}(Option 8)${NC}"
+  echo -e "  Manager User : ${YELLOW}${BOLD}${managers_list}${NC} ${DIM}(Salted scrypt, Option 8)${NC}"
   echo -e "  Shortcut     : ${GREEN}sudo gk${NC}"
   echo -e "${GREEN}├──────────────────────────────────────────────────────────────┤${NC}"
   echo -e "  ${BOLD}1)${NC} Install GILEH KORD          ${BOLD}8)${NC} ${YELLOW}Add / Change Manager User & Pass${NC}"
