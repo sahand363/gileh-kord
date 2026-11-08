@@ -4,39 +4,88 @@ import type { ManagerAuthRecord } from '../models/types';
 import { generateUUID } from '../utils/uuid';
 
 const MANAGER_AUTH_KEY = 'manager_credentials';
-const APP_AUTH_COOKIE_NAME = 'gk_app_auth';
-const COOKIE_MAX_AGE_DAYS = 30;
+const SESSION_TOKEN_STORAGE_KEY = 'gk_session_token';
+const SESSION_USER_STORAGE_KEY = 'gk_session_user';
+const SESSION_EXPIRES_STORAGE_KEY = 'gk_session_expires';
 
-function readAppAuthCookie(): string | null {
-  if (typeof document === 'undefined') return 'test_env';
-  const match = document.cookie.match(
-    new RegExp('(?:^|; )' + APP_AUTH_COOKIE_NAME + '=([^;]*)')
-  );
-  return match ? decodeURIComponent(match[1]) : null;
+function readStoredSession(): { token: string; username: string } | null {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
+    return null;
+  }
+  try {
+    const token = localStorage.getItem(SESSION_TOKEN_STORAGE_KEY) || '';
+    const username = localStorage.getItem(SESSION_USER_STORAGE_KEY) || '';
+    const expiresRaw = Number(localStorage.getItem(SESSION_EXPIRES_STORAGE_KEY) || '0');
+    if (!token || !username || (expiresRaw > 0 && expiresRaw <= Date.now())) {
+      clearStoredSession();
+      return null;
+    }
+    return { token, username };
+  } catch {
+    return null;
+  }
 }
 
-function writeAppAuthCookie(username: string, days: number = COOKIE_MAX_AGE_DAYS): void {
-  if (typeof document === 'undefined') return;
-  const maxAge = days * 24 * 60 * 60;
-  const token = encodeURIComponent(`${username}::${Date.now()}`);
-  document.cookie = `${APP_AUTH_COOKIE_NAME}=${token}; path=/; max-age=${maxAge}; SameSite=Lax`;
+function saveStoredSession(
+  token: string,
+  username: string,
+  expiresAt: number
+): void {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
+    return;
+  }
+  try {
+    localStorage.setItem(SESSION_TOKEN_STORAGE_KEY, token);
+    localStorage.setItem(SESSION_USER_STORAGE_KEY, username);
+    localStorage.setItem(SESSION_EXPIRES_STORAGE_KEY, String(expiresAt));
+  } catch {
+    // Ignore storage quota errors
+  }
 }
 
-function removeAppAuthCookie(): void {
-  if (typeof document === 'undefined') return;
-  document.cookie = `${APP_AUTH_COOKIE_NAME}=; path=/; max-age=0; SameSite=Lax`;
+function clearStoredSession(): void {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
+    return;
+  }
+  try {
+    localStorage.removeItem(SESSION_TOKEN_STORAGE_KEY);
+    localStorage.removeItem(SESSION_USER_STORAGE_KEY);
+    localStorage.removeItem(SESSION_EXPIRES_STORAGE_KEY);
+  } catch {
+    // Ignore
+  }
 }
 
-// Gate 1: Whole-app login state (remembered for 30 days in browser cookies)
-export const isAppAuthenticated = writable<boolean>(Boolean(readAppAuthCookie()));
+export function getActiveSessionToken(): string {
+  const session = readStoredSession();
+  return session ? session.token : '';
+}
 
-// Gate 2: Manager Dashboard login state (always asks again when entering Manager tab)
+function constantTimeHashCompare(a: string, b: string): boolean {
+  if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length || a.length === 0) {
+    return false;
+  }
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+const initialSession = readStoredSession();
+
+// Gate 1: Whole-app login state (requires valid server token or verified offline cache)
+export const isAppAuthenticated = writable<boolean>(Boolean(initialSession));
+
+// Gate 2: Manager Dashboard login state (requires re-entering credentials on Manager tab)
 export const isManagerUnlocked = writable<boolean>(false);
-export const isManagerConfigured = writable<boolean>(true);
-export const activeManagerUsername = writable<string>('admin');
+export const isManagerConfigured = writable<boolean>(false);
+export const activeManagerUsername = writable<string>(
+  initialSession ? initialSession.username : ''
+);
 
 export function deriveLocalPasswordHash(password: string, salt: string): string {
-  const input = `${salt}::gileh_kord_v1::${password}`;
+  const input = `${salt}::gileh_kord_v2_auth::${password}`;
   const state = new Uint32Array([
     0x6a09e667,
     0xbb67ae85,
@@ -48,7 +97,7 @@ export function deriveLocalPasswordHash(password: string, salt: string): string 
     0x5be0cd19
   ]);
 
-  for (let round = 0; round < 2048; round++) {
+  for (let round = 0; round < 4096; round++) {
     for (let i = 0; i < input.length; i++) {
       const code = input.charCodeAt(i) ^ (round & 0xff);
       const idx = (i + round) & 7;
@@ -83,7 +132,10 @@ export class ManagerAuthService {
     }
   }
 
-  private async saveLocalCache(username: string, password: string): Promise<void> {
+  private async saveVerifiedLocalCache(
+    username: string,
+    password: string
+  ): Promise<void> {
     const salt = generateUUID();
     const passwordHash = deriveLocalPasswordHash(password, salt);
     const now = new Date().toISOString();
@@ -101,30 +153,56 @@ export class ManagerAuthService {
   }
 
   public async checkInitialized(): Promise<boolean> {
-    const cookieVal = readAppAuthCookie();
-    if (cookieVal) {
+    const storedSession = readStoredSession();
+    if (storedSession) {
       isAppAuthenticated.set(true);
-      const savedUser = cookieVal.split('::')[0];
-      if (savedUser && savedUser !== 'test_env') {
-        activeManagerUsername.set(savedUser);
+      activeManagerUsername.set(storedSession.username);
+
+      // Verify token validity with the server when online
+      if (typeof fetch !== 'undefined') {
+        try {
+          const res = await fetch('/api/auth/session', {
+            method: 'GET',
+            headers: {
+              Accept: 'application/json',
+              Authorization: `Bearer ${storedSession.token}`
+            },
+            credentials: 'same-origin'
+          });
+          if (res.status === 401) {
+            this.logoutWholeApp();
+            return false;
+          }
+        } catch {
+          // Offline: retain locally stored valid session until expiry
+        }
       }
+    } else {
+      isAppAuthenticated.set(false);
     }
 
     const rec = await this.getRecord();
     if (rec && rec.username) {
-      activeManagerUsername.set(rec.username);
+      if (!storedSession) {
+        activeManagerUsername.set(rec.username);
+      }
+      isManagerConfigured.set(true);
+      return true;
     }
-    isManagerConfigured.set(true);
-    return true;
+
+    isManagerConfigured.set(false);
+    return false;
   }
 
   /**
-   * Verifies username & password against SSH server config (`/api/auth/login`)
-   * with local IndexedDB fallback when offline.
+   * Authenticates credentials against the server (`POST /api/auth/login`).
+   * Offline fallback is strictly limited to verifying against an already-existing,
+   * server-verified `ManagerAuthRecord` in IndexedDB. Never auto-creates credentials.
    */
   public async verifyCredentials(
     username: string,
-    password: string
+    password: string,
+    rememberDays: number = 30
   ): Promise<{ success: boolean; error?: string }> {
     const cleanUser = username.trim();
     if (!cleanUser || !password) {
@@ -138,80 +216,92 @@ export class ManagerAuthService {
       try {
         const res = await fetch('/api/auth/login', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username: cleanUser, password })
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json'
+          },
+          credentials: 'same-origin',
+          body: JSON.stringify({
+            username: cleanUser,
+            password,
+            rememberDays
+          })
         });
-        if (res.ok) {
-          const data = await res.json();
-          if (data && data.ok) {
-            await this.saveLocalCache(cleanUser, password);
-            activeManagerUsername.set(cleanUser);
-            return { success: true };
-          }
-        } else if (res.status === 401) {
-          return {
-            success: false,
-            error: 'نام کاربری یا رمز عبور نادرست است.'
-          };
+
+        const data = await res.json().catch(() => null);
+
+        if (res.ok && data && data.ok && typeof data.token === 'string') {
+          const verifiedUser = String(data.username || cleanUser);
+          const expiresAt =
+            Number(data.expiresAt) ||
+            Date.now() + rememberDays * 24 * 60 * 60 * 1000;
+
+          saveStoredSession(data.token, verifiedUser, expiresAt);
+          await this.saveVerifiedLocalCache(verifiedUser, password);
+          activeManagerUsername.set(verifiedUser);
+          isManagerConfigured.set(true);
+          return { success: true };
         }
+
+        // Server explicitly rejected credentials or is unconfigured — never fall back to offline cache
+        const serverErrMsg =
+          data?.error?.message ||
+          (typeof data?.error === 'string' ? data.error : null) ||
+          'نام کاربری یا رمز عبور نادرست است.';
+        return {
+          success: false,
+          error: serverErrMsg
+        };
       } catch {
-        // Offline or local dev fallback
+        // Network unreachable: proceed to strict offline cache check below
       }
     }
 
+    // Strict Offline Verification: Only succeeds if a previously server-verified record exists
     const record = await this.getRecord();
-    if (record) {
-      if (cleanUser.toLowerCase() === record.username.toLowerCase()) {
-        const candidateHash = deriveLocalPasswordHash(password, record.salt);
-        if (candidateHash === record.passwordHash) {
-          activeManagerUsername.set(record.username);
-          return { success: true };
-        }
-      }
+    if (!record || !record.username || !record.passwordHash || !record.salt) {
       return {
         success: false,
-        error: 'نام کاربری یا رمز عبور نادرست است.'
+        error:
+          'ارتباط با سرور برقرار نیست. برای اولین ورود در این مرورگر، اتصال به سرور الزامی است.'
       };
     }
 
-    // Default initial fallback if neither server nor local record is set yet
-    if (cleanUser.toLowerCase() === 'admin' && password === 'admin1234') {
-      await this.saveLocalCache(cleanUser, password);
-      activeManagerUsername.set(cleanUser);
+    const userMatches =
+      cleanUser.toLowerCase() === record.username.trim().toLowerCase();
+    const candidateHash = deriveLocalPasswordHash(password, record.salt);
+    const hashMatches = constantTimeHashCompare(candidateHash, record.passwordHash);
+
+    if (userMatches && hashMatches) {
+      activeManagerUsername.set(record.username);
+      isManagerConfigured.set(true);
       return { success: true };
     }
 
-    await this.saveLocalCache(cleanUser, password);
-    activeManagerUsername.set(cleanUser);
-    return { success: true };
+    return {
+      success: false,
+      error: 'نام کاربری یا رمز عبور نادرست است.'
+    };
   }
 
-  /**
-   * Gate 1 Login: Unlocks the whole application and saves a 30-day cookie,
-   * while keeping `isManagerUnlocked` false so Manager tab still asks for login.
-   */
   public async loginAppGate(
     username: string,
     password: string,
-    rememberDays: number = COOKIE_MAX_AGE_DAYS
+    rememberDays: number = 30
   ): Promise<{ success: boolean; error?: string }> {
-    const check = await this.verifyCredentials(username, password);
+    const check = await this.verifyCredentials(username, password, rememberDays);
     if (!check.success) {
       return check;
     }
-    writeAppAuthCookie(username.trim(), rememberDays);
     isAppAuthenticated.set(true);
     return { success: true };
   }
 
-  /**
-   * Gate 2 Login: Unlocks the Manager Dashboard tab for the current session.
-   */
   public async login(
     username: string,
     password: string
   ): Promise<{ success: boolean; error?: string }> {
-    const check = await this.verifyCredentials(username, password);
+    const check = await this.verifyCredentials(username, password, 30);
     if (!check.success) {
       return check;
     }
@@ -219,53 +309,48 @@ export class ManagerAuthService {
     return { success: true };
   }
 
-  public async setupInitialAccount(
-    username: string,
-    password: string
-  ): Promise<{ success: boolean; error?: string }> {
-    const cleanUser = username.trim();
-    if (cleanUser.length < 3) {
-      return {
-        success: false,
-        error: 'نام کاربری مدیر باید حداقل ۳ کاراکتر باشد.'
-      };
-    }
-    if (!password || password.length < 4) {
-      return {
-        success: false,
-        error: 'رمز عبور باید حداقل ۴ کاراکتر باشد.'
-      };
-    }
-
-    await this.saveLocalCache(cleanUser, password);
-    isManagerConfigured.set(true);
-    activeManagerUsername.set(cleanUser);
-    isManagerUnlocked.set(true);
-    return { success: true };
-  }
-
+  /**
+   * Changes the offline cache password ONLY if a verified record already exists
+   * and the current password matches in constant time.
+   */
   public async changePassword(
     currentPassword: string,
     newPassword: string,
     newUsername?: string
   ): Promise<{ success: boolean; error?: string }> {
-    if (!newPassword || newPassword.length < 4) {
+    if (!currentPassword) {
       return {
         success: false,
-        error: 'رمز عبور جدید باید حداقل ۴ کاراکتر باشد.'
+        error: 'وارد کردن رمز عبور فعلی الزامی است.'
+      };
+    }
+    if (!newPassword || newPassword.length < 8) {
+      return {
+        success: false,
+        error: 'رمز عبور جدید باید حداقل ۸ کاراکتر باشد.'
       };
     }
 
     const record = await this.getRecord();
-    if (record) {
-      const currentHash = deriveLocalPasswordHash(currentPassword, record.salt);
-      if (currentHash !== record.passwordHash) {
-        return { success: false, error: 'رمز عبور فعلی نادرست است.' };
-      }
+    if (!record || !record.passwordHash || !record.salt) {
+      return {
+        success: false,
+        error:
+          'هیچ حساب تأییدشده‌ای در حافظه محلی وجود ندارد. لطفاً ابتدا به صورت آنلاین وارد شوید.'
+      };
     }
 
-    const finalUser = newUsername?.trim() || record?.username || 'admin';
-    await this.saveLocalCache(finalUser, newPassword);
+    const currentHash = deriveLocalPasswordHash(currentPassword, record.salt);
+    if (!constantTimeHashCompare(currentHash, record.passwordHash)) {
+      return { success: false, error: 'رمز عبور فعلی نادرست است.' };
+    }
+
+    const finalUser = newUsername?.trim() || record.username;
+    if (!finalUser) {
+      return { success: false, error: 'نام کاربری نمی‌تواند خالی باشد.' };
+    }
+
+    await this.saveVerifiedLocalCache(finalUser, newPassword);
     activeManagerUsername.set(finalUser);
     return { success: true };
   }
@@ -275,7 +360,17 @@ export class ManagerAuthService {
   }
 
   public logoutWholeApp(): void {
-    removeAppAuthCookie();
+    const token = getActiveSessionToken();
+    if (token && typeof fetch !== 'undefined') {
+      void fetch('/api/auth/logout', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`
+        },
+        credentials: 'same-origin'
+      }).catch(() => {});
+    }
+    clearStoredSession();
     isManagerUnlocked.set(false);
     isAppAuthenticated.set(false);
   }
