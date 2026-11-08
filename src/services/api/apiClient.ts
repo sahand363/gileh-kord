@@ -7,6 +7,9 @@ import type {
 } from '../../models/types';
 import {
   getActiveCsrfToken,
+  getActiveSessionToken,
+  getConfiguredServerUrl,
+  getOperatingMode,
   hasActiveSessionMeta,
   isAppAuthenticated,
   isManagerUnlocked
@@ -64,11 +67,32 @@ export class ApiClient {
     }
     if (options.enabled !== undefined) {
       this.enabled = options.enabled;
+      if (!this.enabled) {
+        backendStatus.set('disconnected');
+      }
+    }
+  }
+
+  public syncFromOperatingConfig(): void {
+    const mode = getOperatingMode();
+    const url = getConfiguredServerUrl();
+    if (mode === 'standalone') {
+      this.enabled = false;
+      this.baseUrl = '';
+      backendStatus.set('disconnected');
+    } else if (mode === 'server') {
+      this.enabled = true;
+      this.baseUrl = url;
     }
   }
 
   public isEnabled(): boolean {
+    if (getOperatingMode() === 'standalone') return false;
     return this.enabled;
+  }
+
+  public getBaseUrl(): string {
+    return this.baseUrl || getConfiguredServerUrl();
   }
 
   public getLastKnownRevision(): number | null {
@@ -83,7 +107,8 @@ export class ApiClient {
 
   private buildUrl(path: string): string {
     const cleanPath = path.startsWith('/') ? path : `/${path}`;
-    return `${this.baseUrl}${cleanPath}`;
+    const activeBase = this.getBaseUrl();
+    return `${activeBase}${cleanPath}`;
   }
 
   private async request<T>(
@@ -98,18 +123,24 @@ export class ApiClient {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
+    const token = getActiveSessionToken();
     const csrfToken = getActiveCsrfToken();
     const securityHeaders: Record<string, string> = {
       'X-Requested-With': 'XMLHttpRequest'
     };
+    if (token) {
+      securityHeaders['Authorization'] = `Bearer ${token}`;
+    }
     if (csrfToken) {
       securityHeaders['X-CSRF-Token'] = csrfToken;
     }
 
+    const activeBase = this.getBaseUrl();
+
     try {
       const response = await fetch(this.buildUrl(path), {
         ...init,
-        credentials: 'same-origin',
+        credentials: activeBase ? 'include' : 'same-origin',
         headers: {
           'Content-Type': 'application/json',
           Accept: 'application/json',
@@ -152,9 +183,7 @@ export class ApiClient {
       }
       return data as T;
     } catch (err) {
-      if (err instanceof Error && err.name === 'AbortError') {
-        backendStatus.set('disconnected');
-      }
+      backendStatus.set('disconnected');
       throw err;
     } finally {
       clearTimeout(timer);
@@ -162,6 +191,10 @@ export class ApiClient {
   }
 
   public async checkHealth(): Promise<boolean> {
+    if (!this.isEnabled()) {
+      backendStatus.set('disconnected');
+      return false;
+    }
     try {
       backendStatus.set('checking');
       const res = await this.request<{ status: string }>('/api/health', {
@@ -177,7 +210,7 @@ export class ApiClient {
   }
 
   public async getSyncMeta(): Promise<ServerSyncMeta | null> {
-    if (!hasActiveSessionMeta()) return null;
+    if (!this.isEnabled() || !hasActiveSessionMeta()) return null;
     try {
       const meta = await this.request<ServerSyncMeta>('/api/sync/meta', {
         method: 'GET'
@@ -218,7 +251,6 @@ export class ApiClient {
     updatedAt: string;
     snapshotId: string;
   }> {
-    // Ensure we always send a valid integer baseRevision
     if (this.lastKnownRevision === null) {
       const meta = await this.getSyncMeta();
       if (meta && typeof meta.revision === 'number' && Number.isInteger(meta.revision)) {
@@ -248,6 +280,7 @@ export class ApiClient {
   }
 
   public async listSnapshots(): Promise<SyncSnapshotMeta[]> {
+    if (!this.isEnabled()) return [];
     const res = await this.request<{ items: SyncSnapshotMeta[] }>(
       '/api/sync/history',
       { method: 'GET' }
@@ -275,7 +308,7 @@ export class ApiClient {
   }
 
   public async listProducts(query = ''): Promise<Product[]> {
-    if (!hasActiveSessionMeta()) return [];
+    if (!this.isEnabled() || !hasActiveSessionMeta()) return [];
     const q = query ? `?query=${encodeURIComponent(query)}` : '';
     const res = await this.request<{ items: Product[] }>(`/api/products${q}`);
     return res.items || [];
@@ -289,7 +322,7 @@ export class ApiClient {
     supplierName?: string;
     pageSize?: number;
   }): Promise<Purchase[]> {
-    if (!hasActiveSessionMeta()) return [];
+    if (!this.isEnabled() || !hasActiveSessionMeta()) return [];
     const search = new URLSearchParams();
     if (params?.query) search.set('query', params.query);
     if (params?.dateFrom) search.set('date_from', params.dateFrom);
