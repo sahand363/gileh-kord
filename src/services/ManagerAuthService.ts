@@ -3,62 +3,59 @@ import { dbClient, requestToPromise } from './db';
 import type { ManagerAuthRecord } from '../models/types';
 
 const MANAGER_AUTH_KEY = 'manager_credentials';
-const SESSION_TOKEN_STORAGE_KEY = 'gk_session_token';
+const LEGACY_TOKEN_STORAGE_KEY = 'gk_session_token';
 const SESSION_CSRF_STORAGE_KEY = 'gk_session_csrf';
 const SESSION_USER_STORAGE_KEY = 'gk_session_user';
 const SESSION_EXPIRES_STORAGE_KEY = 'gk_session_expires';
 
-function purgeLegacyAppAuthCookie(): void {
-  if (typeof document === 'undefined') return;
-  document.cookie = 'gk_app_auth=; path=/; max-age=0; SameSite=Lax';
+function purgeLegacyTokensAndCookies(): void {
+  if (typeof document !== 'undefined') {
+    document.cookie = 'gk_app_auth=; path=/; max-age=0; SameSite=Lax';
+  }
+  if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
+    try {
+      localStorage.removeItem(LEGACY_TOKEN_STORAGE_KEY);
+    } catch {
+      // Ignore
+    }
+  }
 }
 
-interface StoredClientSession {
-  token: string;
+interface StoredClientSessionMeta {
   csrfToken: string;
   username: string;
   expiresAt: number;
 }
 
-function readStoredSession(): StoredClientSession | null {
-  purgeLegacyAppAuthCookie();
+function readStoredSessionMeta(): StoredClientSessionMeta | null {
+  purgeLegacyTokensAndCookies();
   if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
     return null;
   }
   try {
-    const token = localStorage.getItem(SESSION_TOKEN_STORAGE_KEY) || '';
     const csrfToken = localStorage.getItem(SESSION_CSRF_STORAGE_KEY) || '';
     const username = localStorage.getItem(SESSION_USER_STORAGE_KEY) || '';
     const expiresAt = Number(localStorage.getItem(SESSION_EXPIRES_STORAGE_KEY) || '0');
-    // Require signed token format (<sessionId>.<hmac>) and non-expired timestamp
-    if (
-      !token ||
-      !token.includes('.') ||
-      !csrfToken ||
-      !username ||
-      (expiresAt > 0 && expiresAt <= Date.now())
-    ) {
-      clearStoredSession();
+    if (!csrfToken || !username || (expiresAt > 0 && expiresAt <= Date.now())) {
+      clearStoredSessionMeta();
       return null;
     }
-    return { token, csrfToken, username, expiresAt };
+    return { csrfToken, username, expiresAt };
   } catch {
     return null;
   }
 }
 
-function saveStoredSession(
-  token: string,
+function saveStoredSessionMeta(
   csrfToken: string,
   username: string,
   expiresAt: number
 ): void {
-  purgeLegacyAppAuthCookie();
+  purgeLegacyTokensAndCookies();
   if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
     return;
   }
   try {
-    localStorage.setItem(SESSION_TOKEN_STORAGE_KEY, token);
     localStorage.setItem(SESSION_CSRF_STORAGE_KEY, csrfToken);
     localStorage.setItem(SESSION_USER_STORAGE_KEY, username);
     localStorage.setItem(SESSION_EXPIRES_STORAGE_KEY, String(expiresAt));
@@ -67,13 +64,12 @@ function saveStoredSession(
   }
 }
 
-function clearStoredSession(): void {
-  purgeLegacyAppAuthCookie();
+function clearStoredSessionMeta(): void {
+  purgeLegacyTokensAndCookies();
   if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
     return;
   }
   try {
-    localStorage.removeItem(SESSION_TOKEN_STORAGE_KEY);
     localStorage.removeItem(SESSION_CSRF_STORAGE_KEY);
     localStorage.removeItem(SESSION_USER_STORAGE_KEY);
     localStorage.removeItem(SESSION_EXPIRES_STORAGE_KEY);
@@ -82,14 +78,13 @@ function clearStoredSession(): void {
   }
 }
 
-export function getActiveSessionToken(): string {
-  const session = readStoredSession();
-  return session ? session.token : '';
+export function getActiveCsrfToken(): string {
+  const meta = readStoredSessionMeta();
+  return meta ? meta.csrfToken : '';
 }
 
-export function getActiveCsrfToken(): string {
-  const session = readStoredSession();
-  return session ? session.csrfToken : '';
+export function hasActiveSessionMeta(): boolean {
+  return Boolean(readStoredSessionMeta());
 }
 
 function generateRandomSaltHex(byteLength = 16): string {
@@ -122,10 +117,6 @@ function constantTimeHexCompare(a: string, b: string): boolean {
   return diff === 0;
 }
 
-/**
- * Derives a salted password hash using Web Crypto PBKDF2-HMAC-SHA256 (100,000 iterations)
- * when available, with a deterministic multi-round fallback for non-SubtleCrypto environments.
- */
 export async function deriveSaltedPasswordHashAsync(
   password: string,
   saltHex: string
@@ -196,13 +187,13 @@ export function deriveLocalPasswordHash(password: string, salt: string): string 
     .join('');
 }
 
-const initialSession = readStoredSession();
+const initialMeta = readStoredSessionMeta();
 
-export const isAppAuthenticated = writable<boolean>(Boolean(initialSession));
+export const isAppAuthenticated = writable<boolean>(Boolean(initialMeta));
 export const isManagerUnlocked = writable<boolean>(false);
 export const isManagerConfigured = writable<boolean>(false);
 export const activeManagerUsername = writable<string>(
-  initialSession ? initialSession.username : ''
+  initialMeta ? initialMeta.username : ''
 );
 
 export class ManagerAuthService {
@@ -261,11 +252,11 @@ export class ManagerAuthService {
   }
 
   public async checkInitialized(): Promise<boolean> {
-    purgeLegacyAppAuthCookie();
-    const storedSession = readStoredSession();
-    if (storedSession) {
+    purgeLegacyTokensAndCookies();
+    const storedMeta = readStoredSessionMeta();
+    if (storedMeta) {
       isAppAuthenticated.set(true);
-      activeManagerUsername.set(storedSession.username);
+      activeManagerUsername.set(storedMeta.username);
 
       if (typeof fetch !== 'undefined') {
         try {
@@ -273,7 +264,7 @@ export class ManagerAuthService {
             method: 'GET',
             headers: {
               Accept: 'application/json',
-              Authorization: `Bearer ${storedSession.token}`
+              'X-Requested-With': 'XMLHttpRequest'
             },
             credentials: 'same-origin'
           });
@@ -283,17 +274,16 @@ export class ManagerAuthService {
           }
           if (res.ok) {
             const data = await res.json().catch(() => null);
-            if (data && data.csrfToken) {
-              saveStoredSession(
-                storedSession.token,
-                String(data.csrfToken),
-                String(data.username || storedSession.username),
-                Number(data.expiresAt || storedSession.expiresAt)
+            if (data && typeof data.csrfToken === 'string') {
+              saveStoredSessionMeta(
+                data.csrfToken,
+                String(data.username || storedMeta.username),
+                Number(data.expiresAt || storedMeta.expiresAt)
               );
             }
           }
         } catch {
-          // Offline: keep valid signed session until expiry
+          // Offline: retain locally verified session metadata until expiry
         }
       }
     } else {
@@ -302,7 +292,7 @@ export class ManagerAuthService {
 
     const rec = await this.getRecord();
     if (rec && rec.username) {
-      if (!storedSession) {
+      if (!storedMeta) {
         activeManagerUsername.set(rec.username);
       }
       isManagerConfigured.set(true);
@@ -349,7 +339,6 @@ export class ManagerAuthService {
           res.ok &&
           data &&
           data.ok &&
-          typeof data.token === 'string' &&
           typeof data.csrfToken === 'string'
         ) {
           const verifiedUser = String(data.username || cleanUser);
@@ -357,12 +346,7 @@ export class ManagerAuthService {
             Number(data.expiresAt) ||
             Date.now() + rememberDays * 24 * 60 * 60 * 1000;
 
-          saveStoredSession(
-            data.token,
-            data.csrfToken,
-            verifiedUser,
-            expiresAt
-          );
+          saveStoredSessionMeta(data.csrfToken, verifiedUser, expiresAt);
           await this.saveVerifiedLocalCache(verifiedUser, password);
           activeManagerUsername.set(verifiedUser);
           isManagerConfigured.set(true);
@@ -479,20 +463,18 @@ export class ManagerAuthService {
   }
 
   public logoutWholeApp(): void {
-    const token = getActiveSessionToken();
     const csrfToken = getActiveCsrfToken();
-    if (token && typeof fetch !== 'undefined') {
+    if (csrfToken && typeof fetch !== 'undefined') {
       void fetch('/api/auth/logout', {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${token}`,
           'X-CSRF-Token': csrfToken,
           'X-Requested-With': 'XMLHttpRequest'
         },
         credentials: 'same-origin'
       }).catch(() => {});
     }
-    clearStoredSession();
+    clearStoredSessionMeta();
     isManagerUnlocked.set(false);
     isAppAuthenticated.set(false);
   }
