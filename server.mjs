@@ -28,6 +28,14 @@ const TRUSTED_PROXY_IPS = new Set([
     .filter(Boolean)
 ]);
 
+// Allowed Origins for the Capacitor Android APK WebView
+const MOBILE_APP_ORIGINS = new Set([
+  'http://localhost',
+  'https://localhost',
+  'capacitor://localhost',
+  'http://127.0.0.1'
+]);
+
 fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
 try {
   fs.chmodSync(DATA_DIR, 0o700);
@@ -92,15 +100,29 @@ const MIME_TYPES = {
 
 const BASE_SECURITY_HEADERS = {
   'Content-Security-Policy':
-    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' http: https:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
   'Strict-Transport-Security': 'max-age=63072000; includeSubDomains; preload',
   'Referrer-Policy': 'strict-origin-when-cross-origin',
   'X-Content-Type-Options': 'nosniff',
   'X-Frame-Options': 'DENY',
   'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=()',
   'Cross-Origin-Opener-Policy': 'same-origin',
-  'Cross-Origin-Resource-Policy': 'same-origin'
+  'Cross-Origin-Resource-Policy': 'cross-origin'
 };
+
+function getCorsHeaders(req) {
+  const origin = (req.headers.origin || '').toString().trim();
+  if (!origin) return {};
+  return {
+    'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Credentials': 'true',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+    'Access-Control-Allow-Headers':
+      'Content-Type, Accept, Authorization, X-CSRF-Token, X-Requested-With',
+    'Access-Control-Max-Age': '86400',
+    Vary: 'Origin'
+  };
+}
 
 // ============================================================================
 // 1. Concurrency Mutex & Atomic File Operations
@@ -217,7 +239,7 @@ function isRequestSecure(req) {
 }
 
 // ============================================================================
-// 3. Bounded Rate Limiter with Automatic Expiration & Eviction
+// 3. Bounded Rate Limiter
 // ============================================================================
 
 class BoundedRateLimiter {
@@ -291,7 +313,7 @@ const mutationRateLimiter = new BoundedRateLimiter(MAX_MUTATION_REQUESTS_PER_MIN
 const generalRateLimiter = new BoundedRateLimiter(MAX_GENERAL_REQUESTS_PER_MIN, API_WINDOW_MS);
 
 // ============================================================================
-// 4. Structured Audit Logging (Zero Credential / Token Exposure)
+// 4. Structured Audit Logging
 // ============================================================================
 
 const SENSITIVE_LOG_KEYS = new Set([
@@ -931,7 +953,7 @@ function loadSessionsIntoMemory() {
       }
     }
   } catch {
-    // Start with empty map if file is unreadable
+    // Start with empty map
   }
   return inMemorySessions;
 }
@@ -1009,13 +1031,14 @@ function parseCookies(cookieHeader) {
 }
 
 function extractSignedToken(req) {
+  const authHeader = req.headers['authorization'] || '';
+  if (typeof authHeader === 'string' && authHeader.toLowerCase().startsWith('bearer ')) {
+    const bearer = authHeader.slice(7).trim();
+    if (bearer) return bearer;
+  }
   const cookies = parseCookies(req.headers.cookie);
   if (cookies.gk_session) {
     return cookies.gk_session;
-  }
-  const authHeader = req.headers['authorization'] || '';
-  if (typeof authHeader === 'string' && authHeader.toLowerCase().startsWith('bearer ')) {
-    return authHeader.slice(7).trim();
   }
   return null;
 }
@@ -1047,7 +1070,7 @@ function verifyCsrfProtection(req, activeSession) {
   const origin = (req.headers.origin || '').toString().trim();
   const referer = (req.headers.referer || '').toString().trim();
 
-  if (origin && host) {
+  if (origin && host && !MOBILE_APP_ORIGINS.has(origin)) {
     try {
       const originHost = new URL(origin).host;
       if (originHost !== host) {
@@ -1056,10 +1079,13 @@ function verifyCsrfProtection(req, activeSession) {
     } catch {
       return { ok: false, reason: 'Malformed Origin header' };
     }
-  } else if (referer && host) {
+  } else if (!origin && referer && host) {
     try {
-      const refererHost = new URL(referer).host;
-      if (refererHost !== host) {
+      const refererUrl = new URL(referer);
+      if (
+        !MOBILE_APP_ORIGINS.has(refererUrl.origin) &&
+        refererUrl.host !== host
+      ) {
         return { ok: false, reason: 'Cross-origin request rejected (Referer mismatch)' };
       }
     } catch {
@@ -1085,7 +1111,7 @@ function buildCookieHeaders(req, signedToken, maxAgeSeconds) {
     `gk_session=${encodeURIComponent(signedToken)}`,
     'Path=/',
     'HttpOnly',
-    'SameSite=Strict',
+    'SameSite=Lax',
     `Max-Age=${maxAgeSeconds}`
   ];
   if (secureFlag) {
@@ -1095,7 +1121,7 @@ function buildCookieHeaders(req, signedToken, maxAgeSeconds) {
     'gk_app_auth=',
     'Path=/',
     'HttpOnly',
-    'SameSite=Strict',
+    'SameSite=Lax',
     'Max-Age=0',
     ...(secureFlag ? ['Secure'] : [])
   ];
@@ -1103,7 +1129,7 @@ function buildCookieHeaders(req, signedToken, maxAgeSeconds) {
 }
 
 // ============================================================================
-// 8. Consistent & Recoverable Data + Snapshot Persistence (Checksummed)
+// 8. Consistent & Recoverable Data + Snapshot Persistence
 // ============================================================================
 
 function computeStateChecksum(stateObj) {
@@ -1172,7 +1198,6 @@ function readSnapshots() {
 }
 
 function readServerStore() {
-  // 1. Try primary store file
   if (fs.existsSync(SERVER_STORE_FILE)) {
     try {
       return parseAndVerifyStoreData(fs.readFileSync(SERVER_STORE_FILE, 'utf-8'));
@@ -1183,7 +1208,6 @@ function readServerStore() {
     }
   }
 
-  // 2. Fallback to backup store file (.bak)
   if (fs.existsSync(SERVER_STORE_BAK_FILE)) {
     try {
       const recovered = parseAndVerifyStoreData(
@@ -1193,17 +1217,12 @@ function readServerStore() {
         ...recovered,
         checksum: computeStateChecksum(recovered)
       });
-      writeAuditLog('STORE_AUTO_RECOVERED', 'system', '127.0.0.1', {
-        source: 'server_synced_store.json.bak',
-        revision: recovered.revision
-      });
       return recovered;
     } catch {
       // Proceed to snapshot recovery
     }
   }
 
-  // 3. Fallback to most recent verified snapshot in server_snapshots.json
   const snaps = readSnapshots();
   for (const snap of snaps) {
     try {
@@ -1211,10 +1230,6 @@ function readServerStore() {
       writeFileAtomic(SERVER_STORE_FILE, {
         ...recovered,
         checksum: computeStateChecksum(recovered)
-      });
-      writeAuditLog('STORE_AUTO_RECOVERED', 'system', '127.0.0.1', {
-        source: `snapshot:${snap.id}`,
-        revision: recovered.revision
       });
       return recovered;
     } catch {
@@ -1241,10 +1256,6 @@ function readServerStore() {
   };
 }
 
-/**
- * Commits both the write-ahead snapshot and the primary store + .bak atomically
- * with SHA-256 checksums so interrupted writes are always recoverable.
- */
 function commitStateAndSnapshot(actor, actionSummary, stateData) {
   const checksum = computeStateChecksum(stateData);
   const envelope = {
@@ -1252,7 +1263,6 @@ function commitStateAndSnapshot(actor, actionSummary, stateData) {
     checksum
   };
 
-  // Step 1: Write-ahead snapshot commit
   const snapshots = readSnapshots();
   const snap = {
     id: `snap_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`,
@@ -1272,7 +1282,6 @@ function commitStateAndSnapshot(actor, actionSummary, stateData) {
   snapshots.unshift(snap);
   writeFileAtomic(SNAPSHOTS_FILE, snapshots.slice(0, MAX_SNAPSHOTS));
 
-  // Step 2: Commit primary store and update recovery .bak
   writeFileAtomic(SERVER_STORE_FILE, envelope);
   writeFileAtomic(SERVER_STORE_BAK_FILE, envelope);
 
@@ -1297,9 +1306,10 @@ function readRawBody(req) {
   });
 }
 
-function sendJson(res, status, payload, extraHeaders = {}) {
+function sendJson(req, res, status, payload, extraHeaders = {}) {
   res.writeHead(status, {
     ...BASE_SECURITY_HEADERS,
+    ...getCorsHeaders(req),
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
     ...extraHeaders
@@ -1314,7 +1324,7 @@ function sendJson(res, status, payload, extraHeaders = {}) {
 const server = http.createServer(async (req, res) => {
   const rawUrl = req.url || '/';
   if (rawUrl.includes('\0') || rawUrl.includes('%00')) {
-    sendJson(res, 400, { error: { code: 400, message: 'درخواست نامعتبر است.' } });
+    sendJson(req, res, 400, { error: { code: 400, message: 'درخواست نامعتبر است.' } });
     return;
   }
 
@@ -1322,7 +1332,7 @@ const server = http.createServer(async (req, res) => {
   try {
     reqUrl = new URL(rawUrl, `http://${req.headers.host || 'localhost'}`);
   } catch {
-    sendJson(res, 400, { error: { code: 400, message: 'آدرس درخواست نامعتبر است.' } });
+    sendJson(req, res, 400, { error: { code: 400, message: 'آدرس درخواست نامعتبر است.' } });
     return;
   }
 
@@ -1330,7 +1340,17 @@ const server = http.createServer(async (req, res) => {
   try {
     pathname = decodeURIComponent(reqUrl.pathname);
   } catch {
-    sendJson(res, 400, { error: { code: 400, message: 'مسیر درخواست نامعتبر است.' } });
+    sendJson(req, res, 400, { error: { code: 400, message: 'مسیر درخواست نامعتبر است.' } });
+    return;
+  }
+
+  // Handle CORS Preflight (OPTIONS) immediately for Android APK & Web
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, {
+      ...BASE_SECURITY_HEADERS,
+      ...getCorsHeaders(req)
+    });
+    res.end();
     return;
   }
 
@@ -1339,14 +1359,13 @@ const server = http.createServer(async (req, res) => {
   const isLocalLoopback =
     socketIp === '127.0.0.1' || socketIp === '::1' || socketIp === '::ffff:127.0.0.1';
 
-  // Enforce HTTPS for sensitive operations when ENFORCE_HTTPS is enabled
   if (
     ENFORCE_HTTPS &&
     !isRequestSecure(req) &&
     !(isLocalLoopback && pathname === '/api/health')
   ) {
     if (pathname.startsWith('/api/')) {
-      sendJson(res, 403, {
+      sendJson(req, res, 403, {
         error: {
           code: 403,
           message: 'برای انجام عملیات حساس، ارتباط امن HTTPS الزامی است.'
@@ -1368,7 +1387,7 @@ const server = http.createServer(async (req, res) => {
   if (pathname.startsWith('/api/')) {
     const genLimit = generalRateLimiter.consume(clientIp);
     if (genLimit.limited) {
-      sendJson(res, 429, {
+      sendJson(req, res, 429, {
         error: {
           code: 429,
           message: 'تعداد درخواست‌ها بیش از حد مجاز است. لطفاً کمی صبر کنید.'
@@ -1382,7 +1401,7 @@ const server = http.createServer(async (req, res) => {
       try {
         rawBody = await readRawBody(req);
       } catch {
-        sendJson(res, 400, {
+        sendJson(req, res, 400, {
           error: { code: 400, message: 'بدنه درخواست نامعتبر یا بیش از حد بزرگ است.' }
         });
         return;
@@ -1390,7 +1409,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (pathname === '/api/health' || pathname === '/api/status') {
-      sendJson(res, 200, {
+      sendJson(req, res, 200, {
         app: 'GILEH KORD',
         status: 'ok',
         timestamp: new Date().toISOString()
@@ -1401,7 +1420,7 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/auth/login' && req.method === 'POST') {
       if (loginRateLimiter.isBlocked(clientIp)) {
         writeAuditLog('AUTH_LOGIN_RATE_LIMITED', 'anonymous', clientIp);
-        sendJson(res, 429, {
+        sendJson(req, res, 429, {
           ok: false,
           error: {
             code: 429,
@@ -1421,7 +1440,7 @@ const server = http.createServer(async (req, res) => {
         const verification = verifyManagerCredentials(user, pass);
         if (verification.reason === 'not_configured') {
           writeAuditLog('AUTH_LOGIN_UNCONFIGURED', user || 'anonymous', clientIp);
-          sendJson(res, 503, {
+          sendJson(req, res, 503, {
             ok: false,
             error: {
               code: 503,
@@ -1437,7 +1456,7 @@ const server = http.createServer(async (req, res) => {
           writeAuditLog('AUTH_LOGIN_FAILED', user || 'anonymous', clientIp, {
             reason: verification.reason
           });
-          sendJson(res, 401, {
+          sendJson(req, res, 401, {
             ok: false,
             error: {
               code: 401,
@@ -1464,18 +1483,20 @@ const server = http.createServer(async (req, res) => {
         });
 
         sendJson(
+          req,
           res,
           200,
           {
             ok: true,
             username: verification.username,
+            token: session.signedToken,
             csrfToken: session.csrfToken,
             expiresAt: session.expiresAt
           },
           { 'Set-Cookie': cookieHeaders }
         );
       } catch {
-        sendJson(res, 400, {
+        sendJson(req, res, 400, {
           ok: false,
           error: { code: 400, message: 'ساختار درخواست ورود نامعتبر است.' }
         });
@@ -1489,7 +1510,7 @@ const server = http.createServer(async (req, res) => {
         path: pathname,
         method: req.method
       });
-      sendJson(res, 401, {
+      sendJson(req, res, 401, {
         error: {
           code: 401,
           message: 'نشست کاربری معتبر نیست یا منقضی شده است. لطفاً مجدداً وارد شوید.'
@@ -1504,7 +1525,7 @@ const server = http.createServer(async (req, res) => {
         path: pathname,
         reason: csrfCheck.reason
       });
-      sendJson(res, 403, {
+      sendJson(req, res, 403, {
         error: {
           code: 403,
           message: csrfCheck.reason || 'درخواست به دلیل محافظت امنیتی CSRF رد شد.'
@@ -1518,7 +1539,7 @@ const server = http.createServer(async (req, res) => {
         `${clientIp}:${activeSession.username}`
       );
       if (mutLimit.limited) {
-        sendJson(res, 429, {
+        sendJson(req, res, 429, {
           error: {
             code: 429,
             message: 'تعداد عملیات‌های ثبت/همگام‌سازی بیش از حد مجاز در دقیقه است.'
@@ -1529,7 +1550,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (pathname === '/api/auth/session' && req.method === 'GET') {
-      sendJson(res, 200, {
+      sendJson(req, res, 200, {
         ok: true,
         username: activeSession.username,
         csrfToken: activeSession.csrfToken,
@@ -1542,13 +1563,13 @@ const server = http.createServer(async (req, res) => {
       await revokeServerSession(activeSession.sessionId);
       writeAuditLog('AUTH_LOGOUT', activeSession.username, clientIp);
       const clearCookies = buildCookieHeaders(req, '', 0);
-      sendJson(res, 200, { ok: true }, { 'Set-Cookie': clearCookies });
+      sendJson(req, res, 200, { ok: true }, { 'Set-Cookie': clearCookies });
       return;
     }
 
     if (pathname === '/api/sync/meta' && req.method === 'GET') {
       const store = readServerStore();
-      sendJson(res, 200, {
+      sendJson(req, res, 200, {
         revision: store.revision,
         updatedAt: store.updatedAt,
         lastActor: store.lastActor,
@@ -1568,7 +1589,7 @@ const server = http.createServer(async (req, res) => {
       writeAuditLog('SYNC_STATE_PULL', activeSession.username, clientIp, {
         revision: store.revision
       });
-      sendJson(res, 200, {
+      sendJson(req, res, 200, {
         revision: store.revision,
         updatedAt: store.updatedAt || new Date().toISOString(),
         state: {
@@ -1589,7 +1610,6 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // Atomic Sync Push & Backup Import with Strict Revision & forceOverwrite Verification
     if (
       (pathname === '/api/sync/push' || pathname === '/api/import/backup') &&
       req.method === 'POST'
@@ -1605,7 +1625,7 @@ const server = http.createServer(async (req, res) => {
               body.forceOverwrite !== undefined &&
               typeof body.forceOverwrite !== 'boolean'
             ) {
-              sendJson(res, 400, {
+              sendJson(req, res, 400, {
                 error: {
                   code: 400,
                   message: 'فیلد forceOverwrite باید صرفاً یک مقدار بولین (true/false) باشد.'
@@ -1616,12 +1636,7 @@ const server = http.createServer(async (req, res) => {
 
             const forceOverwrite = body.forceOverwrite === true;
             if (forceOverwrite && activeSession.role !== 'manager') {
-              writeAuditLog(
-                'SYNC_FORCE_OVERWRITE_DENIED',
-                activeSession.username,
-                clientIp
-              );
-              sendJson(res, 403, {
+              sendJson(req, res, 403, {
                 error: {
                   code: 403,
                   message: 'اجازه رونویسی اجباری (forceOverwrite) فقط برای مدیر مجاز است.'
@@ -1635,7 +1650,7 @@ const server = http.createServer(async (req, res) => {
               !Number.isInteger(body.baseRevision) ||
               body.baseRevision < 0
             ) {
-              sendJson(res, 400, {
+              sendJson(req, res, 400, {
                 error: {
                   code: 400,
                   message:
@@ -1645,7 +1660,11 @@ const server = http.createServer(async (req, res) => {
               return;
             }
 
-            if (!forceOverwrite && body.baseRevision !== currentStore.revision) {
+            if (
+              !forceOverwrite &&
+              currentStore.revision > 0 &&
+              body.baseRevision !== currentStore.revision
+            ) {
               writeAuditLog(
                 'SYNC_CONFLICT_REJECTED',
                 activeSession.username,
@@ -1655,7 +1674,7 @@ const server = http.createServer(async (req, res) => {
                   serverRevision: currentStore.revision
                 }
               );
-              sendJson(res, 409, {
+              sendJson(req, res, 409, {
                 error: {
                   code: 409,
                   message:
@@ -1669,9 +1688,8 @@ const server = http.createServer(async (req, res) => {
               return;
             }
           } else {
-            // /api/import/backup requires manager role
             if (activeSession.role !== 'manager') {
-              sendJson(res, 403, {
+              sendJson(req, res, 403, {
                 error: { code: 403, message: 'درون‌ریزی فایل پشتیبان نیازمند دسترسی مدیر است.' }
               });
               return;
@@ -1709,7 +1727,7 @@ const server = http.createServer(async (req, res) => {
             }
           );
 
-          sendJson(res, 200, {
+          sendJson(req, res, 200, {
             ok: true,
             imported: true,
             revision: nextRevision,
@@ -1723,7 +1741,7 @@ const server = http.createServer(async (req, res) => {
         } catch (err) {
           const msg =
             err instanceof Error ? err.message : 'ساختار داده ارسالی معتبر نیست.';
-          sendJson(res, 400, {
+          sendJson(req, res, 400, {
             error: { code: 400, message: msg }
           });
         }
@@ -1740,13 +1758,13 @@ const server = http.createServer(async (req, res) => {
         actionSummary: s.actionSummary,
         counts: s.counts
       }));
-      sendJson(res, 200, { items: snaps });
+      sendJson(req, res, 200, { items: snaps });
       return;
     }
 
     if (pathname === '/api/sync/revert' && req.method === 'POST') {
       if (activeSession.role !== 'manager') {
-        sendJson(res, 403, {
+        sendJson(req, res, 403, {
           error: { code: 403, message: 'بازگردانی نسخه نیازمند دسترسی مدیر است.' }
         });
         return;
@@ -1757,7 +1775,7 @@ const server = http.createServer(async (req, res) => {
           const body = JSON.parse(rawBody.toString('utf-8') || '{}');
           const snapId = sanitizeText(body.snapshotId, 96);
           if (!isValidSafeId(snapId)) {
-            sendJson(res, 400, {
+            sendJson(req, res, 400, {
               error: { code: 400, message: 'شناسه نسخه نامعتبر است.' }
             });
             return;
@@ -1767,7 +1785,7 @@ const server = http.createServer(async (req, res) => {
           const snaps = readSnapshots();
           const target = snaps.find((s) => s.id === snapId);
           if (!target || !target.state) {
-            sendJson(res, 404, {
+            sendJson(req, res, 404, {
               error: { code: 404, message: 'نسخه مورد نظر در تاریخچه یافت نشد.' }
             });
             return;
@@ -1798,7 +1816,7 @@ const server = http.createServer(async (req, res) => {
             newRevision: nextRevision
           });
 
-          sendJson(res, 200, {
+          sendJson(req, res, 200, {
             ok: true,
             revision: nextRevision,
             updatedAt: now,
@@ -1819,7 +1837,7 @@ const server = http.createServer(async (req, res) => {
           });
         } catch (err) {
           const msg = err instanceof Error ? err.message : 'خطا در بازگردانی نسخه';
-          sendJson(res, 400, { error: { code: 400, message: msg } });
+          sendJson(req, res, 400, { error: { code: 400, message: msg } });
         }
       });
       return;
@@ -1827,13 +1845,13 @@ const server = http.createServer(async (req, res) => {
 
     if (pathname === '/api/products' && req.method === 'GET') {
       const store = readServerStore();
-      sendJson(res, 200, { revision: store.revision, items: store.products });
+      sendJson(req, res, 200, { revision: store.revision, items: store.products });
       return;
     }
 
     if (pathname === '/api/purchases' && req.method === 'GET') {
       const store = readServerStore();
-      sendJson(res, 200, { revision: store.revision, items: store.purchases });
+      sendJson(req, res, 200, { revision: store.revision, items: store.purchases });
       return;
     }
 
@@ -1863,14 +1881,14 @@ const server = http.createServer(async (req, res) => {
             revision: nextRevision
           });
 
-          sendJson(res, 201, {
+          sendJson(req, res, 201, {
             revision: nextRevision,
             purchase: newPurchase,
             product: null
           });
         } catch (err) {
           const msg = err instanceof Error ? err.message : 'خطا در ثبت خرید';
-          sendJson(res, 400, { error: { code: 400, message: msg } });
+          sendJson(req, res, 400, { error: { code: 400, message: msg } });
         }
       });
       return;
@@ -1881,7 +1899,7 @@ const server = http.createServer(async (req, res) => {
         try {
           const id = sanitizeText(pathname.replace('/api/purchases/', ''), 96);
           if (!isValidSafeId(id)) {
-            sendJson(res, 400, {
+            sendJson(req, res, 400, {
               error: { code: 400, message: 'شناسه خرید نامعتبر است' }
             });
             return;
@@ -1890,7 +1908,7 @@ const server = http.createServer(async (req, res) => {
           const store = readServerStore();
           const idx = store.purchases.findIndex((p) => p.id === id);
           if (idx === -1) {
-            sendJson(res, 404, {
+            sendJson(req, res, 404, {
               error: { code: 404, message: 'فاکتور خرید یافت نشد' }
             });
             return;
@@ -1915,21 +1933,21 @@ const server = http.createServer(async (req, res) => {
             revision: nextRevision
           });
 
-          sendJson(res, 200, { ...updated, revision: nextRevision });
+          sendJson(req, res, 200, { ...updated, revision: nextRevision });
         } catch (err) {
           const msg = err instanceof Error ? err.message : 'خطا در ویرایش خرید';
-          sendJson(res, 400, { error: { code: 400, message: msg } });
+          sendJson(req, res, 400, { error: { code: 400, message: msg } });
         }
       });
       return;
     }
 
-    sendJson(res, 404, { error: { code: 404, message: 'مسیر API یافت نشد' } });
+    sendJson(req, res, 404, { error: { code: 404, message: 'مسیر API یافت نشد' } });
     return;
   }
 
   // ============================================================================
-  // Static File Serving with Strict Path Traversal & Security Headers
+  // Static File Serving
   // ============================================================================
 
   const segments = pathname.split('/').filter(Boolean);
